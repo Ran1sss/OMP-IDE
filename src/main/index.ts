@@ -1,6 +1,6 @@
 import { app, BrowserWindow, ipcMain, dialog, shell, Menu } from "electron";
 import { join, dirname } from "node:path";
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { registerFsHandlers, disposeWatchers } from "./fs-service";
 import { registerPtyHandlers, disposePtys } from "./pty-service";
 import { registerSearchHandlers } from "./search-service";
@@ -89,7 +89,11 @@ app.whenReady().then(() => {
   });
   ipcMain.on("win:openWorkspaceWindow", (_e, path: string) => createWindow(path));
 
-  createWindow();
+  // CLI: `OMP IDE.exe <folder>` opens that folder as the workspace.
+  const dirArg = process.argv
+    .slice(1)
+    .find((a) => !a.startsWith("-") && existsSync(a) && statSync(a).isDirectory());
+  createWindow(dirArg);
 });
 
 let quitting = false;
