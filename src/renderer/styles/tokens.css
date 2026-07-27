@@ -1,0 +1,41 @@
+:root {
+  /* Depth ladder — backgrounds, darkest = deepest layer */
+  --void:        #05060a;  /* app background, title bar */
+  --bg-0:        #0a0c12;  /* panels */
+  --bg-1:        #10131c;  /* cards, inputs, editor gutter zone */
+  --bg-2:        #171b27;  /* hover surfaces, active tab */
+  --line:        #232837;  /* hairline borders */
+  --line-bright: #323950;  /* focused/active borders */
+
+  /* Text */
+  --text-hi:     #eef1f8;
+  --text-mid:    #9aa3b8;
+  --text-low:    #5c6478;
+
+  /* Energy palette — light = meaning */
+  --energy:      #55e6c1;  /* AGENT */
+  --power:       #5ea2ff;  /* USER/SYSTEM primary */
+  --flare:       #ff9e5e;  /* modified / dirty / warning */
+  --crit:        #ff5e7a;  /* errors, deletions, destructive confirms */
+  --gold:        #e8c574;  /* git branch, special states */
+
+  --font-ui:     "Manrope", system-ui, sans-serif;
+  --font-mono:   "JetBrains Mono", "Cascadia Code", monospace;
+
+  --r-s: 6px; --r-m: 10px; --r-l: 14px;
+  --ease-swift: cubic-bezier(0.22, 1, 0.36, 1);
+  --t-fast: 120ms; --t-med: 240ms; --t-slow: 480ms;
+
+  /* Derived alpha channels (kept here so no component invents its own) */
+  --energy-15: rgba(85, 230, 193, 0.15);
+  --energy-25: rgba(85, 230, 193, 0.25);
+  --energy-40: rgba(85, 230, 193, 0.4);
+  --power-15:  rgba(94, 162, 255, 0.15);
+  --power-25:  rgba(94, 162, 255, 0.25);
+  --power-40:  rgba(94, 162, 255, 0.4);
+  --flare-15:  rgba(255, 158, 94, 0.15);
+  --flare-40:  rgba(255, 158, 94, 0.4);
+  --crit-15:   rgba(255, 94, 122, 0.15);
+  --crit-40:   rgba(255, 94, 122, 0.4);
+  --shadow-float: 0 12px 40px rgba(0, 0, 0, 0.55), 0 2px 8px rgba(0, 0, 0, 0.4);
+}

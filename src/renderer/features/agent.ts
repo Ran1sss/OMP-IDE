@@ -1,0 +1,650 @@
+/**
+ * OMP Agent panel: chat, tool-call timeline, todo strip, session controls,
+ * status orb, disabled/dead states, agent UI request dialogs.
+ */
+
+import { marked } from "marked";
+import { el, clear, svgIcon } from "../core/dom";
+import { I, toolIcon } from "../core/icons";
+import { on, emit } from "../core/bus";
+import { state, relPath, baseName, normPath, joinPath, languageForPath } from "../core/state";
+import { toast, confirmDialog, inputDialog, selectDialog } from "../core/ui";
+import type { OmpEvent, OmpStatus, OmpTodoPhase, OmpFileEdit, OmpUiRequest, RemoteVia } from "../../shared/types";
+import { switchModelViaPicker, mountUsageStrip, mountModelWarning, openModelsDialog, setSessionThinkingViaPicker, createBoostToggle } from "./models";
+import {
+  initMentionInput,
+  serializePrompt,
+  mentionSnapshot,
+  clearMentions,
+  hasMentions,
+  removeLastMention,
+  renderMentionChips,
+  type MentionRef,
+} from "./mentions";
+
+type MentionAttachment = MentionRef & { missing: boolean };
+
+marked.setOptions({ gfm: true, breaks: true });
+
+let panelEl: HTMLElement;
+let chatEl: HTMLElement;
+let todoEl: HTMLElement;
+let composerEl: HTMLElement;
+let promptInput: HTMLTextAreaElement;
+let headOrb: HTMLElement;
+let headModel: HTMLElement;
+let stopBtn: HTMLButtonElement;
+let status: OmpStatus = { state: "starting" };
+
+/** streaming text accumulation per messageId */
+const streamBuffers = new Map<number, { el: HTMLElement; text: string }>();
+/** tool cards by toolCallId */
+const toolCards = new Map<string, { card: HTMLElement; summary: HTMLElement; name: string }>();
+
+const EXAMPLE_PROMPTS = [
+  "Explain the structure of this project",
+  "Find and fix the failing test",
+  "Add error handling to the main entry point",
+];
+
+// ---------------------------------------------------------------- status
+
+function applyStatus(s: OmpStatus) {
+  status = s;
+  emit("agent-status", s);
+  headOrb.className = `orb ${s.state}`;
+  headModel.textContent =
+    s.state === "unavailable" ? "unavailable" :
+    s.state === "dead" ? "process exited" :
+    s.state === "tool" && s.tool ? `running ${s.tool}` :
+    s.model ?? "";
+  stopBtn.disabled = !(s.state === "thinking" || s.state === "tool");
+
+  if (s.state === "unavailable") renderUnavailable(s.detail);
+  else if (s.state === "dead") renderDead(s.detail);
+  else {
+    panelEl.querySelector(".agent-blank.disabled-state")?.remove();
+    composerEl.style.display = "";
+  }
+}
+
+function renderUnavailable(detail?: string) {
+  clearChatSurface();
+  composerEl.style.display = "none";
+  chatEl.append(
+    el(
+      "div",
+      { class: "agent-blank dead disabled-state" },
+      el("div", { class: "ab-orb" }),
+      el("h3", { text: "Agent unavailable" }),
+      el("p", { text: detail ?? "The omp binary was not found." }),
+      el("p", {}, "Install Oh My Pi and ensure ", el("code", { text: "omp" }), " is on your PATH, or set the binary path in Settings."),
+      el("button", {
+        class: "btn btn-agent",
+        text: "Retry",
+        onClick: () => void startAgent(),
+      }),
+    ),
+  );
+}
+
+function renderDead(detail?: string) {
+  composerEl.style.display = "none";
+  const card = el(
+    "div",
+    { class: "agent-blank dead disabled-state", style: { flex: "0 0 auto", padding: "18px" } },
+    el("div", { class: "ab-orb" }),
+    el("h3", { text: "Agent process died" }),
+    el("p", { class: "mono", text: detail ?? "" }),
+    el("button", {
+      class: "btn btn-agent",
+      text: "Restart Agent",
+      onClick: () => {
+        card.remove();
+        void window.ide.omp.restart();
+      },
+    }),
+  );
+  chatEl.append(card);
+  chatEl.scrollTop = chatEl.scrollHeight;
+}
+
+function clearChatSurface() {
+  clear(chatEl);
+  streamBuffers.clear();
+  toolCards.clear();
+}
+
+function renderWelcomeState() {
+  clearChatSurface();
+  const prompts = el("div", { class: "example-prompts" });
+  for (const p of EXAMPLE_PROMPTS) {
+    prompts.append(
+      el("button", {
+        class: "example-prompt",
+        text: p,
+        onClick: () => {
+          promptInput.value = p;
+          promptInput.focus();
+        },
+      }),
+    );
+  }
+  const noModel = el("p", { class: "no-model-line", style: { display: "none" } });
+  noModel.append(
+    "No model configured → ",
+    el("a", {
+      text: "Set up a model",
+      style: { color: "var(--power)", cursor: "pointer" },
+      onClick: () => openModelsDialog(),
+    }),
+  );
+  void window.ide.models.getState().then((s) => {
+    if (!s.providers.some((p) => p.enabled) && !s.active) noModel.style.display = "";
+  });
+  chatEl.append(
+    el(
+      "div",
+      { class: "agent-blank" },
+      el("div", { class: "ab-orb" }),
+      el("h3", { text: "OMP Agent" }),
+      el("p", { text: "Converse with the agent about this workspace. It can read, edit and run code — you watch every action here." }),
+      noModel,
+      prompts,
+    ),
+  );
+}
+
+// ---------------------------------------------------------------- chat rendering
+
+function scrollBottom() {
+  chatEl.scrollTop = chatEl.scrollHeight;
+}
+
+function nearBottom(): boolean {
+  return chatEl.scrollHeight - chatEl.scrollTop - chatEl.clientHeight < 120;
+}
+
+function addUserMessage(text: string, via?: RemoteVia, mentions?: MentionAttachment[]) {
+  panelEl.querySelector(".agent-blank:not(.disabled-state)")?.remove();
+  chatEl.append(el("div", { class: "chat-user", text }));
+  if (mentions?.length) chatEl.append(renderMentionChips(mentions));
+  if (via) {
+    chatEl.append(
+      el(
+        "span",
+        { class: "remote-chip", title: `Sent remotely via Telegram bot ${via.botName}` },
+        el("span", { class: "rc-user", text: `@${via.username}` }),
+        el("span", { class: "rc-bot", text: `· ${via.botName}` }),
+      ),
+    );
+  }
+  scrollBottom();
+}
+
+function ensureStream(messageId: number): { el: HTMLElement; text: string } {
+  let buf = streamBuffers.get(messageId);
+  if (!buf) {
+    const div = el("div", { class: "chat-agent streaming md" });
+    chatEl.append(div);
+    buf = { el: div, text: "" };
+    streamBuffers.set(messageId, buf);
+  }
+  return buf;
+}
+
+// ---------------------------------------------------------------- reasoning block
+
+interface ThinkBlock {
+  root: HTMLElement;
+  head: HTMLElement;
+  body: HTMLElement;
+  chars: number;
+  startedAt: number;
+}
+
+let activeThink: ThinkBlock | null = null;
+
+/** collapsed ∴ block above the answer; real streamed text only, never fabricated */
+function ensureThinkBlock(): ThinkBlock {
+  if (activeThink) return activeThink;
+  const body = el("div", { class: "think-body", style: { display: "none" } });
+  const head = el("div", {
+    class: "think-head",
+    onClick: () => {
+      const open = body.style.display !== "none";
+      body.style.display = open ? "none" : "";
+      root.classList.toggle("open", !open);
+    },
+  });
+  head.textContent = "∴ thinking";
+  const root = el("div", { class: "think-block streaming" }, head, body);
+  chatEl.append(root);
+  void window.ide.models.getState().then((s) => {
+    for (const orb of document.querySelectorAll(".statusbar .orb, .agent-head .orb")) {
+      orb.classList.remove("level-low", "level-med", "level-high", "level-xhigh", "level-max");
+      orb.classList.add("reasoning");
+      if (s.thinking.effective !== "off") orb.classList.add(`level-${s.thinking.effective}`);
+    }
+  });
+  activeThink = { root, head, body, chars: 0, startedAt: Date.now() };
+  return activeThink;
+}
+
+function closeThinkBlock(): void {
+  if (!activeThink) return;
+  const t = activeThink;
+  activeThink = null;
+  t.root.classList.remove("streaming");
+  const secs = ((Date.now() - t.startedAt) / 1000).toFixed(1);
+  // ~4 chars/token is an estimate — label it as such
+  const approxTokens = Math.round(t.chars / 4);
+  t.head.textContent = t.chars
+    ? `∴ thinking · ~${approxTokens} tokens · ${secs}s`
+    : `∴ thinking · ${secs}s`;
+  for (const orb of document.querySelectorAll(".statusbar .orb, .agent-head .orb"))
+    orb.classList.remove("reasoning", "level-low", "level-med", "level-high", "level-xhigh", "level-max");
+  chipReasoningPulse(false);
+}
+
+function chipReasoningPulse(live: boolean): void {
+  document.querySelector(".model-chip .mc-think")?.classList.toggle("live", live);
+}
+
+function renderMarkdownInto(target: HTMLElement, text: string) {
+  target.innerHTML = marked.parse(text, { async: false });
+  for (const a of target.querySelectorAll("a")) {
+    a.addEventListener("click", (e) => {
+      e.preventDefault();
+      const href = a.getAttribute("href");
+      if (href) window.ide.win.openExternal(href);
+    });
+  }
+}
+
+// ---------------------------------------------------------------- tool cards
+
+function summarizeArgs(toolName: string, args: unknown, intent?: string): string {
+  if (intent) return intent;
+  if (args && typeof args === "object") {
+    const a = args as Record<string, unknown>;
+    const cand = a.path ?? a.file ?? a.command ?? a.pattern ?? a.url ?? a.input;
+    if (typeof cand === "string") return cand.split("\n")[0].slice(0, 120);
+  }
+  return "";
+}
+
+function diffStat(edit: OmpFileEdit): { add: number; del: number } {
+  const o = edit.oldText.split("\n");
+  const n = edit.newText.split("\n");
+  // cheap estimate: line count delta + changed proportion via diff text if present
+  if (edit.diff) {
+    let add = 0, del = 0;
+    for (const line of edit.diff.split("\n")) {
+      if (line.startsWith("+")) add++;
+      else if (line.startsWith("-")) del++;
+    }
+    return { add, del };
+  }
+  return { add: Math.max(0, n.length - o.length) || 1, del: Math.max(0, o.length - n.length) };
+}
+
+function addToolCard(toolCallId: string, toolName: string, args: unknown, intent?: string) {
+  const summaryText = summarizeArgs(toolName, args, intent);
+  const ico = el("span", { class: "tc-ico" });
+  ico.innerHTML = `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round">${toolIcon(toolName)}</svg>`;
+  const summary = el("span", { class: "tc-summary", text: summaryText });
+  const spinner = el("span", { class: "tc-spin" });
+  const body = el("div", { class: "tc-body", style: { display: "none" } });
+  let argsText: string;
+  try {
+    argsText = typeof args === "string" ? args : JSON.stringify(args, null, 2);
+  } catch {
+    argsText = String(args);
+  }
+  body.textContent = argsText?.slice(0, 3000) ?? "";
+
+  const head = el(
+    "div",
+    {
+      class: "tc-head",
+      onClick: () => {
+        body.style.display = body.style.display === "none" ? "" : "none";
+      },
+    },
+    ico,
+    el("span", { class: "tc-name", text: toolName }),
+    summary,
+    spinner,
+  );
+  const card = el("div", { class: "tool-card running" }, head, body);
+  chatEl.append(card);
+  toolCards.set(toolCallId, { card, summary, name: toolName });
+  if (nearBottom()) scrollBottom();
+}
+
+function finishToolCard(
+  toolCallId: string,
+  isError: boolean,
+  resultText: string,
+  fileEdit?: OmpFileEdit,
+) {
+  const entry = toolCards.get(toolCallId);
+  if (!entry) return;
+  const { card } = entry;
+  card.classList.remove("running");
+  card.querySelector(".tc-spin")?.remove();
+  if (isError) card.classList.add("error");
+
+  const body = card.querySelector(".tc-body") as HTMLElement | null;
+  if (body && resultText) {
+    body.textContent = `${body.textContent}\n\n── result ──\n${resultText.slice(0, 2500)}`;
+  }
+
+  if (fileEdit && state.root) {
+    const abs = normPath(
+      /^(?:[A-Za-z]:)?[\\/]/.test(fileEdit.path) ? fileEdit.path : joinPath(state.root, fileEdit.path),
+    );
+    emit("agent-edited", abs);
+    const { add, del } = diffStat(fileEdit);
+    const total = Math.max(1, add + del);
+    const bar = el("span", { class: "diffstat" });
+    bar.append(
+      el("span", { class: "add", style: { width: `${Math.round((add / total) * 100)}%` } }),
+      el("span", { class: "del", style: { width: `${Math.round((del / total) * 100)}%` } }),
+    );
+    card.append(
+      el(
+        "div",
+        { class: "tc-edit-row" },
+        el("span", { class: "tc-path", text: relPath(abs) }),
+        el("span", { class: "mono dimmer", text: `+${add} −${del}` }),
+        bar,
+        el("button", {
+          class: "btn btn-agent",
+          text: "View diff",
+          style: { padding: "2px 10px", fontSize: "11px" },
+          onClick: () => {
+            emit("open-diff", {
+              title: `${baseName(abs)} (agent edit)`,
+              path: abs,
+              original: fileEdit.oldText,
+              modified: fileEdit.newText,
+              language: languageForPath(abs),
+            });
+          },
+        }),
+      ),
+    );
+  }
+  if (nearBottom()) scrollBottom();
+}
+
+// ---------------------------------------------------------------- todos
+
+function renderTodos(phases: OmpTodoPhase[]) {
+  clear(todoEl);
+  const hasAny = phases.some((p) => p.tasks.length > 0);
+  todoEl.style.display = hasAny ? "" : "none";
+  for (const phase of phases) {
+    if (!phase.tasks.length) continue;
+    const ph = el("div", { class: "todo-phase" });
+    if (phase.name && phase.name !== "Todos") ph.append(el("div", { class: "tp-name", text: phase.name }));
+    for (const t of phase.tasks) {
+      const cls =
+        t.status === "completed" ? "todo-item done" :
+        t.status === "in_progress" ? "todo-item active" : "todo-item";
+      ph.append(el("div", { class: cls }, el("span", { class: "ti-dot" }), el("span", { text: t.content })));
+    }
+    todoEl.append(ph);
+  }
+}
+
+// ---------------------------------------------------------------- event handling
+
+function handleEvent(e: OmpEvent) {
+  switch (e.kind) {
+    case "user-message": {
+      const mentions = !e.via && pendingLocalMentions ? pendingLocalMentions : undefined;
+      if (mentions) pendingLocalMentions = null;
+      addUserMessage(e.text, e.via, mentions);
+      break;
+    }
+    case "agent-start":
+      break;
+    case "text-start":
+      closeThinkBlock(); // reasoning phase ends when the answer starts
+      ensureStream(e.messageId);
+      break;
+    case "text-delta": {
+      const buf = ensureStream(e.messageId);
+      buf.text += e.delta;
+      renderMarkdownInto(buf.el, buf.text);
+      if (nearBottom()) scrollBottom();
+      break;
+    }
+    case "text-end": {
+      const buf = streamBuffers.get(e.messageId);
+      if (buf) {
+        buf.el.classList.remove("streaming");
+        if (e.text && !buf.text) renderMarkdownInto(buf.el, e.text);
+      } else if (e.text) {
+        const div = el("div", { class: "chat-agent md" });
+        renderMarkdownInto(div, e.text);
+        chatEl.append(div);
+      }
+      if (nearBottom()) scrollBottom();
+      break;
+    }
+    case "thinking-delta": {
+      const t = ensureThinkBlock();
+      t.chars += e.delta.length;
+      t.body.textContent += e.delta;
+      t.head.textContent = `∴ thinking · ${((Date.now() - t.startedAt) / 1000).toFixed(0)}s`;
+      chipReasoningPulse(true);
+      if (nearBottom()) scrollBottom();
+      break;
+    }
+    case "tool-start":
+      addToolCard(e.toolCallId, e.toolName, e.args, e.intent);
+      break;
+    case "tool-end":
+      finishToolCard(e.toolCallId, e.isError, e.resultText, e.fileEdit);
+      break;
+    case "todos":
+      renderTodos(e.phases);
+      break;
+    case "agent-end":
+      closeThinkBlock();
+      for (const buf of streamBuffers.values()) buf.el.classList.remove("streaming");
+      break;
+  }
+}
+
+async function handleUiRequest(req: OmpUiRequest) {
+  if (req.method === "confirm") {
+    const ok = await confirmDialog({
+      title: req.title ?? "Agent asks",
+      message: req.message ?? "",
+      confirmLabel: "Yes",
+    });
+    void window.ide.omp.uiResponse(req.id, { confirmed: ok });
+  } else if (req.method === "input" || req.method === "editor") {
+    const value = await inputDialog({
+      title: req.title ?? "Agent asks",
+      message: req.message,
+      placeholder: req.placeholder,
+    });
+    void window.ide.omp.uiResponse(
+      req.id,
+      value === null ? { cancelled: true } : { value },
+    );
+  } else if (req.method === "select") {
+    const pick = await selectDialog(req.title ?? "Agent asks", req.options ?? []);
+    void window.ide.omp.uiResponse(
+      req.id,
+      pick === null ? { cancelled: true } : { value: pick },
+    );
+  }
+}
+
+// ---------------------------------------------------------------- actions
+
+function sendPrompt() {
+  const text = promptInput.value.trim();
+  if (!text && !hasMentions()) return;
+  if (status.state === "unavailable" || status.state === "dead" || status.state === "starting") {
+    toast("Agent is not running", { crit: true });
+    return;
+  }
+  const mentions = mentionSnapshot();
+  const message = serializePrompt(text);
+  promptInput.value = "";
+  clearMentions();
+  // Chips are rendered locally with the snapshot; suppress the plain echo by
+  // rendering here and letting the main-process user-message event carry text.
+  pendingLocalMentions = mentions.length ? mentions : null;
+  void window.ide.omp.prompt(message);
+}
+
+/** mentions attached to the message currently in flight (renders on echo) */
+let pendingLocalMentions: MentionAttachment[] | null = null;
+
+async function interruptAgent() {
+  if (status.state === "thinking" || status.state === "tool") {
+    await window.ide.omp.abort();
+    toast("Interrupt sent");
+  }
+}
+
+async function newSession() {
+  const busy = status.state === "thinking" || status.state === "tool";
+  if (busy) {
+    const ok = await confirmDialog({
+      title: "Agent is working",
+      message: "Start a new session and drop the current run?",
+      confirmLabel: "New Session",
+      danger: true,
+    });
+    if (!ok) return;
+    await window.ide.omp.abort();
+  }
+  await window.ide.omp.newSession();
+  renderWelcomeState();
+  renderTodos([]);
+  toast("New agent session");
+}
+
+export async function startAgent() {
+  if (!state.root) return;
+  renderWelcomeState();
+  await window.ide.omp.start(state.root);
+}
+
+// ---------------------------------------------------------------- init
+
+export function initAgentPanel(container: HTMLElement) {
+  panelEl = container;
+
+  headOrb = el("span", { class: "orb starting" });
+  headModel = el("span", { class: "agent-model" });
+  stopBtn = el("button", {
+    class: "icon-btn",
+    title: "Interrupt agent",
+    onClick: () => void interruptAgent(),
+  }) as HTMLButtonElement;
+  stopBtn.append(svgIcon(I.stop));
+  const newBtn = el("button", {
+    class: "icon-btn",
+    title: "New session",
+    onClick: () => void newSession(),
+  });
+  newBtn.append(svgIcon(I.plus));
+  const restartBtn = el("button", {
+    class: "icon-btn",
+    title: "Restart agent process",
+    onClick: () => void window.ide.omp.restart(),
+  });
+  restartBtn.append(svgIcon(I.restart2));
+  // Compact model selector: omp supports live per-session set_model (applies
+  // next turn), so this button IS the per-session override surface.
+  const modelBtn = el("button", {
+    class: "icon-btn",
+    title: "Switch model (applies next turn)",
+    onClick: () => switchModelViaPicker("agent-header"),
+  });
+  modelBtn.append(svgIcon(I.zap));
+  // Session thinking dial — override for THIS session only (clears on /new)
+  const thinkBtn = el("button", {
+    class: "icon-btn",
+    title: "Thinking level (this session)",
+    onClick: () => setSessionThinkingViaPicker("agent-header"),
+  });
+  thinkBtn.append(svgIcon(I.sparkle));
+
+  const head = el(
+    "div",
+    { class: "agent-head" },
+    headOrb,
+    el("span", { class: "agent-title", text: "OMP AGENT" }),
+    headModel,
+    el("span", { class: "agent-actions" }, modelBtn, thinkBtn, stopBtn, newBtn, restartBtn),
+  );
+
+  chatEl = el("div", { class: "agent-chat" });
+  todoEl = el("div", { class: "todo-strip", style: { display: "none" } });
+
+  promptInput = el("textarea", {
+    class: "input",
+    placeholder: "Ask the agent… (Enter to send, Shift+Enter for a new line)",
+    onKeyDown: (e) => {
+      if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
+        // Enter sends; Shift+Enter inserts a newline (default behavior)
+        e.preventDefault();
+        sendPrompt();
+      } else if (
+        e.key === "Backspace" &&
+        promptInput.selectionStart === 0 &&
+        promptInput.selectionEnd === 0
+      ) {
+        // caret at start (covers empty text too) → remove the last chip
+        if (removeLastMention()) e.preventDefault();
+      }
+    },
+  }) as HTMLTextAreaElement;
+
+  const mentionStrip = el("div", { class: "mention-strip", style: { display: "none" } });
+  const sendBtn = el("button", { class: "btn btn-agent", text: "Send", onClick: () => sendPrompt() });
+  composerEl = el(
+    "div",
+    { class: "agent-composer" },
+    mentionStrip,
+    promptInput,
+    el(
+      "div",
+      { class: "composer-row" },
+      el("span", { style: { flex: "1" } }),
+      createBoostToggle(),
+      sendBtn,
+    ),
+  );
+  initMentionInput({
+    strip: mentionStrip,
+    zone: composerEl,
+    openFileAction: (path) => emit("open-file", { path }),
+  });
+
+  panelEl.append(head, chatEl, todoEl, composerEl);
+  mountUsageStrip(panelEl);
+  mountModelWarning(panelEl);
+  renderWelcomeState();
+
+  window.ide.omp.onStatus((s) => applyStatus(s));
+  window.ide.omp.onEvent((e) => handleEvent(e));
+  window.ide.omp.onUiRequest((req) => void handleUiRequest(req));
+}
+
+export function focusAgentInput() {
+  promptInput?.focus();
+}
+

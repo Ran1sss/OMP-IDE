@@ -1,0 +1,539 @@
+/* ============================================================
+   REACTOR remote — Control Center, beacon, gold accents.
+   Remote = gold. Gold means nothing else in the app.
+   ============================================================ */
+
+:root {
+  --gold-15: rgba(232, 197, 116, 0.15);
+  --gold-25: rgba(232, 197, 116, 0.25);
+  --gold-40: rgba(232, 197, 116, 0.4);
+}
+
+/* base-design amendment: branch chip is neutral so gold stays unambiguous */
+.statusbar .sb-branch { color: var(--text-mid); }
+
+/* ---------- beacon (status bar) ---------- */
+.beacon {
+  position: relative;
+  display: inline-flex;
+  width: 12px;
+  height: 12px;
+  color: var(--text-low);
+  flex-shrink: 0;
+}
+.beacon svg { width: 12px; height: 12px; }
+.beacon.polling { color: var(--gold); animation: beacon-breathe 3s var(--ease-swift) infinite; }
+.beacon.relaying { color: var(--gold); animation: beacon-pulse 500ms var(--ease-swift) 1; }
+.beacon .beacon-err {
+  position: absolute;
+  right: -2px;
+  top: -2px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--crit);
+  box-shadow: 0 0 6px var(--crit-40);
+}
+@keyframes beacon-breathe {
+  0%, 100% { filter: drop-shadow(0 0 1px var(--gold-25)); opacity: 0.75; }
+  50%      { filter: drop-shadow(0 0 6px var(--gold-40)); opacity: 1; }
+}
+@keyframes beacon-pulse {
+  0%   { filter: drop-shadow(0 0 2px var(--gold-40)); transform: scale(1); }
+  50%  { filter: drop-shadow(0 0 10px var(--gold)); transform: scale(1.3); }
+  100% { filter: drop-shadow(0 0 2px var(--gold-40)); transform: scale(1); }
+}
+
+/* beacon popover */
+.beacon-pop {
+  position: fixed;
+  z-index: 1100;
+  min-width: 260px;
+  padding: 10px;
+  background: rgba(16, 19, 28, 0.94);
+  backdrop-filter: blur(16px);
+  border: 1px solid var(--line-bright);
+  border-radius: var(--r-m);
+  box-shadow: var(--shadow-float);
+  animation: toast-in 140ms var(--ease-swift);
+}
+.beacon-pop .bp-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 6px;
+  font-size: 12px;
+  color: var(--text-mid);
+  border-radius: var(--r-s);
+}
+.beacon-pop .bp-row .mono { color: var(--text-hi); }
+.beacon-pop .bp-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+}
+
+/* ---------- remote chip in agent chat ---------- */
+.remote-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 4px;
+  padding: 1px 8px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--gold);
+  background: var(--gold-15);
+  border: 1px solid var(--gold-25);
+  border-radius: 8px;
+  align-self: flex-end;
+}
+.remote-chip .rc-user { font-family: var(--font-mono); }
+.remote-chip .rc-bot { font-family: var(--font-ui); color: var(--text-mid); font-weight: 500; }
+
+/* ---------- control center ---------- */
+.control-center {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 10px 16px;
+  gap: 10px;
+}
+
+.cc-global {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  background: var(--bg-1);
+  border: 1px solid var(--line);
+  border-radius: var(--r-m);
+}
+.cc-global .cc-note { font-size: 10.5px; color: var(--text-low); }
+
+/* toggle switch */
+.switch {
+  position: relative;
+  width: 32px;
+  height: 18px;
+  border-radius: 9px;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  cursor: pointer;
+  transition: background var(--t-fast) var(--ease-swift), border-color var(--t-fast) var(--ease-swift);
+  flex-shrink: 0;
+}
+.switch::after {
+  content: "";
+  position: absolute;
+  left: 2px;
+  top: 2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--text-low);
+  transition: transform var(--t-fast) var(--ease-swift), background var(--t-fast) var(--ease-swift);
+}
+.switch.on { background: var(--gold-25); border-color: var(--gold-40); }
+.switch.on::after { transform: translateX(14px); background: var(--gold); }
+
+/* bot card */
+.bot-card {
+  background: var(--bg-1);
+  border: 1px solid var(--line);
+  border-radius: var(--r-m);
+  padding: 10px 12px;
+  transition: border-color var(--t-fast) var(--ease-swift), background var(--t-fast) var(--ease-swift);
+}
+.bot-card:hover { background: var(--bg-2); border-color: var(--line-bright); }
+.bot-card.auth-error { border-color: var(--crit-40); }
+.bot-card .bc-head { display: flex; align-items: center; gap: 8px; }
+.bot-card .bc-glyph {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--r-s);
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  color: var(--gold);
+  flex-shrink: 0;
+}
+.bot-card .bc-glyph svg { width: 15px; height: 15px; }
+.bot-card .bc-name { font-weight: 700; font-size: 13px; color: var(--text-hi); }
+.bot-card .bc-user { font-family: var(--font-mono); font-size: 11px; color: var(--text-mid); }
+.bot-card .bc-spacer { flex: 1; }
+
+/* bot state dot — same animation language as the beacon */
+.bot-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-low);
+  opacity: 0.5;
+  flex-shrink: 0;
+}
+.bot-dot.polling { background: var(--gold); opacity: 1; animation: dot-breathe 3s var(--ease-swift) infinite; }
+.bot-dot.relaying { background: var(--gold); opacity: 1; animation: dot-pulse 500ms var(--ease-swift) 1; }
+.bot-dot.auth-error, .bot-dot.degraded { background: var(--crit); opacity: 1; animation: none; }
+.bot-dot.degraded { background: var(--flare); }
+@keyframes dot-breathe {
+  0%, 100% { box-shadow: 0 0 2px var(--gold-25); }
+  50%      { box-shadow: 0 0 9px var(--gold-40); }
+}
+@keyframes dot-pulse {
+  0%   { box-shadow: 0 0 2px var(--gold-40); transform: scale(1); }
+  50%  { box-shadow: 0 0 12px var(--gold); transform: scale(1.4); }
+  100% { box-shadow: 0 0 2px var(--gold-40); transform: scale(1); }
+}
+
+.bot-card .bc-meta {
+  display: flex;
+  gap: 12px;
+  margin-top: 6px;
+  font-size: 10.5px;
+  color: var(--text-low);
+}
+.bot-card .bc-meta .mono { color: var(--text-mid); }
+.bot-card .bc-detail {
+  margin-top: 4px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--crit);
+  user-select: text;
+}
+
+.bot-card .bc-paired { margin-top: 8px; display: flex; flex-direction: column; gap: 3px; }
+.bot-card .paired-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 6px;
+  font-size: 12px;
+  border-radius: var(--r-s);
+  color: var(--text-mid);
+  animation: toast-in 240ms var(--ease-swift);
+}
+.bot-card .paired-row:hover { background: var(--bg-2); }
+.bot-card .paired-row .mono { color: var(--gold); font-size: 11.5px; }
+.bot-card .paired-row .pr-x { margin-left: auto; }
+
+.bot-card .bc-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+}
+
+/* add-bot card */
+.addbot-card {
+  background: var(--bg-1);
+  border: 1px dashed var(--line-bright);
+  border-radius: var(--r-m);
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.addbot-card .ab-note { font-size: 11px; color: var(--text-low); }
+.addbot-card .ab-row { display: flex; gap: 6px; }
+.addbot-card .ab-error {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--crit);
+  user-select: text;
+}
+.addbot-card .ab-preview {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  background: var(--bg-2);
+  border: 1px solid var(--gold-25);
+  border-radius: var(--r-s);
+  font-size: 12.5px;
+}
+
+/* ---------- pairing dialog ---------- */
+.pairing-body { display: flex; flex-direction: column; align-items: center; gap: 14px; padding: 8px 0; }
+.pairing-ring {
+  position: relative;
+  width: 148px;
+  height: 148px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.pairing-ring svg.ring { position: absolute; inset: 0; transform: rotate(-90deg); }
+.pairing-ring .ring-bg { stroke: var(--line); }
+.pairing-ring .ring-fg {
+  stroke: var(--gold);
+  transition: stroke-dashoffset 1s linear;
+  filter: drop-shadow(0 0 4px var(--gold-40));
+}
+.pairing-code {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 30px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  color: var(--text-hi);
+  user-select: text;
+  cursor: pointer;
+  border-radius: var(--r-s);
+  padding: 2px 8px;
+  transition: color var(--t-fast) var(--ease-swift), background var(--t-fast) var(--ease-swift);
+}
+.pairing-code:hover { color: var(--gold); background: var(--gold-15); }
+.pairing-code.paired-ok {
+  color: var(--gold);
+  animation: pair-glow 400ms var(--ease-swift) 1;
+}
+@keyframes pair-glow {
+  0%   { text-shadow: 0 0 0 transparent; transform: scale(0.9); }
+  50%  { text-shadow: 0 0 24px var(--gold); transform: scale(1.08); }
+  100% { text-shadow: 0 0 6px var(--gold-40); transform: scale(1); }
+}
+.pairing-link {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--power);
+  user-select: text;
+}
+.pairing-hint { font-size: 11.5px; color: var(--text-mid); text-align: center; }
+.pairing-hint code {
+  font-family: var(--font-mono);
+  background: var(--bg-1);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 1px 5px;
+  user-select: text;
+}
+.pairing-hint code.copyable {
+  cursor: pointer;
+  transition: border-color var(--t-fast) var(--ease-swift), color var(--t-fast) var(--ease-swift);
+}
+.pairing-hint code.copyable:hover { border-color: var(--gold-40); color: var(--gold); }
+
+/* ---------- activity feed ---------- */
+.cc-feed { display: flex; flex-direction: column; gap: 2px; }
+.feed-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 3px 6px;
+  font-size: 11.5px;
+  color: var(--text-mid);
+  border-radius: var(--r-s);
+  overflow: hidden;
+  white-space: nowrap;
+}
+.feed-row:hover { background: var(--bg-1); }
+.feed-row .fr-time { font-family: var(--font-mono); font-size: 10px; color: var(--text-low); flex-shrink: 0; }
+.feed-row .fr-kind {
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 0 5px;
+  border-radius: 6px;
+  flex-shrink: 0;
+  color: var(--gold);
+  background: var(--gold-15);
+}
+.feed-row.blocked .fr-kind { color: var(--crit); background: var(--crit-15); }
+.feed-row .fr-sender { font-family: var(--font-mono); font-size: 10.5px; color: var(--text-mid); flex-shrink: 0; }
+.feed-row .fr-detail { overflow: hidden; text-overflow: ellipsis; }
+.feed-row .fr-bot { margin-left: auto; font-size: 10px; color: var(--text-low); flex-shrink: 0; }
+
+.cc-empty {
+  padding: 24px 12px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--text-low);
+}
+
+/* ---------- chat watch: chat sub-cards inside bot cards ---------- */
+.wc-list { margin-top: 8px; display: flex; flex-direction: column; gap: 5px; }
+.wc-header { font-size: 10px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-low); }
+.wc-approver { display: flex; align-items: center; gap: 6px; }
+.wc-approver-sel {
+  background: var(--bg-1);
+  border: 1px solid var(--line);
+  border-radius: var(--r-s);
+  color: var(--text-hi);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 2px 6px;
+}
+
+.wc-card {
+  background: var(--bg-1);
+  border: 1px solid var(--line);
+  border-radius: var(--r-s);
+  padding: 7px 9px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  transition: border-color var(--t-fast) var(--ease-swift);
+}
+.wc-card:hover { border-color: var(--line-bright); }
+.wc-card.left { opacity: 0.55; }
+
+.wc-head { display: flex; align-items: center; gap: 7px; }
+.wc-title { font-size: 12px; font-weight: 600; color: var(--text-hi); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wc-left-tag { font-size: 10px; color: var(--text-low); border: 1px solid var(--line); border-radius: 3px; padding: 0 5px; flex-shrink: 0; }
+
+/* coverage chip: full = gold-tinted, limited = neutral */
+.wc-cov { font-family: var(--font-mono); font-size: 9.5px; border-radius: 3px; padding: 1px 5px; flex-shrink: 0; }
+.wc-cov.full { color: var(--gold); background: var(--gold-15); }
+.wc-cov.limited { color: var(--text-mid); background: var(--bg-2); }
+.wc-note-limited { font-size: 10.5px; color: var(--text-low); }
+
+/* ear glyph — static while idle; breathes only during a live evaluation batch */
+.wc-ear { display: inline-flex; color: var(--text-low); flex-shrink: 0; }
+.wc-ear svg { width: 13px; height: 13px; }
+.wc-ear.evaluating { color: var(--gold); animation: beacon-breathe var(--t-slow) var(--ease-swift) infinite alternate; }
+.wc-ear.failing { color: var(--crit); animation: none; }
+
+.wc-listener-row { display: flex; align-items: center; gap: 6px; }
+.wc-listener-label { font-size: 11px; color: var(--text-mid); }
+.wc-oneshot-off { font-size: 10.5px; color: var(--text-low); font-style: italic; }
+.wc-cooling { font-size: 10px; color: var(--gold); opacity: 0.75; }
+.wc-smol-warn { font-size: 10.5px; color: var(--gold); }
+.wc-eval-err { font-size: 10.5px; color: var(--crit); }
+
+.switch.disabled { opacity: 0.4; cursor: not-allowed; }
+
+.wc-meta { display: flex; align-items: center; gap: 10px; font-size: 10.5px; color: var(--text-low); }
+.wc-meta .mono { color: var(--text-mid); }
+.wc-viewlog { padding: 1px 8px; font-size: 10.5px; }
+.wc-logpath {
+  font-size: 9.5px;
+  color: var(--text-low);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.wc-logpath:hover { color: var(--gold); }
+
+/* ---------- proposal cards ---------- */
+.pp-list { display: flex; flex-direction: column; gap: 6px; }
+.pp-card {
+  background: var(--bg-1);
+  border: 1px solid var(--gold-40);
+  border-radius: var(--r-m);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  animation: pp-in var(--t-med) var(--ease-swift) 1;
+}
+@keyframes pp-in {
+  from { opacity: 0; transform: scale(0.95); }
+  to { opacity: 1; transform: scale(1); }
+}
+/* the proposal is the headline, the quote is the evidence */
+.pp-headline { font-family: var(--font-ui); font-size: 12.5px; font-weight: 700; color: var(--text-hi); }
+.pp-quote {
+  font-size: 11px;
+  color: var(--text-mid);
+  background: var(--bg-1);
+  border-left: 2px solid var(--gold);
+  padding: 5px 8px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.pp-byline { display: flex; align-items: center; gap: 5px; font-size: 10.5px; color: var(--text-mid); }
+.pp-byline .pp-chat { color: var(--text-low); }
+.pp-noapprover { color: var(--gold); font-style: italic; }
+.pp-time { font-family: var(--font-mono); font-size: 10px; color: var(--text-low); }
+.pp-actions { display: flex; gap: 6px; }
+/* skipping is routine — quiet ghost, no red */
+.pp-skip { background: transparent; border-color: transparent; color: var(--text-mid); }
+.pp-skip:hover { border-color: var(--line-bright); color: var(--text-hi); }
+
+/* ---------- beacon proposal badge ---------- */
+.beacon-badge {
+  position: absolute;
+  top: -4px;
+  right: -7px;
+  min-width: 12px;
+  height: 12px;
+  border-radius: 6px;
+  background: var(--gold);
+  color: var(--void);
+  font-family: var(--font-mono);
+  font-size: 8.5px;
+  font-weight: 700;
+  line-height: 12px;
+  text-align: center;
+  padding: 0 2px;
+}
+.beacon-badge.count-fade { animation: badge-fade var(--t-fast) var(--ease-swift) 1; }
+@keyframes badge-fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.bp-proposals-hdr { font-size: 10px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-low); padding: 4px 8px 2px; }
+.bp-proposal { cursor: pointer; }
+.bp-gold-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--gold); flex-shrink: 0; }
+.bp-headline { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ---------- log viewer — terminal family: mono, dense, bg-0 ---------- */
+.lv-dialog { min-width: 620px; max-width: 80vw; }
+.lv-toolbar { display: flex; gap: 6px; margin-bottom: 6px; }
+.lv-toolbar .lv-search { flex: 1; }
+.lv-rows {
+  height: 420px;
+  overflow-y: auto;
+  background: var(--bg-0);
+  border: 1px solid var(--line);
+  border-radius: var(--r-s);
+  padding: 4px 0;
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+.lv-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 1px 10px;
+  border-left: 2px solid transparent;
+}
+.lv-row:hover { background: var(--bg-1); }
+/* rows that became proposals carry a 2px gold tick */
+.lv-row.proposed { border-left-color: var(--gold); }
+.lv-time { color: var(--text-low); font-size: 10px; flex-shrink: 0; }
+.lv-sender { color: var(--gold); flex-shrink: 0; }
+/* teal = agent, only once a proposal became a task */
+.lv-chev { color: var(--energy); font-weight: 700; flex-shrink: 0; }
+.lv-text { color: var(--text-mid); white-space: pre-wrap; word-break: break-word; flex: 1; }
+.lv-marker { font-size: 9.5px; color: var(--gold); flex-shrink: 0; }
+.lv-row.skipped .lv-marker, .lv-row.expired .lv-marker { color: var(--text-low); }
+.lv-row.approved .lv-marker { color: var(--energy); }
+
+/* ---------- telegram proxy row ---------- */
+.cc-proxy {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 2px 4px;
+}
+.cc-proxy .input { flex: 1; font-size: 11px; }
+.cc-proxy .btn { padding: 3px 10px; }
+
+.wc-remove { flex-shrink: 0; opacity: 0.55; }
+.wc-remove:hover { opacity: 1; color: var(--crit); }

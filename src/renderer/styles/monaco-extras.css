@@ -1,0 +1,20 @@
+/* Monaco gutter decorations for git diff ranges */
+.gutter-added {
+  border-left: 3px solid var(--energy);
+  margin-left: 3px;
+}
+.gutter-modified {
+  border-left: 3px solid var(--flare);
+  margin-left: 3px;
+}
+.gutter-deleted {
+  border-left: 3px solid var(--crit);
+  margin-left: 3px;
+}
+
+/* codicon font for monaco widgets */
+@font-face {
+  font-family: "codicon";
+  src: url("./codicon.ttf") format("truetype");
+  font-display: block;
+}

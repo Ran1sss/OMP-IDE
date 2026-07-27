@@ -1,0 +1,467 @@
+/* ============================================================
+   REACTOR models — model chip, switcher popover, settings page.
+   Models are infrastructure: neutral ladder + --power. No new actor color.
+   ============================================================ */
+
+/* ---------- status bar model chip ---------- */
+.model-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  overflow: hidden;
+}
+.model-chip .mc-bar {
+  width: 3px;
+  height: 12px;
+  border-radius: 1.5px;
+  background: var(--bg-2);
+  position: relative;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.model-chip .mc-bar::after {
+  content: "";
+  position: absolute;
+  left: 0; right: 0; bottom: 0;
+  height: var(--mc-fill, 50%);
+  background: var(--power);
+  border-radius: 1.5px;
+  transition: height var(--t-med) var(--ease-swift), background var(--t-med) var(--ease-swift);
+}
+.model-chip.crit .mc-bar::after { background: var(--crit); }
+.model-chip .mc-name {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.model-chip .mc-pending {
+  font-size: 9.5px;
+  color: var(--flare);
+  font-weight: 700;
+  letter-spacing: 0.05em;
+}
+/* switch crossfade: old slides down-and-out, new slides in */
+@keyframes chip-out { from { transform: translateY(0); opacity: 1; } to { transform: translateY(10px); opacity: 0; } }
+@keyframes chip-in  { from { transform: translateY(-10px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+.model-chip .mc-name.switch-out { animation: chip-out 120ms var(--ease-swift) forwards; }
+.model-chip .mc-name.switch-in  { animation: chip-in 120ms var(--ease-swift); }
+
+/* ---------- switcher popover ---------- */
+.model-pop {
+  position: fixed;
+  z-index: 1100;
+  min-width: 300px;
+  max-width: 380px;
+  padding: 8px;
+  background: rgba(16, 19, 28, 0.94);
+  backdrop-filter: blur(16px);
+  border: 1px solid var(--line-bright);
+  border-radius: var(--r-m);
+  box-shadow: var(--shadow-float);
+  animation: toast-in 140ms var(--ease-swift);
+}
+.model-pop .mp-section {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-low);
+  padding: 6px 8px 2px;
+}
+.model-pop .mp-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  font-size: 12px;
+  color: var(--text-mid);
+  border-radius: var(--r-s);
+  cursor: pointer;
+}
+.model-pop .mp-row:hover { background: var(--bg-2); color: var(--text-hi); }
+.model-pop .mp-row.active { background: var(--power-15); color: var(--text-hi); }
+.model-pop .mp-row .mono { font-size: 11px; }
+.model-pop .mp-row .mp-prov { margin-left: auto; font-size: 10px; color: var(--text-low); flex-shrink: 0; }
+.model-pop .mp-role {
+  display: inline-flex;
+  min-width: 44px;
+  justify-content: center;
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 7px;
+  background: var(--power-15);
+  color: var(--power);
+  flex-shrink: 0;
+}
+.model-pop .mp-empty { padding: 14px; text-align: center; color: var(--text-low); font-size: 12px; }
+.model-pop .mp-foot {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--line);
+}
+
+/* ---------- models settings dialog ----------
+   Layout contract: header (title + role rail) and footer (Close) are pinned;
+   ONLY .md-scroll scrolls. Fits 1280×760 with nothing clipped. */
+.models-dialog {
+  width: 640px;
+  max-width: 92vw;
+  max-height: 90vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.models-dialog .md-head {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-bottom: 10px;
+}
+.models-dialog .md-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-right: 4px;
+}
+.models-dialog .dialog-actions { flex-shrink: 0; }
+
+/* role rail — visual anchor; wraps instead of squeezing */
+.role-rail {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.role-slot {
+  flex: 1 1 180px;
+  min-width: 0;
+  padding: 8px 10px;
+  background: var(--bg-1);
+  border: 1px solid var(--line);
+  border-radius: var(--r-m);
+  cursor: pointer;
+  transition: border-color var(--t-fast) var(--ease-swift), background var(--t-fast) var(--ease-swift);
+}
+.role-slot:hover { border-color: var(--power-40); background: var(--bg-2); }
+.role-slot .rs-role {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--power);
+}
+/* provider abbreviates first; the model id itself NEVER ellipsizes */
+.role-slot .rs-prov {
+  font-size: 10px;
+  color: var(--text-low);
+  margin-top: 3px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.role-slot .rs-model {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text-hi);
+  margin-top: 1px;
+  word-break: break-all; /* wrap, never clip */
+}
+.role-slot .rs-model.unset { color: var(--text-low); font-style: italic; word-break: normal; }
+.role-slot.assign-target { border-color: var(--power); box-shadow: 0 0 0 1px var(--power-40); }
+
+/* type-to-filter input pinned above model tables */
+.model-filter {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--bg-1);
+  padding: 2px 0 4px;
+}
+.model-filter .input { font-family: var(--font-mono); font-size: 11px; padding: 3px 8px; }
+.mm-hl { color: var(--power); font-weight: 700; }
+
+/* provider cards */
+.mprov-card {
+  background: var(--bg-1);
+  border: 1px solid var(--line);
+  border-radius: var(--r-m);
+  padding: 10px 12px;
+}
+.mprov-card.crit { border-color: var(--crit-40); }
+.mprov-card .pc-head { display: flex; align-items: center; gap: 8px; }
+.mprov-card .pc-glyph { display: inline-flex; color: var(--text-mid); flex-shrink: 0; }
+.mprov-card .pc-glyph svg { width: 16px; height: 16px; }
+.mprov-card.active-prov .pc-glyph { color: var(--text-hi); }
+.mprov-card .pc-name { font-weight: 700; font-size: 13px; }
+.mprov-card .pc-url { font-family: var(--font-mono); font-size: 10px; color: var(--text-low); overflow: hidden; text-overflow: ellipsis; }
+.mprov-card .pc-health {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 1px 7px;
+  border-radius: 7px;
+  flex-shrink: 0;
+}
+.mprov-card .pc-health.ok { color: var(--power); background: var(--power-15); }
+.mprov-card .pc-health.unknown { color: var(--text-low); background: var(--bg-2); }
+.mprov-card .pc-health.auth-error, .mprov-card .pc-health.network-error, .mprov-card .pc-health.rate-limited { color: var(--crit); background: var(--crit-15); }
+.mprov-card .pc-detail { font-family: var(--font-mono); font-size: 10.5px; color: var(--crit); margin-top: 4px; user-select: text; }
+.mprov-card .pc-valmsg { font-family: var(--font-mono); font-size: 10.5px; margin-top: 4px; color: var(--power); }
+
+/* ---------- profiles: badges, rename, read-only, group headers ---------- */
+.mprov-card.readonly { opacity: 0.75; }
+.mprov-card .pc-name.editable { cursor: text; }
+.mprov-card .pc-name.editable:hover { color: var(--power); }
+.mprov-card .pc-rename { font-size: 12px; padding: 1px 6px; max-width: 220px; }
+.pc-badges { display: inline-flex; gap: 4px; flex-shrink: 0; }
+.pc-badge {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  padding: 0 6px;
+  border-radius: 7px;
+  color: var(--text-mid);
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+}
+.pc-badge.ro { color: var(--flare); border-color: var(--flare-15); }
+/* tiny health dot for group headers and palette rows */
+.pc-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-low);
+  flex-shrink: 0;
+  display: inline-block;
+}
+.pc-dot.ok { background: var(--power); }
+.pc-dot.auth-error, .pc-dot.network-error, .pc-dot.rate-limited { background: var(--crit); }
+/* switcher group headers: profile context in UI font, sticky on the depth ladder */
+.mp-groups { max-height: 300px; overflow-y: auto; }
+.mp-group-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  font-size: 10.5px;
+  color: var(--text-mid);
+  background: var(--bg-1);
+  border-bottom: 1px solid var(--line);
+}
+.mp-group-head .mp-count { color: var(--text-low); }
+/* chip qualifier: shown only while ambiguous — profile part dimmed */
+.model-chip .mc-qual { font-family: var(--font-mono); font-size: 11px; color: var(--text-mid); }
+
+.mprov-card .pc-models {
+  margin-top: 8px;
+  max-height: 180px;
+  overflow-y: auto;
+  border-top: 1px solid var(--line);
+  padding-top: 6px;
+}
+.mmodel-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 4px;
+  font-size: 12px;
+  border-radius: var(--r-s);
+  color: var(--text-mid);
+}
+.mmodel-row:hover { background: var(--bg-2); color: var(--text-hi); }
+.mmodel-row .mm-id { font-family: var(--font-mono); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mmodel-row .mm-ctx { margin-left: auto; font-family: var(--font-mono); font-size: 10px; color: var(--text-low); flex-shrink: 0; }
+.mmodel-row .mm-star {
+  cursor: pointer;
+  color: var(--text-low);
+  flex-shrink: 0;
+  transition: color var(--t-fast) var(--ease-swift);
+}
+.mmodel-row .mm-star:hover { color: var(--text-hi); }
+.mmodel-row .mm-star.on { color: var(--gold); }
+.mmodel-row .mm-use {
+  flex-shrink: 0;
+  padding: 1px 8px;
+  font-size: 10.5px;
+}
+
+.mprov-card .pc-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+}
+
+/* key field with reveal-on-hold */
+.key-field { display: flex; gap: 6px; align-items: center; }
+.key-field .input { flex: 1; }
+
+/* usage strip (agent panel) */
+.usage-strip {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 4px 12px;
+  border-top: 1px solid var(--line);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-low);
+  flex-shrink: 0;
+}
+.usage-strip .us-val { color: var(--text-mid); }
+
+/* model failure banner (agent panel) */
+.model-warn {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 8px 12px 0;
+  padding: 8px 12px;
+  background: var(--crit-15);
+  border: 1px solid var(--crit-40);
+  border-radius: var(--r-m);
+  font-size: 12px;
+  color: var(--text-hi);
+  flex-shrink: 0;
+}
+.model-warn .mw-detail { font-family: var(--font-mono); font-size: 10.5px; color: var(--crit); user-select: text; }
+.model-warn .mw-actions { margin-left: auto; display: flex; gap: 6px; flex-shrink: 0; }
+
+/* ---------- thinking dial (segmented, --power interactions) ---------- */
+.think-dial {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px;
+  margin-top: 6px;
+  max-width: 100%;
+}
+.think-dial .td-seg {
+  padding: 1px 7px;
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  color: var(--text-low);
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  cursor: pointer;
+  transition: color var(--t-fast) var(--ease-swift), background var(--t-fast) var(--ease-swift);
+}
+.think-dial .td-seg:hover { color: var(--text-mid); background: var(--bg-1); }
+.think-dial .td-seg.active { color: var(--power); background: var(--bg-2); border-color: var(--power-40); }
+.think-dial.disabled .td-seg { color: var(--text-low); opacity: 0.5; cursor: default; }
+.think-dial.disabled .td-seg.active { color: var(--text-low); background: var(--bg-1); border-color: var(--line); }
+.think-dial .td-note { font-size: 9px; color: var(--flare); margin-left: 6px; }
+
+/* ---------- one-shot boost toggle (composer row) ---------- */
+.boost-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  margin-right: 8px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-low);
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  cursor: pointer;
+  transition: color var(--t-fast) var(--ease-swift), background var(--t-fast) var(--ease-swift),
+    border-color var(--t-fast) var(--ease-swift);
+}
+.boost-btn svg { width: 11px; height: 11px; }
+.boost-btn:hover { color: var(--text-mid); background: var(--bg-1); }
+.boost-btn.armed {
+  color: var(--power);
+  background: var(--bg-2);
+  border-color: var(--power-40);
+}
+
+/* ---------- chip thinking glyph: three ascending bars ---------- */
+.mc-think {
+  display: inline-flex;
+  align-items: flex-end;
+  gap: 1.5px;
+  height: 11px;
+  margin-left: 2px;
+}
+.mc-think .mct-bar {
+  width: 2.5px;
+  border-radius: 1px;
+  background: var(--bg-2);
+  transition: background var(--t-med) var(--ease-swift);
+}
+.mc-think .mct-bar:nth-child(1) { height: 3px; }
+.mc-think .mct-bar:nth-child(2) { height: 5px; }
+.mc-think .mct-bar:nth-child(3) { height: 7px; }
+.mc-think .mct-bar:nth-child(4) { height: 9px; }
+.mc-think .mct-bar:nth-child(5) { height: 11px; }
+.mc-think .mct-bar.lit { background: var(--text-mid); }
+/* lit bars go teal + pulse only while reasoning tokens actually stream */
+.mc-think.live .mct-bar.lit {
+  background: var(--energy);
+  animation: mct-pulse 1s var(--ease-swift) infinite;
+}
+@keyframes mct-pulse {
+  0%, 100% { opacity: 0.65; }
+  50%      { opacity: 1; filter: drop-shadow(0 0 3px var(--energy-40)); }
+}
+
+/* ---------- reasoning block in chat (∴) ---------- */
+.think-block {
+  align-self: stretch;
+  border-left: 2px solid rgba(85, 230, 193, 0.25); /* dimmed teal */
+  padding-left: 10px;
+  margin: 2px 0;
+}
+.think-block .think-head {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-mid);
+  cursor: pointer;
+  user-select: none;
+  transition: color var(--t-fast) var(--ease-swift);
+}
+.think-block .think-head:hover { color: var(--text-hi); }
+.think-block.streaming .think-head { color: rgba(85, 230, 193, 0.6); }
+.think-block .think-body {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-mid);
+  opacity: 0.75;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 320px;
+  overflow-y: auto;
+  margin-top: 4px;
+  user-select: text;
+  animation: think-expand var(--t-med) var(--ease-swift);
+}
+@keyframes think-expand {
+  from { opacity: 0; transform: translateY(-4px); }
+  to   { opacity: 0.75; transform: translateY(0); }
+}
+
+/* ---------- orb breathing reflects the level while reasoning ----------
+   high = slower, deeper breaths (the reactor working harder) */
+.orb.thinking.reasoning { animation-duration: 2s; }
+.orb.thinking.reasoning.level-low { animation-duration: 1.6s; }
+.orb.thinking.reasoning.level-med { animation-duration: 2.4s; }
+.orb.thinking.reasoning.level-high { animation-duration: 3.4s; }
+.orb.thinking.reasoning.level-xhigh { animation-duration: 4.4s; }
+.orb.thinking.reasoning.level-max { animation-duration: 5.6s; }

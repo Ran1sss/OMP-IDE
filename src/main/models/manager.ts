@@ -1,0 +1,876 @@
+/**
+ * Model Control backend, profile edition: OMP's models.yml `providers:` map
+ * is the profile registry (source of truth). The IDE enumerates it, writes
+ * through it (create/duplicate/rename/delete), and keeps only supplementary
+ * metadata (favorites, enabled, origin badges, roles mirror, thinking) in
+ * its own store. Every model reference is `<profile>/<model>` — natively
+ * OMP's own addressing, no translation layer.
+ */
+
+import type { IpcMain } from "electron";
+import { BrowserWindow } from "electron";
+import chokidar, { type FSWatcher } from "chokidar";
+import type {
+  ModelsState,
+  ModelsUsage,
+  ModelRole,
+  ModelEvent,
+  ProviderInfo,
+  ProviderTemplateId,
+  ValidateResult,
+  ProviderHealth,
+  ThinkingLevel,
+} from "../../shared/types";
+import { MODEL_ROLES, THINKING_LEVELS } from "../../shared/types";
+import { getAgentBridge, setOmpChildEnv, onNewSession, registerThinkingControl, type AgentBridge } from "../omp-service";
+import { LEVEL_TO_OMP, capabilityFromCatalog, type ThinkCapability } from "./thinking";
+import {
+  loadModelsStore,
+  saveModelsStore,
+  defaultMeta,
+  putProviderKey,
+  getProviderKey,
+  dropProviderKey,
+  hasProviderKey,
+  rekeyProfile,
+  type BuiltinProfile,
+} from "./store";
+import { TEMPLATES, fetchProviderModels } from "./providers";
+import {
+  MODELS_YML,
+  CONFIG_YML,
+  envVarFor,
+  writeRole,
+  readRoles,
+  readOmpProfiles,
+  writeOmpProfile,
+  deleteOmpProfile,
+  renameOmpProfile,
+  renameInConfigYml,
+  validProfileName,
+  BUILTIN_ENV,
+  type OmpProfile,
+} from "./omp-config";
+
+class ModelsManager {
+  private bridge: AgentBridge = getAgentBridge();
+  private health = new Map<string, { state: ProviderHealth; detail?: string }>();
+  private pendingSwitch: { selector: string; label: string } | null = null;
+  private usage: ModelsUsage = { requests: 0, inputTokens: 0, outputTokens: 0, reasoningTokens: 0, hasTokenData: false };
+  private usagePollTimer: NodeJS.Timeout | null = null;
+  /** session-only thinking override; cleared on new session */
+  private sessionThinking: ThinkingLevel | null = null;
+  /** thinking level change queued to the run boundary */
+  private pendingThinking: ThinkingLevel | null = null;
+  /** one-shot boost level; wins over override, cleared after exactly one send */
+  private boostThinking: ThinkingLevel | null = null;
+  /** a send has consumed the armed boost; clear it at the next run boundary */
+  private boostConsumed = false;
+  /** capability of active model per omp catalog; refreshed on model change */
+  private activeCapability: ThinkCapability = "unknown";
+  /** live snapshot of OMP's profile registry (reconciled from models.yml) */
+  private profiles: OmpProfile[] = [];
+  private watcher: FSWatcher | null = null;
+  private reconcileTimer: NodeJS.Timeout | null = null;
+  /** last state JSON pushed — reconcile skips no-op pushes (self-write loop guard) */
+  private lastStateJson = "";
+
+  init(): void {
+    this.reconcile();
+    // adopt roles already present in omp's config.yml (user may have set them there)
+    const store = loadModelsStore();
+    const ompRoles = readRoles();
+    for (const role of MODEL_ROLES) {
+      if (!store.roles[role] && ompRoles[role]) store.roles[role] = ompRoles[role] ?? null;
+    }
+    saveModelsStore();
+    this.applyChildEnv();
+
+    // session overrides die with the session (by design)
+    onNewSession(() => {
+      this.sessionThinking = null;
+      this.pendingThinking = null;
+      this.boostThinking = null;
+      this.boostConsumed = false;
+      void this.applyThinking("new-session");
+      this.pushState();
+    });
+    this.bridge.onModelChange((m) => {
+      this.log("switch", `active model now ${m.provider}/${m.id}`, "omp");
+      void this.refreshCapability();
+      void this.applyThinking("model-change");
+      this.pushState();
+    });
+    this.bridge.onStatus((s) => {
+      if (s.state === "idle" && this.pendingSwitch) {
+        const sw = this.pendingSwitch;
+        this.pendingSwitch = null;
+        void this.requestSwitch(sw.selector, "queued");
+      }
+      let boostExpired = false;
+      if (s.state === "idle" && this.boostConsumed) {
+        this.boostConsumed = false;
+        this.boostThinking = null;
+        boostExpired = true;
+        this.log("THINK", "boost expired (one send done)", "boost");
+        this.pushState();
+      }
+      if (s.state === "idle" && this.pendingThinking !== null) {
+        this.pendingThinking = null;
+        void this.applyThinking("queued");
+      } else if (boostExpired) {
+        void this.applyThinking("boost-expired");
+      }
+      if (s.state === "idle") void this.refreshUsage();
+    });
+    this.bridge.onEvent((e) => {
+      if (e.kind === "user-message") this.usage.requests++;
+      if (e.kind === "user-message" && this.boostThinking !== null) this.boostConsumed = true;
+      if (e.kind === "agent-end") void this.refreshUsage();
+    });
+    void this.refreshCapability();
+    void this.applyThinking("startup");
+
+    // health check on start for profiles owning a role
+    const owned = new Set<string>();
+    for (const role of MODEL_ROLES) {
+      const sel = store.roles[role];
+      if (sel) owned.add(sel.split("/")[0]);
+    }
+    for (const name of owned) {
+      if (this.findProfile(name)) void this.checkHealth(name);
+    }
+
+    // live config sync: external edits reconcile into the UI (~2s)
+    this.watcher = chokidar.watch([MODELS_YML, CONFIG_YML], { ignoreInitial: true });
+    this.watcher.on("all", () => {
+      clearTimeout(this.reconcileTimer ?? undefined);
+      this.reconcileTimer = setTimeout(() => {
+        const prev = this.profiles;
+        this.reconcile();
+        this.applyChildEnv();
+        this.pushState(); // no-op when nothing changed (lastStateJson guard)
+        this.checkOrphanedRoles(prev);
+      }, 500);
+    });
+
+    // cross-module thinking surface (consumed by the remote module's /think)
+    registerThinkingControl({
+      describe: () => ({
+        effective: this.effectiveThinking(),
+        override: this.sessionThinking,
+        boost: this.boostThinking,
+        capability: this.activeCapability,
+      }),
+      setSession: (level, origin) => {
+        if (!(THINKING_LEVELS as string[]).includes(level))
+          return { ok: false, error: `Unknown level "${level}". Use: ${THINKING_LEVELS.join(" · ")}` };
+        if (this.activeCapability === "no-thinking")
+          return { ok: false, error: "Active model doesn't support thinking." };
+        const r = this.setSessionThinking(level as ThinkingLevel, origin);
+        return { ok: true, pending: r.pending };
+      },
+    });
+  }
+
+  dispose(): void {
+    clearInterval(this.usagePollTimer ?? undefined);
+    clearTimeout(this.reconcileTimer ?? undefined);
+    void this.watcher?.close();
+    registerThinkingControl(null);
+  }
+
+  // ================================================== reconciliation (OMP wins)
+
+  /** IDE view := OMP config. Idempotent; meta created for new profiles. */
+  private reconcile(): void {
+    this.profiles = readOmpProfiles();
+    const store = loadModelsStore();
+    let dirty = false;
+    for (const p of this.profiles) {
+      if (!p.parseable) continue;
+      if (!store.profileMeta[p.name]) {
+        store.profileMeta[p.name] = defaultMeta("imported");
+        dirty = true;
+      }
+    }
+    // meta for vanished profiles (kept for builtins) is dropped
+    const live = new Set<string>([
+      ...this.profiles.map((p) => p.name),
+      ...store.builtins.map((b) => b.name),
+    ]);
+    for (const name of Object.keys(store.profileMeta)) {
+      if (!live.has(name)) {
+        delete store.profileMeta[name];
+        this.health.delete(name);
+        dirty = true;
+      }
+    }
+    if (dirty) saveModelsStore();
+  }
+
+  /** does a selector resolve against a given profile snapshot? (builtins always live) */
+  private selectorLiveIn(selector: string, profiles: OmpProfile[]): boolean {
+    const slash = selector.indexOf("/");
+    if (slash < 0) return false;
+    const profile = selector.slice(0, slash);
+    const modelId = selector.slice(slash + 1);
+    const builtin = loadModelsStore().builtins.find((b) => b.name === profile);
+    if (builtin) return builtin.models.some((m) => m.id === modelId);
+    const p = profiles.find((x) => x.name === profile);
+    return p !== undefined && p.models.some((m) => m.id === modelId);
+  }
+
+  /** an external edit tore a profile (or model id) out from under an assigned
+   * role → force reassignment in the renderer. Flags only selectors the PREVIOUS
+   * snapshot could resolve — never-resolvable forms (omp-native selectors adopted
+   * from config.yml) stay untouched. The watcher's 500ms timer coalesces edit
+   * bursts, and prev==current on a no-op reconcile, so each removal fires once. */
+  private checkOrphanedRoles(prev: OmpProfile[]): void {
+    const store = loadModelsStore();
+    const orphaned = MODEL_ROLES.filter((role) => {
+      const sel = store.roles[role];
+      if (!sel) return false;
+      return this.selectorLiveIn(sel, prev) && !this.selectorLiveIn(sel, this.profiles);
+    });
+    if (!orphaned.length) return;
+    this.log("provider", `external edit orphaned role(s): ${orphaned.join(", ")}`, "external");
+    for (const w of BrowserWindow.getAllWindows()) w.webContents.send("models:rolesOrphaned", orphaned);
+  }
+
+  // ================================================== state assembly
+
+  private findProfile(name: string): OmpProfile | undefined {
+    return this.profiles.find((p) => p.name === name);
+  }
+
+  private profileTemplate(p: OmpProfile): ProviderTemplateId {
+    // models.yml profiles are OpenAI-compatible by construction
+    return "custom";
+  }
+
+  private profileInfo(p: OmpProfile): ProviderInfo {
+    const store = loadModelsStore();
+    const meta = store.profileMeta[p.name] ?? defaultMeta("imported");
+    const h = this.health.get(p.name);
+    const favs = new Set(meta.favorites);
+    return {
+      id: p.name,
+      template: this.profileTemplate(p),
+      displayName: p.name,
+      baseUrl: p.baseUrl,
+      enabled: p.parseable ? meta.enabled : false,
+      health: h?.state ?? "unknown",
+      healthDetail: h?.detail,
+      models: p.models.map((m) => ({ ...m, favorite: favs.has(m.id) })),
+      hasKey: hasProviderKey(p.name) || p.apiKeyRef !== null,
+      origin: p.parseable ? meta.origin : "readonly",
+      note: p.parseable ? undefined : "managed outside IDE — entry preserved verbatim",
+    };
+  }
+
+  private builtinInfo(b: BuiltinProfile): ProviderInfo {
+    const store = loadModelsStore();
+    const meta = store.profileMeta[b.name] ?? defaultMeta("ide");
+    const h = this.health.get(b.name);
+    const favs = new Set(meta.favorites);
+    return {
+      id: b.name,
+      template: b.template,
+      displayName: b.name,
+      baseUrl: b.baseUrl,
+      enabled: meta.enabled,
+      health: h?.state ?? "unknown",
+      healthDetail: h?.detail,
+      models: b.models.map((m) => ({ ...m, favorite: favs.has(m.id) })),
+      hasKey: hasProviderKey(b.name),
+      origin: meta.origin,
+    };
+  }
+
+  private allInfos(): ProviderInfo[] {
+    const store = loadModelsStore();
+    return [
+      ...store.builtins.map((b) => this.builtinInfo(b)),
+      ...this.profiles.map((p) => this.profileInfo(p)),
+    ];
+  }
+
+  /** the one resolver: effective = boost ?? session override ?? default-role level */
+  private effectiveThinking(): ThinkingLevel {
+    return this.boostThinking ?? this.sessionThinking ?? loadModelsStore().thinkingRoles.default;
+  }
+
+  getState(): ModelsState {
+    const store = loadModelsStore();
+    const state: ModelsState = {
+      providers: this.allInfos(),
+      roles: {
+        default: { selector: store.roles.default },
+        smol: { selector: store.roles.smol },
+        slow: { selector: store.roles.slow },
+      },
+      active: this.bridge.getActiveModel(),
+      pending: this.pendingSwitch,
+      thinking: {
+        roles: { ...store.thinkingRoles },
+        sessionOverride: this.sessionThinking,
+        effective: this.effectiveThinking(),
+        capability: this.activeCapability,
+        pending: this.pendingThinking,
+        boost: this.boostThinking,
+      },
+    };
+    return state;
+  }
+
+  // ================================================== thinking (unchanged core)
+
+  private async refreshCapability(): Promise<void> {
+    const active = this.bridge.getActiveModel();
+    if (!active) {
+      this.activeCapability = "unknown";
+      return;
+    }
+    const store = loadModelsStore();
+    if (store.noThinking.includes(`${active.provider}/${active.id}`)) {
+      this.activeCapability = "no-thinking";
+      return;
+    }
+    const res = await this.bridge.request({ type: "get_available_models" }, 10_000);
+    if (res.success && res.data && Array.isArray(res.data.models)) {
+      const entry = (res.data.models as Record<string, unknown>[]).find(
+        (m) => m.id === active.id && (m.provider === active.provider || m.provider === undefined),
+      );
+      if (entry) {
+        this.activeCapability = capabilityFromCatalog(entry.thinking, entry.reasoning);
+        this.pushState();
+        return;
+      }
+    }
+    this.activeCapability = "unknown";
+  }
+
+  /** push the effective level into the live session (next-turn semantics) */
+  private async applyThinking(origin: string): Promise<void> {
+    if (this.activeCapability === "no-thinking") return; // omit param entirely
+    const level = this.effectiveThinking();
+    const res = await this.bridge.request(
+      { type: "set_thinking_level", level: LEVEL_TO_OMP[level] },
+      8000,
+    );
+    if (!res.success && res.error) {
+      const active = this.bridge.getActiveModel();
+      if (active && this.activeCapability === "unknown") {
+        const store = loadModelsStore();
+        const sel = `${active.provider}/${active.id}`;
+        if (!store.noThinking.includes(sel)) {
+          store.noThinking.push(sel);
+          saveModelsStore();
+        }
+        this.activeCapability = "no-thinking";
+        this.log("THINK", `${sel} rejected thinking param — marked no-thinking`, origin);
+        for (const w of BrowserWindow.getAllWindows())
+          w.webContents.send("models:thinkRejected", active.id);
+        this.pushState();
+      }
+    }
+  }
+
+  setRoleThinking(role: ModelRole, level: ThinkingLevel, origin: string): void {
+    const store = loadModelsStore();
+    store.thinkingRoles[role] = level;
+    saveModelsStore();
+    const sel = store.roles[role];
+    if (sel) writeRole(role, `${sel}:${LEVEL_TO_OMP[level]}`);
+    this.log("THINK", `${role} default → ${level}`, origin);
+    if (role === "default" && this.sessionThinking === null) this.queueOrApplyThinking(origin);
+    this.pushState();
+  }
+
+  setSessionThinking(level: ThinkingLevel | null, origin: string): { pending: boolean } {
+    this.sessionThinking = level;
+    this.log("THINK", level ? `session override → ${level}` : "session override cleared", origin);
+    const pending = this.queueOrApplyThinking(origin);
+    this.pushState();
+    return { pending };
+  }
+
+  /** one-shot boost: one level up from the current base, for exactly one send */
+  boostOnce(origin: string): { armed: boolean; level: ThinkingLevel | null; pending: boolean } {
+    if (this.activeCapability === "no-thinking") return { armed: false, level: null, pending: false };
+    if (this.boostThinking !== null) {
+      this.boostThinking = null;
+      this.log("THINK", "boost disarmed", origin);
+      const pending = this.queueOrApplyThinking(origin);
+      this.pushState();
+      return { armed: false, level: null, pending };
+    }
+    const base = this.sessionThinking ?? loadModelsStore().thinkingRoles.default;
+    const idx = THINKING_LEVELS.indexOf(base);
+    const boosted = THINKING_LEVELS[Math.min(idx + 1, THINKING_LEVELS.length - 1)];
+    if (boosted === base) return { armed: false, level: base, pending: false };
+    this.boostThinking = boosted;
+    this.boostConsumed = false;
+    this.log("THINK", `boost armed → ${boosted} (one send)`, origin);
+    const pending = this.queueOrApplyThinking(origin);
+    this.pushState();
+    return { armed: true, level: boosted, pending };
+  }
+
+  /** mid-run changes queue to the boundary — never yank a live turn */
+  private queueOrApplyThinking(origin: string): boolean {
+    const st = this.bridge.getStatus();
+    const busy = st && (st.state === "thinking" || st.state === "tool" || st.state === "awaiting-input");
+    if (busy) {
+      this.pendingThinking = this.effectiveThinking();
+      return true;
+    }
+    void this.applyThinking(origin);
+    return false;
+  }
+
+  pushState(): void {
+    const s = this.getState();
+    const json = JSON.stringify(s);
+    if (json === this.lastStateJson) return;
+    this.lastStateJson = json;
+    for (const w of BrowserWindow.getAllWindows()) w.webContents.send("models:state", s);
+  }
+
+  private pushUsage(): void {
+    for (const w of BrowserWindow.getAllWindows()) w.webContents.send("models:usage", this.usage);
+  }
+
+  private log(kind: ModelEvent["kind"], detail: string, origin: string): void {
+    const store = loadModelsStore();
+    store.events.push({ time: Date.now(), kind, detail, origin });
+    if (store.events.length > 50) store.events.shift();
+    saveModelsStore();
+  }
+
+  /** env for the spawned omp child: profile key env-vars + builtin env vars */
+  private applyChildEnv(): void {
+    const store = loadModelsStore();
+    const env: Record<string, string> = {};
+    for (const b of store.builtins) {
+      const meta = store.profileMeta[b.name];
+      if (meta && !meta.enabled) continue;
+      const key = getProviderKey(b.name);
+      const envVar = BUILTIN_ENV[b.name] ?? TEMPLATES[b.template].ompEnvVar;
+      if (key && envVar) env[envVar] = key;
+    }
+    for (const p of this.profiles) {
+      if (!p.parseable) continue;
+      // inject only when the profile references our env-var scheme
+      if (p.apiKeyRef === envVarFor(p.name)) {
+        const key = getProviderKey(p.name);
+        if (key) env[p.apiKeyRef] = key;
+      }
+    }
+    setOmpChildEnv(env);
+  }
+
+  // ================================================== profile registry ops
+
+  /** key for VALIDATION calls the IDE itself makes (never persisted) */
+  private validationKey(p: OmpProfile): string {
+    const vaultKey = getProviderKey(p.name);
+    if (vaultKey) return vaultKey;
+    if (p.apiKeyRef) {
+      // OMP convention: env-var name first, then literal
+      const fromEnv = process.env[p.apiKeyRef];
+      if (fromEnv) return fromEnv;
+      if (!/^[A-Z_][A-Z0-9_]*$/.test(p.apiKeyRef)) return p.apiKeyRef; // literal key
+    }
+    return "";
+  }
+
+  async addProvider(input: {
+    template: ProviderTemplateId;
+    name: string;
+    apiKey: string;
+    baseUrl: string;
+  }): Promise<{ ok: true; provider: ProviderInfo } | { ok: false; error: string }> {
+    const tmpl = TEMPLATES[input.template];
+    if (!tmpl) return { ok: false, error: "Unknown provider template" };
+    const store = loadModelsStore();
+
+    if (input.template !== "custom") {
+      // built-in: singleton pseudo-profile named by OMP's provider id
+      const name = tmpl.ompProviderId!;
+      if (store.builtins.some((b) => b.name === name))
+        return { ok: false, error: `${tmpl.displayName} is already configured` };
+      if (tmpl.needsKey && !input.apiKey.trim()) return { ok: false, error: "API key is required" };
+      const baseUrl = (input.baseUrl || tmpl.defaultBaseUrl).trim().replace(/\/+$/, "");
+      const res = await fetchProviderModels(input.template, baseUrl, input.apiKey.trim());
+      if (!res.ok) return { ok: false, error: res.message };
+      const builtin: BuiltinProfile = {
+        name,
+        template: input.template,
+        baseUrl,
+        models: res.models.map((m) => ({ id: m.id, name: m.name, contextWindow: m.contextWindow })),
+      };
+      store.builtins.push(builtin);
+      store.profileMeta[name] = defaultMeta("ide");
+      if (input.apiKey.trim()) putProviderKey(name, input.apiKey.trim());
+      saveModelsStore();
+      this.health.set(name, { state: "ok" });
+      this.log("provider", `added ${name} (${res.models.length} models)`, "settings");
+      this.applyChildEnv();
+      this.pushState();
+      return { ok: true, provider: this.builtinInfo(builtin) };
+    }
+
+    // custom = a real OMP profile in models.yml
+    const name = input.name.trim().toLowerCase();
+    if (!validProfileName(name))
+      return { ok: false, error: "Profile name must be a slug: a-z, 0-9, dots, dashes (max 64)" };
+    if (this.findProfile(name) || store.builtins.some((b) => b.name === name))
+      return { ok: false, error: `Profile "${name}" already exists` };
+    const baseUrl = input.baseUrl.trim().replace(/\/+$/, "");
+    if (!baseUrl) return { ok: false, error: "Base URL is required" };
+
+    // OMP's models.yml convention is env-name-or-literal: a key that looks
+    // like an ENV VAR NAME and resolves is written as a reference (no vault
+    // copy — the value never passes through IDE storage).
+    const rawKey = input.apiKey.trim();
+    const isEnvRef = /^[A-Z_][A-Z0-9_]*$/.test(rawKey) && process.env[rawKey] !== undefined;
+    const effectiveKey = isEnvRef ? process.env[rawKey]! : rawKey;
+
+    const res = await fetchProviderModels("custom", baseUrl, effectiveKey);
+    if (!res.ok) return { ok: false, error: res.message };
+
+    const hasKey = rawKey.length > 0;
+    if (hasKey && !isEnvRef) putProviderKey(name, rawKey);
+    writeOmpProfile({
+      name,
+      baseUrl,
+      keyEnvVar: isEnvRef ? rawKey : hasKey ? envVarFor(name) : null,
+      models: res.models.map((m) => ({ id: m.id, name: m.name, contextWindow: m.contextWindow })),
+    });
+    store.profileMeta[name] = defaultMeta("ide");
+    saveModelsStore();
+    this.reconcile();
+    this.health.set(name, { state: "ok" });
+    this.log("provider", `profile ${name} created (${res.models.length} models) → models.yml`, "settings");
+    this.applyChildEnv();
+    this.pushState();
+    const p = this.findProfile(name);
+    return p
+      ? { ok: true, provider: this.profileInfo(p) }
+      : { ok: false, error: "Profile write failed — models.yml not updated" };
+  }
+
+  async renameProfile(oldName: string, newNameRaw: string): Promise<{ ok: boolean; error?: string }> {
+    const newName = newNameRaw.trim().toLowerCase();
+    if (newName === oldName) return { ok: true };
+    if (!validProfileName(newName))
+      return { ok: false, error: "Profile name must be a slug: a-z, 0-9, dots, dashes (max 64)" };
+    const store = loadModelsStore();
+    if (this.findProfile(newName) || store.builtins.some((b) => b.name === newName))
+      return { ok: false, error: `Profile "${newName}" already exists` };
+    const src = this.findProfile(oldName);
+    if (!src) return { ok: false, error: "Profile not found" };
+    if (!src.parseable) return { ok: false, error: "This entry is managed outside the IDE" };
+
+    // atomic-ish: models.yml key first; on success propagate everywhere.
+    if (!renameOmpProfile(oldName, newName))
+      return { ok: false, error: "Rename failed in models.yml" };
+    renameInConfigYml(oldName, newName);
+    rekeyProfile(oldName, newName); // vault + meta + role mirror + noThinking
+    const meta = loadModelsStore().profileMeta[newName];
+    if (meta) meta.origin = "ide"; // edited → no longer "imported"
+    saveModelsStore();
+    const h = this.health.get(oldName);
+    if (h) {
+      this.health.set(newName, h);
+      this.health.delete(oldName);
+    }
+    this.reconcile();
+    this.log("provider", `profile ${oldName} renamed → ${newName}`, "settings");
+    this.applyChildEnv();
+    this.pushState();
+    return { ok: true };
+  }
+
+  async validateProvider(name: string): Promise<ValidateResult> {
+    const store = loadModelsStore();
+    const builtin = store.builtins.find((b) => b.name === name);
+    if (builtin) {
+      const key = getProviderKey(name) ?? "";
+      const res = await fetchProviderModels(builtin.template, builtin.baseUrl, key);
+      this.health.set(name, {
+        state: res.ok ? "ok" : res.kind === "ok" ? "network-error" : res.kind,
+        detail: res.ok ? undefined : res.message,
+      });
+      if (res.ok) {
+        builtin.models = res.models.map((m) => ({ id: m.id, name: m.name, contextWindow: m.contextWindow }));
+        saveModelsStore();
+      }
+      this.log("validate", `${name}: ${res.message}`, "settings");
+      this.pushState();
+      return { ok: res.ok, message: res.message, models: res.ok ? this.builtinInfo(builtin).models : [] };
+    }
+
+    const p = this.findProfile(name);
+    if (!p) return { ok: false, message: "Profile not found", models: [] };
+    const res = await fetchProviderModels("custom", p.baseUrl, this.validationKey(p));
+    this.health.set(name, {
+      state: res.ok ? "ok" : res.kind === "ok" ? "network-error" : res.kind,
+      detail: res.ok ? undefined : res.message,
+    });
+    if (res.ok && p.parseable) {
+      // refresh model list in models.yml, preserving hand-added ids
+      const manual = p.models.filter((m) => !res.models.some((n) => n.id === m.id));
+      writeOmpProfile({
+        name,
+        baseUrl: p.baseUrl,
+        keyEnvVar: p.apiKeyRef === envVarFor(name) ? p.apiKeyRef : p.apiKeyRef ? p.apiKeyRef : null,
+        models: [
+          ...res.models.map((m) => ({ id: m.id, name: m.name, contextWindow: m.contextWindow })),
+          ...manual,
+        ],
+      });
+      this.reconcile();
+    }
+    this.log("validate", `${name}: ${res.message}`, "settings");
+    this.pushState();
+    const fresh = this.findProfile(name);
+    return { ok: res.ok, message: res.message, models: fresh ? this.profileInfo(fresh).models : [] };
+  }
+
+  async checkHealth(name: string): Promise<void> {
+    await this.validateProvider(name);
+  }
+
+  removeProvider(name: string): { needsReassign: ModelRole[] } | null {
+    const store = loadModelsStore();
+    const owned = MODEL_ROLES.filter((r) => store.roles[r]?.startsWith(`${name}/`));
+    if (owned.length) return { needsReassign: owned };
+
+    const builtinIdx = store.builtins.findIndex((b) => b.name === name);
+    if (builtinIdx >= 0) {
+      store.builtins.splice(builtinIdx, 1);
+      delete store.profileMeta[name];
+      saveModelsStore();
+    } else {
+      const p = this.findProfile(name);
+      if (!p) return null;
+      if (!p.parseable) return null; // read-only contract: never destroy
+      if (!deleteOmpProfile(name)) return null;
+      delete store.profileMeta[name];
+      saveModelsStore();
+      this.reconcile();
+    }
+    dropProviderKey(name);
+    this.health.delete(name);
+    this.log("provider", `profile ${name} removed (models.yml)`, "settings");
+    this.applyChildEnv();
+    this.pushState();
+    return null;
+  }
+
+  setProviderEnabled(name: string, enabled: boolean): void {
+    const store = loadModelsStore();
+    if (!store.profileMeta[name]) store.profileMeta[name] = defaultMeta("imported");
+    store.profileMeta[name].enabled = enabled;
+    saveModelsStore();
+    this.applyChildEnv();
+    this.pushState();
+  }
+
+  setProviderKey(name: string, apiKey: string): void {
+    putProviderKey(name, apiKey.trim());
+    // IDE-created profiles reference our env var; ensure the ref exists after
+    // a key is first set on a profile that previously had auth:none
+    const p = this.findProfile(name);
+    if (p && p.parseable && apiKey.trim() && p.apiKeyRef === null) {
+      writeOmpProfile({ name, baseUrl: p.baseUrl, keyEnvVar: envVarFor(name), models: p.models });
+      this.reconcile();
+    }
+    this.health.set(name, { state: "unknown" });
+    this.log("provider", `${name}: key updated`, "settings");
+    this.applyChildEnv();
+    this.pushState();
+  }
+
+  addCustomModel(name: string, modelId: string): void {
+    const id = modelId.trim();
+    if (!id) return;
+    const store = loadModelsStore();
+    const builtin = store.builtins.find((b) => b.name === name);
+    if (builtin) {
+      if (builtin.models.some((m) => m.id === id)) return;
+      builtin.models.push({ id, name: id, contextWindow: null });
+      saveModelsStore();
+      this.pushState();
+      return;
+    }
+    const p = this.findProfile(name);
+    if (!p || !p.parseable || p.models.some((m) => m.id === id)) return;
+    writeOmpProfile({
+      name,
+      baseUrl: p.baseUrl,
+      keyEnvVar: p.apiKeyRef,
+      models: [...p.models, { id, name: id, contextWindow: null }],
+    });
+    this.reconcile();
+    this.pushState();
+  }
+
+  setFavorite(name: string, modelId: string, fav: boolean): void {
+    const store = loadModelsStore();
+    if (!store.profileMeta[name]) store.profileMeta[name] = defaultMeta("imported");
+    const favs = new Set(store.profileMeta[name].favorites);
+    if (fav) favs.add(modelId);
+    else favs.delete(modelId);
+    store.profileMeta[name].favorites = [...favs];
+    saveModelsStore();
+    this.pushState();
+  }
+
+  // ================================================== roles & switching
+
+  /** validate a qualified selector against the live registry */
+  private resolveSelector(selector: string): { profile: string; modelId: string } | null {
+    const slash = selector.indexOf("/");
+    if (slash < 0) return null;
+    const profile = selector.slice(0, slash);
+    const modelId = selector.slice(slash + 1);
+    const store = loadModelsStore();
+    const builtin = store.builtins.find((b) => b.name === profile);
+    if (builtin) return builtin.models.some((m) => m.id === modelId) ? { profile, modelId } : null;
+    const p = this.findProfile(profile);
+    if (p && p.models.some((m) => m.id === modelId)) return { profile, modelId };
+    return null;
+  }
+
+  async assignRole(role: ModelRole, selector: string, origin: string): Promise<{ ok: boolean; error?: string }> {
+    const resolved = this.resolveSelector(selector);
+    if (!resolved) return { ok: false, error: "Unknown model selector" };
+    const store = loadModelsStore();
+    const meta = store.profileMeta[resolved.profile];
+    if (meta && !meta.enabled) return { ok: false, error: "Profile is disabled" };
+
+    store.roles[role] = selector;
+    saveModelsStore();
+    writeRole(role, selector); // qualified id verbatim — OMP's own addressing
+    this.log("role", `${role} → ${selector}`, origin);
+
+    if (role === "default") {
+      return this.requestSwitch(selector, origin);
+    }
+    this.pushState();
+    return { ok: true };
+  }
+
+  async switchModel(selector: string, origin: string): Promise<{ ok: boolean; pending: boolean; error?: string }> {
+    const resolved = this.resolveSelector(selector);
+    if (!resolved) return { ok: false, pending: false, error: "Unknown model selector" };
+    const store = loadModelsStore();
+    store.roles.default = selector;
+    saveModelsStore();
+    writeRole("default", selector);
+
+    const status = this.bridge.getStatus();
+    const busy = status && (status.state === "thinking" || status.state === "tool" || status.state === "awaiting-input");
+    if (busy) {
+      this.pendingSwitch = { selector, label: selector };
+      this.log("switch", `queued ${selector} (agent running)`, origin);
+      this.pushState();
+      return { ok: true, pending: true };
+    }
+    const r = await this.requestSwitch(selector, origin);
+    return { ok: r.ok, pending: false, error: r.error };
+  }
+
+  private async requestSwitch(selector: string, origin: string): Promise<{ ok: boolean; error?: string }> {
+    const resolved = this.resolveSelector(selector);
+    if (!resolved) return { ok: false, error: "Unknown model selector" };
+    const res = await this.bridge.request({
+      type: "set_model",
+      provider: resolved.profile,
+      modelId: resolved.modelId,
+    });
+    if (!res.success) {
+      if (res.error?.includes("Model not found")) {
+        this.log("switch", `live registry misses ${selector} — restarting session to apply`, origin);
+        const restarted = await this.bridge.restartSession();
+        if (restarted) {
+          this.log("switch", `switched to ${selector} (via session restart)`, origin);
+          this.pushState();
+          return { ok: true };
+        }
+      }
+      this.log("switch", `set_model failed: ${res.error ?? "?"}`, origin);
+      this.pushState();
+      return { ok: false, error: res.error };
+    }
+    this.log("switch", `switched to ${selector}`, origin);
+    await this.bridge.request({ type: "get_state" });
+    this.pushState();
+    return { ok: true };
+  }
+
+  // ================================================== usage
+
+  private async refreshUsage(): Promise<void> {
+    const res = await this.bridge.request({ type: "get_session_stats" }, 8000);
+    if (!res.success || !res.data) return;
+    const d = res.data;
+    const tokens = "tokens" in d && d.tokens && typeof d.tokens === "object" ? (d.tokens as Record<string, unknown>) : null;
+    const input = tokens && typeof tokens.input === "number" ? tokens.input : 0;
+    const output = tokens && typeof tokens.output === "number" ? tokens.output : 0;
+    const reasoning = tokens && typeof tokens.reasoning === "number" ? tokens.reasoning : 0;
+    const userMessages = "userMessages" in d && typeof d.userMessages === "number" ? d.userMessages : this.usage.requests;
+    this.usage = {
+      requests: userMessages,
+      inputTokens: input,
+      outputTokens: output,
+      reasoningTokens: reasoning,
+      hasTokenData: input > 0 || output > 0,
+    };
+    this.pushUsage();
+  }
+
+  getUsage(): ModelsUsage {
+    return this.usage;
+  }
+
+  getEvents(): ModelEvent[] {
+    return [...loadModelsStore().events];
+  }
+}
+
+// ================================================== module surface
+
+let manager: ModelsManager | null = null;
+
+export function registerModelsHandlers(ipc: IpcMain): void {
+  manager = new ModelsManager();
+  manager.init();
+  const m = manager;
+
+  ipc.handle("models:getState", async () => m.getState());
+  ipc.handle("models:getUsage", async () => m.getUsage());
+  ipc.handle("models:addProvider", async (_e, input: { template: ProviderTemplateId; name: string; apiKey: string; baseUrl: string }) => m.addProvider(input));
+  ipc.handle("models:renameProfile", async (_e, oldName: string, newName: string) => m.renameProfile(oldName, newName));
+  ipc.handle("models:validateProvider", async (_e, id: string) => m.validateProvider(id));
+  ipc.handle("models:removeProvider", async (_e, id: string) => m.removeProvider(id));
+  ipc.handle("models:setProviderEnabled", async (_e, id: string, enabled: boolean) => m.setProviderEnabled(id, enabled));
+  ipc.handle("models:setProviderKey", async (_e, id: string, key: string) => m.setProviderKey(id, key));
+  ipc.handle("models:addCustomModel", async (_e, id: string, modelId: string) => m.addCustomModel(id, modelId));
+  ipc.handle("models:setFavorite", async (_e, id: string, modelId: string, fav: boolean) => m.setFavorite(id, modelId, fav));
+  ipc.handle("models:assignRole", async (_e, role: ModelRole, selector: string, origin: string) => m.assignRole(role, selector, origin));
+  ipc.handle("models:switchModel", async (_e, selector: string, origin: string) => m.switchModel(selector, origin));
+  ipc.handle("models:setRoleThinking", async (_e, role: ModelRole, level: ThinkingLevel, origin: string) => m.setRoleThinking(role, level, origin));
+  ipc.handle("models:setSessionThinking", async (_e, level: ThinkingLevel | null, origin: string) => m.setSessionThinking(level, origin));
+  ipc.handle("models:boostOnce", async (_e, origin: string) => m.boostOnce(origin));
+  ipc.handle("models:getEvents", async () => m.getEvents());
+}
+
+export function disposeModels(): void {
+  manager?.dispose();
+  manager = null;
+}
