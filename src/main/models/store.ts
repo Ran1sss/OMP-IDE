@@ -34,6 +34,14 @@ export interface ProfileMeta {
   origin: "ide" | "imported";
   enabled: boolean;
   favorites: string[];
+  /** balance probe URL or base-relative path; "" = no probe */
+  balanceEndpoint?: string;
+  /** cached readout with timestamp; null = never probed */
+  balance?: { value: number | null; currency: string | null; checkedAt: number; raw?: string } | null;
+  /** low-balance warning threshold; null/undefined = off */
+  lowThreshold?: number | null;
+  /** one notice per threshold crossing, re-armed when balance recovers */
+  thresholdNotified?: boolean;
 }
 
 export interface ModelsStore {
@@ -46,6 +54,11 @@ export interface ModelsStore {
   /** "<profile>/<model>" selectors that rejected thinking params */
   noThinking: string[];
   events: ModelEvent[];
+  /** auto-swap master toggle (default ON) + per-role opt-outs */
+  autoSwapEnabled: boolean;
+  autoSwapRoleOptOut: Record<ModelRole, boolean>;
+  /** periodic balance poll, minutes; 0 = off (default 10) */
+  balancePollMinutes: number;
 }
 
 let cache: ModelsStore | null = null;
@@ -96,6 +109,9 @@ function migrateV1(parsed: Record<string, unknown>): ModelsStore {
     },
     noThinking: [],
     events: Array.isArray(parsed.events) ? (parsed.events as ModelEvent[]).slice(-50) : [],
+    autoSwapEnabled: true,
+    autoSwapRoleOptOut: { default: false, smol: false, slow: false },
+    balancePollMinutes: 10,
   };
   /** old provider id → new profile name */
   const nameOf: Record<string, string> = {};
@@ -169,6 +185,16 @@ export function loadModelsStore(): ModelsStore {
       },
       noThinking: Array.isArray(parsed.noThinking) ? (parsed.noThinking as string[]) : [],
       events: Array.isArray(parsed.events) ? (parsed.events as ModelEvent[]).slice(-50) : [],
+      autoSwapEnabled: parsed.autoSwapEnabled !== false,
+      autoSwapRoleOptOut: {
+        default: (parsed.autoSwapRoleOptOut as Record<string, boolean> | undefined)?.default === true,
+        smol: (parsed.autoSwapRoleOptOut as Record<string, boolean> | undefined)?.smol === true,
+        slow: (parsed.autoSwapRoleOptOut as Record<string, boolean> | undefined)?.slow === true,
+      },
+      balancePollMinutes:
+        typeof parsed.balancePollMinutes === "number" && parsed.balancePollMinutes >= 0
+          ? parsed.balancePollMinutes
+          : 10,
     };
   } catch {
     cache = {
@@ -178,6 +204,9 @@ export function loadModelsStore(): ModelsStore {
       thinkingRoles: { default: "med", smol: "off", slow: "high" },
       noThinking: [],
       events: [],
+      autoSwapEnabled: true,
+      autoSwapRoleOptOut: { default: false, smol: false, slow: false },
+      balancePollMinutes: 10,
     };
   }
   return cache;

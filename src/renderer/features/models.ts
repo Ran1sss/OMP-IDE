@@ -41,6 +41,8 @@ let state: ModelsState = {
     pending: null,
     boost: null,
   },
+  autoSwap: { enabled: true, roleOptOut: { default: false, smol: false, slow: false } },
+  balancePollMinutes: 10,
 };
 let usage: ModelsUsage = { requests: 0, inputTokens: 0, outputTokens: 0, reasoningTokens: 0, hasTokenData: false };
 
@@ -703,10 +705,72 @@ function renderDialog(): void {
   clear(dialogHead);
   clear(dialogBody);
 
-  dialogHead.append(el("h2", { text: "Models", style: { margin: "0" } }));
+  // global "Check balance" (top-right, quiet; in-flight shows n/total inline)
+  const probeTargets = state.providers.filter((p) => p.enabled && p.balanceEndpoint).length;
+  const checkBtn = el("button", { class: "btn mh-checkbal", text: "Check balance" }) as HTMLButtonElement;
+  checkBtn.disabled = probeTargets === 0;
+  if (probeTargets === 0) checkBtn.title = "No profile has a balance endpoint configured";
+  checkBtn.addEventListener("click", () => {
+    checkBtn.disabled = true;
+    let done = 0;
+    checkBtn.textContent = `0/${probeTargets}`;
+    // state pushes arrive per probe; count them via a temporary listener window
+    const tick = () => {
+      done++;
+      checkBtn.textContent = `${done}/${probeTargets}`;
+    };
+    const targets = state.providers.filter((p) => p.enabled && p.balanceEndpoint);
+    void Promise.allSettled(targets.map((p) => window.ide.models.checkBalance(p.id).then(tick))).then(() => {
+      checkBtn.textContent = "Check balance";
+      checkBtn.disabled = false;
+    });
+  });
+  dialogHead.append(
+    el(
+      "div",
+      { style: { display: "flex", alignItems: "center", gap: "10px" } },
+      el("h2", { text: "Models", style: { margin: "0", flex: "1" } }),
+      checkBtn,
+    ),
+  );
   const rail = el("div", { class: "role-rail" });
   for (const role of MODEL_ROLES) rail.append(roleSlot(role));
   dialogHead.append(rail);
+
+  // auto-swap + poll settings (spec §3: master toggle, per-role opt-out)
+  const swapRow = el("div", { class: "mh-swap-row" });
+  const swapSw = el("div", {
+    class: state.autoSwap.enabled ? "switch on" : "switch",
+    title: "Auto-swap: on quota exhaustion re-point the role to another profile with the same model",
+    onClick: () => void window.ide.models.setAutoSwap(!state.autoSwap.enabled),
+  });
+  swapRow.append(swapSw, el("span", { class: "mh-swap-label", text: "auto-swap on quota" }));
+  for (const role of MODEL_ROLES) {
+    const cb = el("input", { type: "checkbox" }) as HTMLInputElement;
+    cb.checked = !state.autoSwap.roleOptOut[role];
+    cb.disabled = !state.autoSwap.enabled;
+    cb.title = `Allow auto-swap for ${role}`;
+    cb.addEventListener("change", () => void window.ide.models.setRoleSwapOptOut(role, !cb.checked));
+    swapRow.append(el("label", { class: "mh-role-opt" }, cb, el("span", { text: role })));
+  }
+  const pollInput = el("input", {
+    class: "input mono",
+    type: "number",
+    value: String(state.balancePollMinutes),
+    title: "Balance poll interval, minutes (0 = off)",
+    style: { width: "52px" },
+  }) as HTMLInputElement;
+  pollInput.addEventListener("change", () => {
+    const v = parseInt(pollInput.value, 10);
+    if (v >= 0 && v <= 120) void window.ide.models.setBalancePollMinutes(v);
+  });
+  swapRow.append(
+    el("span", { style: { flex: "1" } }),
+    el("span", { class: "mh-swap-label", text: "poll" }),
+    pollInput,
+    el("span", { class: "mh-swap-label", text: "m" }),
+  );
+  dialogBody.append(swapRow);
 
   for (const p of state.providers) dialogBody.append(providerCard(p));
   dialogBody.append(addProviderCard());
@@ -720,7 +784,7 @@ function providerCard(p: ProviderInfo): HTMLElement {
   const readonly = p.origin === "readonly";
   const isActiveProv = state.roles.default.selector?.startsWith(`${p.id}/`) ?? false;
   const card = el("div", {
-    class: `mprov-card${p.health === "auth-error" || p.health === "network-error" ? " crit" : ""}${isActiveProv ? " active-prov" : ""}${readonly ? " readonly" : ""}`,
+    class: `mprov-card${p.health === "auth-error" || p.health === "network-error" ? " crit" : ""}${p.health === "depleted" ? " depleted" : ""}${isActiveProv ? " active-prov" : ""}${readonly ? " readonly" : ""}`,
   });
 
   const enableSw = el("div", {
@@ -762,6 +826,33 @@ function providerCard(p: ProviderInfo): HTMLElement {
   const badges = el("span", { class: "pc-badges" });
   if (p.origin === "imported") badges.append(el("span", { class: "pc-badge", text: "imported" }));
   if (readonly) badges.append(el("span", { class: "pc-badge ro", text: "managed outside IDE" }));
+  if (p.health === "depleted") badges.append(el("span", { class: "pc-badge depleted", text: "depleted" }));
+  // inline balance readout: value is data (mono), age is context (ui/low).
+  // No configured endpoint ⇒ no balance UI at all — never a fake "—".
+  if (p.balanceEndpoint && p.balance) {
+    const age = Math.max(0, Math.round((Date.now() - p.balance.checkedAt) / 60_000));
+    const bal = el("span", {
+      class:
+        "pc-balance" +
+        (p.health === "depleted" || (p.balance.value !== null && p.balance.value <= 0)
+          ? " crit"
+          : p.lowThreshold !== null && p.balance.value !== null && p.balance.value < p.lowThreshold
+            ? " low"
+            : ""),
+      title: p.balance.value === null ? `unparseable response: ${p.balance.raw ?? ""}` : "Click to re-check balance",
+      onClick: () => void window.ide.models.checkBalance(p.id),
+    });
+    if (p.balance.value === null) {
+      bal.append(el("span", { class: "pcb-unparseable", text: "unparseable response" }));
+    } else {
+      bal.append(
+        el("span", { class: "pcb-value mono", text: `${p.balance.value.toFixed(2)}` }),
+        p.balance.currency ? el("span", { class: "pcb-unit", text: ` ${p.balance.currency}` }) : "",
+      );
+    }
+    bal.append(el("span", { class: "pcb-age", text: ` · ${age < 1 ? "now" : `${age}m`}` }));
+    badges.append(bal);
+  }
 
   card.append(
     el(
@@ -919,6 +1010,57 @@ function providerCard(p: ProviderInfo): HTMLElement {
     : null;
 
   card.append(el("div", { class: "pc-actions" }, valBtn, keyBtn, addModelBtn, dupBtn, valMsg, el("span", { style: { flex: "1" } }), delBtn));
+
+  // balance endpoint row: configure + verify in one place (spec §3 P0)
+  const epInput = el("input", {
+    class: "input mono pc-ep-input",
+    placeholder: "Balance endpoint (URL or path, e.g. /wallet/balance) — empty = off",
+    value: p.balanceEndpoint,
+    title: "GET, authenticated like the profile's completions calls",
+  }) as HTMLInputElement;
+  epInput.addEventListener("change", () => {
+    void window.ide.models.setBalanceEndpoint(p.id, epInput.value);
+  });
+  const epTest = el("button", { class: "btn", text: "Test" }) as HTMLButtonElement;
+  const epMsg = el("span", { class: "pc-valmsg" });
+  epTest.addEventListener("click", () => {
+    void window.ide.models.setBalanceEndpoint(p.id, epInput.value);
+    epTest.disabled = true;
+    void window.ide.models.checkBalance(p.id).then((res) => {
+      epTest.disabled = false;
+      if (!res.ok) {
+        epMsg.textContent = res.error ?? "probe failed";
+        epMsg.style.color = "var(--crit)";
+      } else if (res.value === undefined) {
+        epMsg.textContent = "unparseable response";
+        epMsg.style.color = "var(--flare)";
+        epMsg.title = res.raw ?? "";
+      } else {
+        epMsg.textContent = `${res.value}${res.currency ? ` ${res.currency}` : ""}`;
+        epMsg.style.color = "var(--power)";
+      }
+    });
+  });
+  const thInput = el("input", {
+    class: "input mono pc-th-input",
+    type: "number",
+    placeholder: "low ⚠",
+    title: "Low-balance warning threshold (empty = off)",
+    value: p.lowThreshold !== null ? String(p.lowThreshold) : "",
+  }) as HTMLInputElement;
+  thInput.addEventListener("change", () => {
+    const v = thInput.value.trim();
+    void window.ide.models.setLowThreshold(p.id, v === "" ? null : Number(v));
+  });
+  const reenable = p.health === "depleted"
+    ? el("button", {
+        class: "btn",
+        text: "Re-enable",
+        title: "Clear the depleted mark manually",
+        onClick: () => void window.ide.models.clearDepleted(p.id),
+      })
+    : null;
+  card.append(el("div", { class: "pc-balance-row" }, epInput, epTest, thInput, reenable, epMsg));
   return card;
 }
 
@@ -1146,5 +1288,17 @@ export function initModels(): void {
   });
   window.ide.models.onRolesOrphaned((roles) => {
     forceReassignRoles(roles);
+  });
+  window.ide.models.onSwapNotice(({ message, crit }) => {
+    toast(message, crit ? { crit: true } : {});
+    // one-time flare→power fade on the swapped role slot (240ms, then calm)
+    for (const slot of document.querySelectorAll(".role-slot")) {
+      if (message.includes(slot.querySelector(".rs-role")?.textContent ?? "\u0000")) {
+        slot.classList.remove("swap-flash");
+        void (slot as HTMLElement).offsetWidth;
+        slot.classList.add("swap-flash");
+        setTimeout(() => slot.classList.remove("swap-flash"), 300);
+      }
+    }
   });
 }

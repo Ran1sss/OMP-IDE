@@ -267,6 +267,24 @@ function handleFrame(s: OmpSession, frame: RpcFrame) {
       setStatus(s, { state: "thinking", model: s.status.model });
       emit(s, { kind: "agent-start" });
       break;
+    case "turn_end": {
+      // Provider failures surface here: the final assistant message carries
+      // stopReason "error" + errorStatus/errorMessage (observed on omp v17:
+      // {"stopReason":"error","errorStatus":401,"errorMessage":"401 Invalid
+      // API key …","provider":"<profile>","model":"<id>"}). The swap engine
+      // listens for this event.
+      const msg = frame.message && typeof frame.message === "object" ? (frame.message as Record<string, unknown>) : null;
+      if (msg && msg.stopReason === "error") {
+        emit(s, {
+          kind: "turn-error",
+          provider: typeof msg.provider === "string" ? msg.provider : "",
+          modelId: typeof msg.model === "string" ? msg.model : "",
+          status: typeof msg.errorStatus === "number" ? msg.errorStatus : null,
+          message: typeof msg.errorMessage === "string" ? msg.errorMessage.slice(0, 500) : "",
+        });
+      }
+      break;
+    }
     case "agent_end":
       setStatus(s, { state: "idle", model: s.status.model });
       emit(s, { kind: "agent-end" });

@@ -184,7 +184,9 @@ export type OmpEvent =
       fileEdit?: OmpFileEdit;
     }
   | { kind: "todos"; phases: OmpTodoPhase[] }
-  | { kind: "user-message"; text: string; via?: RemoteVia };
+  | { kind: "user-message"; text: string; via?: RemoteVia }
+  /** turn ended in a provider error (stopReason "error" in the final message) */
+  | { kind: "turn-error"; provider: string; modelId: string; status: number | null; message: string };
 
 /** Attribution for actions arriving through a Telegram bot. */
 export interface RemoteVia {
@@ -396,7 +398,8 @@ export type ThinkingCapability = "supported" | "no-thinking" | "unknown";
 
 export type ProviderTemplateId = "anthropic" | "openai" | "google" | "openrouter" | "custom";
 
-export type ProviderHealth = "unknown" | "ok" | "auth-error" | "network-error" | "rate-limited";
+/** depleted = key valid, wallet/quota empty (--flare, not --crit) */
+export type ProviderHealth = "unknown" | "ok" | "auth-error" | "network-error" | "rate-limited" | "depleted";
 
 export interface ModelEntry {
   /** provider-scoped model id, e.g. "claude-sonnet-4-5" */
@@ -407,6 +410,17 @@ export interface ModelEntry {
 }
 
 export type ProfileOrigin = "ide" | "imported" | "readonly";
+
+/** cached wallet readout; never shown without its age */
+export interface BalanceInfo {
+  /** parsed numeric value; null when the response was unparseable */
+  value: number | null;
+  /** currency/unit string as provided by the endpoint (e.g. "USD"); null = none */
+  currency: string | null;
+  checkedAt: number;
+  /** raw body (truncated) for the designed `unparseable response` state */
+  raw?: string;
+}
 
 export interface ProviderInfo {
   /** OMP profile name — the models.yml `providers:` key and the selector qualifier */
@@ -423,6 +437,12 @@ export interface ProviderInfo {
   origin: ProfileOrigin;
   /** note for readonly/imported cards (e.g. "managed outside IDE") */
   note?: string;
+  /** balance probe URL or base-relative path; "" = no probe, no balance UI */
+  balanceEndpoint: string;
+  /** last successful/attempted probe; null = never probed or no endpoint */
+  balance: BalanceInfo | null;
+  /** low-balance warning threshold; null = off */
+  lowThreshold: number | null;
 }
 
 export interface RoleAssignment {
@@ -451,6 +471,13 @@ export interface ModelsState {
     /** one-shot boost armed for the in-flight send; cleared at turn end */
     boost: ThinkingLevel | null;
   };
+  /** auto-swap master toggle + per-role opt-outs */
+  autoSwap: {
+    enabled: boolean;
+    roleOptOut: Record<ModelRole, boolean>;
+  };
+  /** periodic balance poll interval in minutes; 0 = off */
+  balancePollMinutes: number;
 }
 
 export interface ModelsUsage {
@@ -465,7 +492,7 @@ export interface ModelsUsage {
 
 export interface ModelEvent {
   time: number;
-  kind: "switch" | "validate" | "health" | "role" | "provider" | "THINK";
+  kind: "switch" | "validate" | "health" | "role" | "provider" | "THINK" | "SWAP" | "balance";
   detail: string;
   origin: string;
 }
@@ -618,12 +645,28 @@ export interface IdeApi {
     /** one-shot boost: raises thinking one level for exactly the next send */
     boostOnce(origin: string): Promise<{ armed: boolean; level: ThinkingLevel | null; pending: boolean }>;
     getEvents(): Promise<ModelEvent[]>;
+    // ---- auto-swap & balance
+    /** balance probe endpoint (URL or base-relative path; "" clears) */
+    setBalanceEndpoint(providerId: string, endpoint: string): Promise<void>;
+    /** one probe; returns the parsed result or the raw body on parse failure */
+    checkBalance(providerId: string): Promise<{ ok: boolean; value?: number; currency?: string; raw?: string; error?: string }>;
+    /** probe every enabled profile with a configured endpoint, concurrently */
+    checkAllBalances(): Promise<void>;
+    /** low-balance warning threshold; null = off */
+    setLowThreshold(providerId: string, threshold: number | null): Promise<void>;
+    setAutoSwap(enabled: boolean): Promise<void>;
+    setRoleSwapOptOut(role: ModelRole, optOut: boolean): Promise<void>;
+    setBalancePollMinutes(minutes: number): Promise<void>;
+    /** re-enable a depleted profile manually */
+    clearDepleted(providerId: string): Promise<void>;
     onState(cb: (s: ModelsState) => void): () => void;
     onUsage(cb: (u: ModelsUsage) => void): () => void;
     /** active model rejected the thinking param — flipped to no-thinking */
     onThinkRejected(cb: (modelId: string) => void): () => void;
     /** external models.yml edit removed the profile/model an assigned role points at */
     onRolesOrphaned(cb: (roles: ModelRole[]) => void): () => void;
+    /** auto-swap / low-balance toast payloads from the swap engine */
+    onSwapNotice(cb: (n: { message: string; crit: boolean }) => void): () => void;
   };
 }
 

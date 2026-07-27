@@ -19,7 +19,8 @@ npm run typecheck
 ## Портативная сборка
 
 ```sh
-npm run package
+npm run package                          # userData в %APPDATA%\OMP IDE
+node build.mjs && node package.mjs --portable   # userData в ./data рядом с exe
 ```
 
 Результат — `release/OMP-IDE/`: самодостаточная папка с `OMP IDE.exe`,
@@ -27,7 +28,10 @@ npm run package
 Никакой сети и electron-builder не нужно — используется локальный
 Electron из `node_modules`.
 
-Чтобы поделиться сборкой, просто заархивируйте папку `release/OMP-IDE`.
+С флагом `--portable` в сборку кладётся маркер `.portable`: все настройки,
+токены и кэши хранятся в `./data` рядом с exe — такую папку можно
+заархивировать и отдать другому человеку (удалив `data`, если успели
+поработать в ней).
 
 ## Структура
 

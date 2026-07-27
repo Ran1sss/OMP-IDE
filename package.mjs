@@ -13,13 +13,16 @@
  *       node_modules/            ← ONLY runtime externals (node-pty, ripgrep)
  */
 
-import { cpSync, mkdirSync, rmSync, writeFileSync, existsSync, renameSync } from "node:fs";
+import { cpSync, mkdirSync, rmSync, writeFileSync, existsSync, renameSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = dirname(fileURLToPath(import.meta.url));
 const out = join(root, "release", "OMP-IDE");
 const appDir = join(out, "resources", "app");
+const { version } = JSON.parse(readFileSync(join(root, "package.json"), "utf-8"));
+// --portable: drop a marker so the app keeps userData in ./data next to the exe.
+const portable = process.argv.includes("--portable");
 
 const electronDist = join(root, "node_modules", "electron", "dist");
 if (!existsSync(join(electronDist, "electron.exe"))) {
@@ -41,7 +44,7 @@ cpSync(electronDist, out, { recursive: true });
 rmSync(join(out, "resources", "default_app.asar"), { force: true });
 renameSync(join(out, "electron.exe"), join(out, "OMP IDE.exe"));
 // Portable marker: main process redirects userData to ./data next to the exe.
-writeFileSync(join(out, ".portable"), "");
+if (portable) writeFileSync(join(out, ".portable"), "");
 
 console.log("copying app bundles …");
 mkdirSync(appDir, { recursive: true });
@@ -53,7 +56,7 @@ writeFileSync(
     {
       name: "omp-ide",
       productName: "OMP IDE",
-      version: "1.0.0",
+      version,
       main: "dist/main/index.js",
     },
     null,

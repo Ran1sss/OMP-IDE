@@ -31,6 +31,7 @@ import {
 import { BotRuntime, type BotDelegate, type InboundMessage, type InboundCallback, type GroupMessage } from "./bot-runtime";
 import { WatchManager } from "./watch-manager";
 import { currentProxyAgent, validateProxyUrl } from "./proxy";
+import { registerSwapRemoteNotifier } from "../models/swap-engine";
 import { SessionTracker } from "./session-tracker";
 import {
   escapeMd,
@@ -97,9 +98,14 @@ class RemoteManager implements BotDelegate {
       }
     }
     this.startDigestTimer();
+    // auto-swap loudness: swaps and low-balance crossings reach Telegram too
+    registerSwapRemoteNotifier((text) => {
+      for (const t of this.targets()) t.runtime.sendMd(t.chatId, escapeMd(text));
+    });
   }
 
   async dispose(): Promise<void> {
+    registerSwapRemoteNotifier(null);
     this.watch.dispose();
     // Flush a final broadcast if a task is mid-flight.
     const st = this.bridge.getStatus();

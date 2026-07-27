@@ -34,6 +34,7 @@ import {
   hasProviderKey,
   rekeyProfile,
   type BuiltinProfile,
+  type ProfileMeta,
 } from "./store";
 import { TEMPLATES, fetchProviderModels } from "./providers";
 import {
@@ -51,6 +52,8 @@ import {
   BUILTIN_ENV,
   type OmpProfile,
 } from "./omp-config";
+import { probeBalance } from "./balance";
+import { SwapEngine, notifyRemote } from "./swap-engine";
 
 class ModelsManager {
   private bridge: AgentBridge = getAgentBridge();
@@ -74,6 +77,49 @@ class ModelsManager {
   private reconcileTimer: NodeJS.Timeout | null = null;
   /** last state JSON pushed — reconcile skips no-op pushes (self-write loop guard) */
   private lastStateJson = "";
+  /** depleted = quota/wallet empty; the swap engine is the only writer */
+  private depleted = new Map<string, string>();
+  private balancePollTimer: NodeJS.Timeout | null = null;
+  /** roles the swap engine gave up on (recovery card names the situation) */
+  private degradedRoles = new Map<ModelRole, string>();
+  readonly swap = new SwapEngine({
+    candidates: () => {
+      const store = loadModelsStore();
+      return this.allInfos().map((p) => ({
+        name: p.id,
+        modelIds: p.models.map((m) => m.id),
+        enabled: p.enabled,
+        healthOk: p.health === "ok" || p.health === "unknown" || p.health === "depleted",
+        balance: store.profileMeta[p.id]?.balance?.value ?? null,
+      }));
+    },
+    rewriteRole: (role, selector, origin) => this.assignRole(role, selector, origin),
+    setDepleted: (name, depleted, detail) => {
+      if (depleted) {
+        this.depleted.set(name, detail ?? "quota exhausted");
+        this.health.set(name, { state: "depleted", detail });
+      } else {
+        this.depleted.delete(name);
+        if (this.health.get(name)?.state === "depleted") this.health.set(name, { state: "unknown" });
+      }
+      this.pushState();
+    },
+    isDepleted: (name) => this.depleted.has(name),
+    probeBalance: (name) => void this.checkBalance(name),
+    effectiveThinking: () => this.effectiveThinking(),
+    log: (kind, detail, origin) => this.log(kind, detail, origin),
+    notifyUi: (message, crit) => {
+      for (const w of BrowserWindow.getAllWindows()) w.webContents.send("models:swapNotice", { message, crit });
+    },
+    promptContinue: () =>
+      this.bridge.prompt(
+        "[auto-swap] The previous model reply failed because the provider's quota ran out; the profile has been swapped. Continue with the task exactly where it left off.",
+      ),
+    markRoleDegraded: (role, message) => {
+      this.degradedRoles.set(role, message);
+      this.pushState();
+    },
+  });
 
   init(): void {
     this.reconcile();
@@ -127,7 +173,17 @@ class ModelsManager {
       if (e.kind === "user-message") this.usage.requests++;
       if (e.kind === "user-message" && this.boostThinking !== null) this.boostConsumed = true;
       if (e.kind === "agent-end") void this.refreshUsage();
+      if (e.kind === "turn-error") {
+        void this.swap.onProviderError(e.provider, e.modelId, e.status, e.message, "turn");
+      }
+      if (e.kind === "agent-end") {
+        // a clean end closes swap incidents; a turn-error above re-opens them
+        for (const role of MODEL_ROLES) {
+          if (!this.degradedRoles.has(role)) this.swap.clearIncident(role);
+        }
+      }
     });
+    this.startBalancePoll();
     void this.refreshCapability();
     void this.applyThinking("startup");
 
@@ -176,8 +232,97 @@ class ModelsManager {
   dispose(): void {
     clearInterval(this.usagePollTimer ?? undefined);
     clearTimeout(this.reconcileTimer ?? undefined);
+    clearInterval(this.balancePollTimer ?? undefined);
     void this.watcher?.close();
     registerThinkingControl(null);
+  }
+
+  // ================================================== balances
+
+  private startBalancePoll(): void {
+    clearInterval(this.balancePollTimer ?? undefined);
+    const minutes = loadModelsStore().balancePollMinutes;
+    if (minutes <= 0) {
+      this.balancePollTimer = null;
+      return;
+    }
+    this.balancePollTimer = setInterval(() => void this.checkAllBalances(), minutes * 60_000);
+  }
+
+  /** endpoint for a profile: stored value, else the template prefill (echogate) */
+  balanceEndpointFor(name: string): string {
+    const meta = loadModelsStore().profileMeta[name];
+    if (meta?.balanceEndpoint !== undefined) return meta.balanceEndpoint;
+    // NOTE: reads raw profile/builtin records, NOT allInfos() (which builds
+    // ProviderInfo via this very function — recursion)
+    const baseUrl = this.findProfile(name)?.baseUrl ?? loadModelsStore().builtins.find((b) => b.name === name)?.baseUrl ?? "";
+    // echogate prefill: any profile pointing at the echogate API
+    if (/api\.echogate\.one/i.test(baseUrl)) return "/wallet/balance";
+    return "";
+  }
+
+  async checkBalance(name: string): Promise<{ ok: boolean; value?: number; currency?: string; raw?: string; error?: string }> {
+    const baseUrl = this.findProfile(name)?.baseUrl ?? loadModelsStore().builtins.find((b) => b.name === name)?.baseUrl;
+    if (!baseUrl) return { ok: false, error: "Profile not found" };
+    const endpoint = this.balanceEndpointFor(name);
+    if (!endpoint) return { ok: false, error: "No balance endpoint configured" };
+    const profile = this.findProfile(name);
+    const key = profile ? this.validationKey(profile) : getProviderKey(name) ?? "";
+    const res = await probeBalance(baseUrl, endpoint, key);
+    const store = loadModelsStore();
+    const meta = store.profileMeta[name] ?? (store.profileMeta[name] = defaultMeta("imported"));
+    if (!res.ok) {
+      this.log("balance", `${name}: probe failed — ${res.error}`, "probe");
+      this.pushState();
+      return { ok: false, error: res.error };
+    }
+    meta.balance = res.info;
+    // funds visible again → depleted lifts (probe + manual re-enable are the removers)
+    if (res.info.value !== null && res.info.value > 0 && this.depleted.has(name)) {
+      this.depleted.delete(name);
+      if (this.health.get(name)?.state === "depleted") this.health.set(name, { state: "unknown" });
+      this.log("health", `${name}: balance recovered — depleted lifted`, "probe");
+    }
+    this.applyThreshold(name, meta);
+    saveModelsStore();
+    this.pushState();
+    return res.info.value === null
+      ? { ok: true, raw: res.info.raw }
+      : { ok: true, value: res.info.value, currency: res.info.currency ?? undefined };
+  }
+
+  async checkAllBalances(): Promise<void> {
+    const store = loadModelsStore();
+    const targets = this.allInfos().filter(
+      (p) => p.enabled && this.balanceEndpointFor(p.id) && (store.profileMeta[p.id]?.enabled ?? true),
+    );
+    // Electron's main-process fetch flakes under a 7-wide burst to one host
+    // (observed: sporadic 15s stalls / "fetch failed"); pool of 3 + one retry
+    // keeps the global check reliable without serializing it.
+    const queue = [...targets];
+    const worker = async () => {
+      for (let p = queue.shift(); p; p = queue.shift()) {
+        const first = await this.checkBalance(p.id);
+        if (!first.ok) await this.checkBalance(p.id);
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(3, targets.length) }, worker));
+  }
+
+  /** one toast + flare dot + remote notice per crossing, re-armed on recovery */
+  private applyThreshold(name: string, meta: ProfileMeta): void {
+    const threshold = meta.lowThreshold;
+    const value = meta.balance?.value;
+    if (threshold == null || value == null) return;
+    if (value < threshold && !meta.thresholdNotified) {
+      meta.thresholdNotified = true;
+      this.log("balance", `${name}: balance ${value} below threshold ${threshold}`, "threshold");
+      for (const w of BrowserWindow.getAllWindows())
+        w.webContents.send("models:swapNotice", { message: `${name}: balance low (${value})`, crit: false });
+      notifyRemote(`⚠ ${name}: balance low — ${value}${meta.balance?.currency ? ` ${meta.balance.currency}` : ""}`);
+    } else if (value >= threshold && meta.thresholdNotified) {
+      meta.thresholdNotified = false; // re-arm
+    }
   }
 
   // ================================================== reconciliation (OMP wins)
@@ -266,6 +411,9 @@ class ModelsManager {
       hasKey: hasProviderKey(p.name) || p.apiKeyRef !== null,
       origin: p.parseable ? meta.origin : "readonly",
       note: p.parseable ? undefined : "managed outside IDE — entry preserved verbatim",
+      balanceEndpoint: this.balanceEndpointFor(p.name),
+      balance: meta.balance ?? null,
+      lowThreshold: meta.lowThreshold ?? null,
     };
   }
 
@@ -285,6 +433,9 @@ class ModelsManager {
       models: b.models.map((m) => ({ ...m, favorite: favs.has(m.id) })),
       hasKey: hasProviderKey(b.name),
       origin: meta.origin,
+      balanceEndpoint: this.balanceEndpointFor(b.name),
+      balance: meta.balance ?? null,
+      lowThreshold: meta.lowThreshold ?? null,
     };
   }
 
@@ -320,6 +471,11 @@ class ModelsManager {
         pending: this.pendingThinking,
         boost: this.boostThinking,
       },
+      autoSwap: {
+        enabled: store.autoSwapEnabled,
+        roleOptOut: { ...store.autoSwapRoleOptOut },
+      },
+      balancePollMinutes: store.balancePollMinutes,
     };
     return state;
   }
@@ -841,11 +997,78 @@ class ModelsManager {
   getEvents(): ModelEvent[] {
     return [...loadModelsStore().events];
   }
+
+  // ================================================== auto-swap & balance settings
+
+  setBalanceEndpoint(name: string, endpoint: string): void {
+    const store = loadModelsStore();
+    const meta = store.profileMeta[name] ?? (store.profileMeta[name] = defaultMeta("imported"));
+    meta.balanceEndpoint = endpoint.trim();
+    if (!meta.balanceEndpoint) meta.balance = null; // no endpoint → no stale readout
+    saveModelsStore();
+    this.pushState();
+  }
+
+  setLowThreshold(name: string, threshold: number | null): void {
+    const store = loadModelsStore();
+    const meta = store.profileMeta[name] ?? (store.profileMeta[name] = defaultMeta("imported"));
+    meta.lowThreshold = threshold;
+    meta.thresholdNotified = false;
+    saveModelsStore();
+    if (meta.balance) this.applyThreshold(name, meta);
+    this.pushState();
+  }
+
+  setAutoSwap(enabled: boolean): void {
+    const store = loadModelsStore();
+    store.autoSwapEnabled = enabled;
+    saveModelsStore();
+    this.log("SWAP", `auto-swap ${enabled ? "enabled" : "disabled"}`, "settings");
+    this.pushState();
+  }
+
+  setRoleSwapOptOut(role: ModelRole, optOut: boolean): void {
+    const store = loadModelsStore();
+    store.autoSwapRoleOptOut[role] = optOut;
+    saveModelsStore();
+    this.pushState();
+  }
+
+  setBalancePollMinutes(minutes: number): void {
+    const store = loadModelsStore();
+    store.balancePollMinutes = Math.max(0, Math.min(120, minutes));
+    saveModelsStore();
+    this.startBalancePoll();
+    this.pushState();
+  }
+
+  /** manual re-enable: one of the two removers of `depleted` */
+  clearDepleted(name: string): void {
+    this.depleted.delete(name);
+    if (this.health.get(name)?.state === "depleted") this.health.set(name, { state: "unknown" });
+    this.degradedRoles.clear(); // a fresh candidate exists — degradation no longer certain
+    this.log("health", `${name}: depleted cleared manually`, "settings");
+    this.pushState();
+  }
 }
 
 // ================================================== module surface
 
 let manager: ModelsManager | null = null;
+
+/**
+ * Cross-module hook for the chat listener: a failed smol oneshot reports its
+ * provider error here; the swap engine classifies and swaps the `smol` role
+ * by the same rules as live turns (one notice per incident, not per batch).
+ */
+export async function reportOneshotError(status: number | null, message: string): Promise<void> {
+  if (!manager) return;
+  const smol = loadModelsStore().roles.smol;
+  if (!smol) return;
+  const slash = smol.indexOf("/");
+  if (slash < 0) return;
+  await manager.swap.onProviderError(smol.slice(0, slash), smol.slice(slash + 1), status, message, "oneshot");
+}
 
 export function registerModelsHandlers(ipc: IpcMain): void {
   manager = new ModelsManager();
@@ -868,6 +1091,14 @@ export function registerModelsHandlers(ipc: IpcMain): void {
   ipc.handle("models:setSessionThinking", async (_e, level: ThinkingLevel | null, origin: string) => m.setSessionThinking(level, origin));
   ipc.handle("models:boostOnce", async (_e, origin: string) => m.boostOnce(origin));
   ipc.handle("models:getEvents", async () => m.getEvents());
+  ipc.handle("models:setBalanceEndpoint", async (_e, id: string, endpoint: string) => m.setBalanceEndpoint(id, endpoint));
+  ipc.handle("models:checkBalance", async (_e, id: string) => m.checkBalance(id));
+  ipc.handle("models:checkAllBalances", async () => m.checkAllBalances());
+  ipc.handle("models:setLowThreshold", async (_e, id: string, threshold: number | null) => m.setLowThreshold(id, threshold));
+  ipc.handle("models:setAutoSwap", async (_e, enabled: boolean) => m.setAutoSwap(enabled));
+  ipc.handle("models:setRoleSwapOptOut", async (_e, role: ModelRole, optOut: boolean) => m.setRoleSwapOptOut(role, optOut));
+  ipc.handle("models:setBalancePollMinutes", async (_e, minutes: number) => m.setBalancePollMinutes(minutes));
+  ipc.handle("models:clearDepleted", async (_e, id: string) => m.clearDepleted(id));
 }
 
 export function disposeModels(): void {

@@ -32,6 +32,7 @@ import {
 } from "./watch-store";
 import { appendChatLog, readChatLogPage, chatLogPath, deleteChatLog } from "./chat-log";
 import { evaluateTranscript, oneshotAvailable, smolSelector } from "./oneshot";
+import { reportOneshotError } from "../models/manager";
 import { escapeMd } from "./format";
 import type { BotRuntime, GroupMessage } from "./bot-runtime";
 
@@ -255,6 +256,9 @@ export class WatchManager {
       if (res.kind === "error") {
         st.evalError = res.error;
         this.host.log(botId, "system", `evaluation failed for "${cur.title}": ${res.error.slice(0, 120)}`);
+        // quota failures on the smol profile swap by the same engine as turns
+        const status = res.error.match(/\b(4\d\d|5\d\d)\b/);
+        void reportOneshotError(status ? parseInt(status[1], 10) : null, res.error);
       } else {
         st.evalError = null;
         this.host.log(botId, "system", `evaluated "${cur.title}" (${batch.length} msgs): ${res.kind === "task" ? `task — ${res.line.slice(0, 80)}` : "no task"}`);
