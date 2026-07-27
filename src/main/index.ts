@@ -1,5 +1,6 @@
 import { app, BrowserWindow, ipcMain, dialog, shell, Menu } from "electron";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
+import { existsSync } from "node:fs";
 import { registerFsHandlers, disposeWatchers } from "./fs-service";
 import { registerPtyHandlers, disposePtys } from "./pty-service";
 import { registerSearchHandlers } from "./search-service";
@@ -9,6 +10,14 @@ import { registerStoreHandlers } from "./store-service";
 import { registerRemoteHandlers, disposeRemote } from "./remote/manager";
 import { registerModelsHandlers, disposeModels } from "./models/manager";
 import { hydrateEnvFromRegistry } from "./env-hydrate";
+
+// Portable mode: a ".portable" marker next to the executable keeps all user
+// data (settings, layouts, recents, bot tokens, caches) in ./data beside the
+// exe instead of %APPDATA%\omp-ide. Must run before anything touches userData.
+const exeDir = dirname(app.getPath("exe"));
+if (existsSync(join(exeDir, ".portable"))) {
+  app.setPath("userData", join(exeDir, "data"));
+}
 
 // Must run before any module resolves provider keys or spawns omp children.
 hydrateEnvFromRegistry();

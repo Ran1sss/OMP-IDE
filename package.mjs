@@ -40,6 +40,8 @@ cpSync(electronDist, out, { recursive: true });
 // default_app would take precedence messaging; remove it so resources/app loads
 rmSync(join(out, "resources", "default_app.asar"), { force: true });
 renameSync(join(out, "electron.exe"), join(out, "OMP IDE.exe"));
+// Portable marker: main process redirects userData to ./data next to the exe.
+writeFileSync(join(out, ".portable"), "");
 
 console.log("copying app bundles …");
 mkdirSync(appDir, { recursive: true });
