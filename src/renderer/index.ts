@@ -311,7 +311,8 @@ async function restoreLayout() {
 // ---------------------------------------------------------------- status bar wiring
 
 on("editor-status", (s) => {
-  sbCursor.textContent = `Ln ${s.line}, Col ${s.column}`;
+  // null line/column = non-text tab (image/preview/diff) or empty group — no fake cursor
+  sbCursor.textContent = s.line !== null && s.column !== null ? `Ln ${s.line}, Col ${s.column}` : "";
   sbLang.textContent = s.language === "plaintext" ? "Plain Text" : s.language;
 });
 

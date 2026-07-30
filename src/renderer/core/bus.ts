@@ -10,8 +10,8 @@ export interface BusEvents {
   "fs-changed": FsChange[];
   /** something touched git state; panels should refresh */
   "git-refresh": void;
-  /** active editor cursor / language for the status bar */
-  "editor-status": { path: string | null; line: number; column: number; language: string };
+  /** active editor cursor / language for the status bar; line/column null = non-text tab (image/preview) or empty group */
+  "editor-status": { path: string | null; line: number | null; column: number | null; language: string };
   /** agent status for orb + seam + statusbar */
   "agent-status": OmpStatus;
   /** a file was saved from the editor (user action) */

@@ -36,6 +36,17 @@ export function openSettingsDialog(): void {
   }
   crumbSelect.value = state.settings.breadcrumbs;
 
+  const switcherSelect = el("select", { class: "input" }) as HTMLSelectElement;
+  for (const [value, label] of [
+    ["mru", "Most recently used — hold-Ctrl switcher"],
+    ["strip", "Strip order — plain cycling"],
+  ] as const) {
+    const opt = el("option", { text: label }) as HTMLOptionElement;
+    opt.value = value;
+    switcherSelect.append(opt);
+  }
+  switcherSelect.value = state.settings.tabSwitcher;
+
   const save = async () => {
     const stallRaw = parseInt(stallInput.value, 10);
     const crumbRaw = crumbSelect.value;
@@ -47,6 +58,7 @@ export function openSettingsDialog(): void {
       // 0 disables the stall nudge entirely; anything else clamps to ≥5 s
       stallSeconds: Number.isNaN(stallRaw) ? 20 : stallRaw === 0 ? 0 : Math.max(5, stallRaw),
       breadcrumbs: crumbRaw === "auto" || crumbRaw === "off" ? crumbRaw : "on",
+      tabSwitcher: switcherSelect.value === "strip" ? "strip" : "mru",
     };
     state.settings = await window.ide.store.setSettings(patch);
     applyAccent(state.settings.accent);
@@ -77,6 +89,7 @@ export function openSettingsDialog(): void {
       field("omp binary path", ompInput, "Blank = resolve from PATH. Restart the agent after changing."),
       field("Agent stall warning (seconds)", stallInput, "Nudge card when the model streams nothing. 0 = off, minimum 5. Default 20."),
       field("Breadcrumbs", crumbSelect, "Auto hides the bar when only the file path would show (non-TS/JS files)."),
+      field("Ctrl+Tab order", switcherSelect, "MRU shows a switcher while Ctrl is held (2-tab groups always plain-cycle)."),
     ),
     el(
       "div",

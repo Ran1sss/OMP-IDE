@@ -321,6 +321,38 @@
   padding: 24px 32px 48px;
 }
 
+/* MRU tab switcher — hold-Ctrl overlay, centered over the editor area */
+.tab-switcher {
+  position: fixed;
+  top: 20%;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 200;
+  min-width: 320px;
+  max-width: 560px;
+  background: var(--bg-1);
+  border: 1px solid var(--line-bright);
+  border-radius: var(--r-m);
+  box-shadow: var(--shadow-float);
+  padding: 6px;
+}
+.tab-switcher .ts-list { display: flex; flex-direction: column; gap: 2px; max-height: 320px; overflow-y: auto; }
+.tab-switcher .ts-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 10px;
+  border-radius: 4px;
+  font-size: 12.5px;
+  color: var(--text-mid);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.tab-switcher .ts-row:hover { background: var(--bg-2); }
+.tab-switcher .ts-row.selected { background: var(--bg-2); color: var(--text-hi); outline: 1px solid var(--power-40); }
+.tab-switcher .ts-title { font-weight: 600; }
+.tab-switcher .ts-path { color: var(--text-low); font-size: 11px; overflow: hidden; text-overflow: ellipsis; }
+
 /* terminal region */
 .term-region {
   display: flex;

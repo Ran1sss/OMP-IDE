@@ -106,6 +106,8 @@ interface EditorGroup {
   id: number;
   tabs: EditorTab[];
   active: string | null;
+  /** tab keys, most-recently-activated first (MRU Ctrl+Tab); session-scoped like focus */
+  mru: string[];
   tabsEl: HTMLElement;
   crumbsEl: HTMLElement;
   hostEl: HTMLElement;
@@ -259,16 +261,31 @@ function renderTabs(g: EditorGroup) {
 }
 
 function showTabMenu(g: EditorGroup, tab: EditorTab, x: number, y: number) {
+  // EVO-30 debt: with an existing two-group layout, drag MOVES a tab; this menu
+  // item duplicates via the same shared-push path splitEditor uses (same object).
+  const other = groups.find((gr) => gr !== g && !gr.tabs.includes(tab)) ?? null;
   contextMenu(x, y, [
     { label: "Close", key: "Ctrl+W", action: () => void closeTab(tab.key, { group: g }) },
     { label: "Close Others", action: () => void closeOthers(g, tab.key) },
     { label: "Close All", action: () => void closeAllInGroup(g) },
+    ...(other
+      ? [{ label: "Duplicate into Other Group", action: () => duplicateIntoGroup(tab, other) }]
+      : []),
     { separator: true },
     { label: "Copy Path", action: () => void navigator.clipboard.writeText(tab.path) },
     ...(tab.kind === "file"
       ? [{ label: "Reveal in Explorer", action: () => revealInExplorer(tab.path) }]
       : []),
   ]);
+}
+
+/** Shared-push duplicate: the other group gains a view of the SAME tab object. */
+function duplicateIntoGroup(tab: EditorTab, to: EditorGroup) {
+  if (to.tabs.includes(tab)) return;
+  to.tabs.push(tab);
+  focusedGroup = to;
+  for (const gr of groups) gr.rootEl.classList.toggle("focused-group", gr === to);
+  activateTab(to, tab.key);
 }
 function revealInExplorer(path: string) {
   emit("view-switch", "explorer");
@@ -300,6 +317,12 @@ function renderEmpty(host: HTMLElement) {
  * Emit "active-tab-changed" only when the consumer-visible active tab actually
  * changed (focused group identity + its active key). Same-tab re-mounts
  * (e.g. relayout) are filtered at the source.
+ *
+ * CAVEAT (run-5 debt, documented): the signature keys on group id + tab KEY, so a
+ * same-key CONTENT change (e.g. openDiff refreshing an already-open diff tab) does
+ * not re-emit. Correct today — openDiff re-mounts affected groups explicitly — but
+ * a future consumer that cares about diff-content changes needs a version tick
+ * folded into `sig` (e.g. a per-tab revision counter bumped on payload swap).
  */
 function emitActiveTabChanged() {
   queueMicrotask(() => {
@@ -311,12 +334,45 @@ function emitActiveTabChanged() {
   });
 }
 
+/**
+ * Status-bar truth for the focused group's active tab: cursor for file editors,
+ * an honest kind label and no Ln/Col for image/preview/diff/empty (the bar
+ * previously kept the previous file's cursor when focus moved to a non-file tab).
+ */
+function emitEditorStatus(g: EditorGroup) {
+  if (focusedGroupObj() !== g) return;
+  const tab = g.active ? g.tabs.find((t) => t.key === g.active) : null;
+  if (!tab) {
+    emit("editor-status", { path: null, line: null, column: null, language: "" });
+    return;
+  }
+  if (tab.kind === "file" && g.editor && tab.model) {
+    emit("editor-status", {
+      path: tab.path,
+      line: g.editor.getPosition()?.lineNumber ?? 1,
+      column: g.editor.getPosition()?.column ?? 1,
+      language: tab.model.getLanguageId(),
+    });
+    return;
+  }
+  const language =
+    tab.kind === "image" ? "Image"
+    : tab.kind === "mdprev" ? "Markdown Preview"
+    : tab.diff?.language ?? "diff";
+  emit("editor-status", { path: tab.path, line: null, column: null, language });
+}
+
 /** (Re)mount the appropriate widget into the group's host. */
 function mountActive(g: EditorGroup) {
   const tab = g.active ? g.tabs.find((t) => t.key === g.active) : null;
   // every open/close/switch/collapse path funnels here — consumers (outline)
   // re-read the active tab after the mount settles
   emitActiveTabChanged();
+
+  // EVO-31 debt: refresh is a full re-mount — keep the preview's scroll position
+  // when the SAME preview tab is being re-rendered (save/watcher refresh).
+  const prevScrollEl = g.hostEl.querySelector<HTMLElement>(".md-preview");
+  const prevScroll = prevScrollEl && g.mountedKey === (tab?.key ?? null) ? prevScrollEl.scrollTop : null;
 
   // Dispose this group's own widgets; the other split's instances are untouched.
   g.editor?.dispose();
@@ -329,6 +385,7 @@ function mountActive(g: EditorGroup) {
   if (!tab) {
     renderEmpty(g.hostEl);
     renderCrumbs(g, null);
+    emitEditorStatus(g);
     return;
   }
   renderCrumbs(g, tab);
@@ -341,6 +398,7 @@ function mountActive(g: EditorGroup) {
     mount.append(el("img", {}) as HTMLImageElement);
     (mount.firstChild as HTMLImageElement).src = tab.imageSrc ?? "";
     g.mountedKey = tab.key;
+    emitEditorStatus(g);
     return;
   }
 
@@ -353,7 +411,9 @@ function mountActive(g: EditorGroup) {
       a.addEventListener("click", (e) => e.preventDefault());
     }
     mount.append(body);
+    if (prevScroll !== null) mount.scrollTop = prevScroll;
     g.mountedKey = tab.key;
+    emitEditorStatus(g);
     return;
   }
 
@@ -377,6 +437,7 @@ function mountActive(g: EditorGroup) {
     });
     g.diffEditor = de;
     g.mountedKey = tab.key;
+    emitEditorStatus(g);
     return;
   }
 
@@ -415,17 +476,11 @@ function mountActive(g: EditorGroup) {
     focusedGroup = g;
     for (const gr of groups) gr.rootEl.classList.toggle("focused-group", gr.id === g.id);
     emitActiveTabChanged(); // focus can move consumers (outline) to a different file
+    emitEditorStatus(g);
   });
   if (!suppressNextFocus) ed.focus();
   suppressNextFocus = false;
-  if (focusedGroupObj() === g) {
-    emit("editor-status", {
-      path: tab.path,
-      line: ed.getPosition()?.lineNumber ?? 1,
-      column: ed.getPosition()?.column ?? 1,
-      language: tab.model!.getLanguageId(),
-    });
-  }
+  emitEditorStatus(g);
   void refreshGitGutter(tab);
 }
 
@@ -681,8 +736,17 @@ export function jumpToOffset(offset: number): void {
 
 function activateTab(g: EditorGroup, key: string) {
   g.active = key;
+  noteMru(g, key);
   renderTabs(g);
   mountActive(g);
+}
+
+/** move `key` to the front of the group's MRU list */
+function noteMru(g: EditorGroup, key: string) {
+  const i = g.mru.indexOf(key);
+  if (i === 0) return;
+  if (i > 0) g.mru.splice(i, 1);
+  g.mru.unshift(key);
 }
 
 // ---------------------------------------------------------------- open/close
@@ -809,8 +873,12 @@ export async function closeTab(key: string, opts: { force?: boolean; group?: Edi
     gitDecorations.delete(tab.key);
   }
 
+  const mi = group.mru.indexOf(key);
+  if (mi >= 0) group.mru.splice(mi, 1);
+
   if (group.active === key) {
-    const next = group.tabs[Math.min(idx, group.tabs.length - 1)];
+    // MRU successor when we have history; strip neighbor as fallback
+    const next = group.tabs.find((t) => t.key === group.mru[0]) ?? group.tabs[Math.min(idx, group.tabs.length - 1)];
     group.active = next?.key ?? null;
   }
 
@@ -820,6 +888,16 @@ export async function closeTab(key: string, opts: { force?: boolean; group?: Edi
   } else {
     renderTabs(group);
     mountActive(group);
+  }
+
+  // EVO-31 debt: the last view of a source .md closing takes its preview along —
+  // a preview of a gone buffer would keep stale content. Preview tabs are never
+  // dirty, so force-close is prompt-free. (Deletes route here via handleDeleted.)
+  if (tab.kind === "file" && viewCount(tab) === 0) {
+    const pkey = `mdprev:${tab.key}`;
+    for (const g of [...groups]) {
+      if (g.tabs.some((t) => t.key === pkey)) void closeTab(pkey, { force: true, group: g });
+    }
   }
   return true;
 }
@@ -835,14 +913,114 @@ export async function closeActiveTab() {
   }
 }
 
-/** Ctrl+Tab / Ctrl+Shift+Tab: cycle the focused group's tabs in strip order. */
+// ------------------------------------------------------- Ctrl+Tab switching
+
+/** live MRU switcher session — exists only while Ctrl is held with the overlay up */
+let switcher: { g: EditorGroup; order: string[]; idx: number; el: HTMLElement } | null = null;
+
+/**
+ * Ctrl+Tab / Ctrl+Shift+Tab. Default: most-recently-used order with a hold-Ctrl
+ * overlay (release commits, Escape cancels). Strip-order cycling (EVO-29) is the
+ * fallback when the setting is "strip" or the group has exactly 2 tabs — a
+ * 2-tab MRU toggle IS the strip toggle, so the overlay earns nothing there.
+ */
 export function cycleTab(delta: 1 | -1) {
   const g = focusedGroupObj();
   if (!g || g.tabs.length < 2 || !g.active) return;
-  const idx = g.tabs.findIndex((t) => t.key === g.active);
-  if (idx < 0) return;
-  const next = g.tabs[(idx + delta + g.tabs.length) % g.tabs.length];
-  activateTab(g, next.key);
+  if (switcher) {
+    stepSwitcher(delta);
+    return;
+  }
+  if (state.settings.tabSwitcher === "strip" || g.tabs.length === 2) {
+    const idx = g.tabs.findIndex((t) => t.key === g.active);
+    if (idx < 0) return;
+    const next = g.tabs[(idx + delta + g.tabs.length) % g.tabs.length];
+    activateTab(g, next.key);
+    return;
+  }
+  openSwitcher(g, delta);
+}
+
+function openSwitcher(g: EditorGroup, delta: 1 | -1) {
+  // MRU-known keys first (most recent first), then any strip stragglers
+  const order = [
+    ...g.mru.filter((k) => g.tabs.some((t) => t.key === k)),
+    ...g.tabs.filter((t) => !g.mru.includes(t.key)).map((t) => t.key),
+  ];
+  if (order.length < 2) return;
+  const idx = (delta + order.length) % order.length;
+  const overlay = el("div", { class: "tab-switcher" });
+  switcher = { g, order, idx, el: overlay };
+  renderSwitcher();
+  document.body.append(overlay);
+  window.addEventListener("keyup", onSwitcherKeyUp, { capture: true });
+  window.addEventListener("keydown", onSwitcherKeyDown, { capture: true });
+  window.addEventListener("blur", cancelSwitcher);
+}
+
+function renderSwitcher() {
+  if (!switcher) return;
+  const { g, order, idx, el: overlay } = switcher;
+  clear(overlay);
+  const list = el("div", { class: "ts-list" });
+  order.forEach((key, i) => {
+    const tab = g.tabs.find((t) => t.key === key);
+    if (!tab) return;
+    const row = el(
+      "div",
+      {
+        class: i === idx ? "ts-row selected" : "ts-row",
+        onClick: () => {
+          if (switcher) switcher.idx = i;
+          commitSwitcher();
+        },
+      },
+      tab.dirty ? el("span", { class: "tab-dirty", title: "Unsaved changes" }) : null,
+      el("span", { class: "ts-title", text: tab.title }),
+      el("span", { class: "ts-path", text: relPath(tab.path) }),
+    );
+    list.append(row);
+  });
+  overlay.append(list);
+}
+
+function stepSwitcher(delta: 1 | -1) {
+  if (!switcher) return;
+  switcher.idx = (switcher.idx + delta + switcher.order.length) % switcher.order.length;
+  renderSwitcher();
+}
+
+function closeSwitcherOverlay() {
+  if (!switcher) return;
+  switcher.el.remove();
+  switcher = null;
+  window.removeEventListener("keyup", onSwitcherKeyUp, { capture: true });
+  window.removeEventListener("keydown", onSwitcherKeyDown, { capture: true });
+  window.removeEventListener("blur", cancelSwitcher);
+}
+
+function commitSwitcher() {
+  if (!switcher) return;
+  const { g, order, idx } = switcher;
+  const key = order[idx];
+  closeSwitcherOverlay();
+  if (g.tabs.some((t) => t.key === key)) activateTab(g, key);
+}
+
+function cancelSwitcher() {
+  closeSwitcherOverlay();
+}
+
+function onSwitcherKeyUp(e: KeyboardEvent) {
+  if (e.key === "Control") commitSwitcher();
+}
+
+function onSwitcherKeyDown(e: KeyboardEvent) {
+  if (e.key === "Escape") {
+    e.preventDefault();
+    e.stopPropagation();
+    cancelSwitcher();
+  }
 }
 
 /** Ctrl+1 / Ctrl+2: focus the Nth editor group (keyboard path to what a group click does). */
@@ -853,6 +1031,7 @@ export function focusGroup(index: number) {
   for (const gr of groups) gr.rootEl.classList.toggle("focused-group", gr === g);
   g.editor?.focus();
   emitActiveTabChanged();
+  emitEditorStatus(g); // status bar follows group focus even onto image/preview tabs
 }
 
 /** Ctrl+Shift+V: rendered-markdown preview of the active .md tab (refreshes on save/disk change). */
@@ -937,7 +1116,7 @@ function makeGroup(): EditorGroup {
   const crumbsEl = el("div", { class: "editor-crumbs", style: { display: "none" } });
   const hostEl = el("div", { class: "editor-host" });
   const rootEl = el("div", { class: "editor-group" }, tabsEl, crumbsEl, hostEl);
-  const g: EditorGroup = { id: groupSeq++, tabs: [], active: null, tabsEl, crumbsEl, hostEl, rootEl, editor: null, diffEditor: null, mountedKey: null };
+  const g: EditorGroup = { id: groupSeq++, tabs: [], active: null, mru: [], tabsEl, crumbsEl, hostEl, rootEl, editor: null, diffEditor: null, mountedKey: null };
 
   // drop target for tab drag between groups
   rootEl.addEventListener("dragover", (e) => {
@@ -964,6 +1143,7 @@ function makeGroup(): EditorGroup {
     focusedGroup = g;
     for (const gr of groups) gr.rootEl.classList.toggle("focused-group", gr.id === g.id);
     emitActiveTabChanged(); // cross-group focus change is a consumer-visible active-tab change
+    emitEditorStatus(g); // status bar follows group focus even onto image/preview tabs
   });
   return g;
 }
@@ -976,9 +1156,11 @@ function moveTabToGroup(key: string, fromId: number, toId: number) {
   const idx = from.tabs.findIndex((t) => t.key === key);
   if (idx < 0) return;
   const [tab] = from.tabs.splice(idx, 1);
+  const mi = from.mru.indexOf(key);
+  if (mi >= 0) from.mru.splice(mi, 1);
   // target already shows this tab (split duplicate) → merge: the source view just closes
   if (!to.tabs.includes(tab)) to.tabs.push(tab);
-  if (from.active === key) from.active = from.tabs[Math.min(idx, from.tabs.length - 1)]?.key ?? null;
+  if (from.active === key) from.active = from.tabs.find((t) => t.key === from.mru[0])?.key ?? from.tabs[Math.min(idx, from.tabs.length - 1)]?.key ?? null;
   focusedGroup = to;
   if (from.tabs.length === 0 && groups.length > 1) removeGroup(from);
   else {

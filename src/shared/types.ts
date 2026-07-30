@@ -213,6 +213,8 @@ export interface Settings {
   stallSeconds: number;
   /** crumb bar: auto = only when a symbol trail can show (TS/JS), on = always, off = never */
   breadcrumbs: "auto" | "on" | "off";
+  /** Ctrl+Tab: mru = hold-Ctrl switcher overlay in most-recently-used order (strip fallback at 2 tabs), strip = EVO-29 strip-order cycling */
+  tabSwitcher: "mru" | "strip";
 }
 
 /** one past conversation on disk (read-only history browser) */
@@ -831,4 +833,5 @@ export const DEFAULT_SETTINGS: Settings = {
   ompPath: "",
   stallSeconds: 20,
   breadcrumbs: "on",
+  tabSwitcher: "mru",
 };
