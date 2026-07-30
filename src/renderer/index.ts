@@ -28,6 +28,7 @@ import { openSettingsDialog, applyAccent } from "./features/settings";
 import { showWelcome } from "./features/welcome";
 import { initRemote, createBeacon } from "./features/remote";
 import { initModels, createModelChip, openModelsDialog, switchModelViaPicker, assignRoleViaPicker, setSessionThinkingViaPicker } from "./features/models";
+import { createNotificationBell } from "./features/notifications";
 import "./styles/remote.css";
 import "./styles/models.css";
 import "./styles/mentions.css";
@@ -138,8 +139,7 @@ const sbEnc = el("span", { class: "sb-item static", text: "UTF-8" });
 const sbAgentOrb = el("span", { class: "orb idle" });
 const sbAgentTool = el("span", { class: "sb-tool" });
 const sbAgent = el("span", { class: "sb-item sb-agent", title: "Agent status", onClick: () => switchView("agent") }, sbAgentOrb, sbAgentTool);
-const sbBell = el("span", { class: "sb-item", title: "Notifications" });
-sbBell.append(svgIcon(I.bell));
+const sbBell = createNotificationBell();
 const sbBeacon = createBeacon(() => switchView("remote"));
 const sbModelChip = createModelChip();
 const statusbar = el(

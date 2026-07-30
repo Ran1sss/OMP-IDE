@@ -113,7 +113,7 @@ interface EditorGroup {
 
 let areaEl: HTMLElement;
 const groups: EditorGroup[] = [];
-let focusedGroup = 0;
+let focusedGroup: EditorGroup | null = null;
 let editor: monaco.editor.IStandaloneCodeEditor | null = null;
 let diffEditor: monaco.editor.IDiffEditor | null = null;
 let currentMount: { group: number; key: string } | null = null;
@@ -134,9 +134,10 @@ function findTab(key: string): { group: EditorGroup; tab: EditorTab } | null {
   return null;
 }
 
-/** The group the user last focused. `focusedGroup` stores a group ID, never an array index. */
+/** The group the user last focused. Falls back to the first group when the reference is stale. */
 function focusedGroupObj(): EditorGroup | null {
-  return groups.find((g) => g.id === focusedGroup) ?? groups[0] ?? null;
+  if (focusedGroup && groups.includes(focusedGroup)) return focusedGroup;
+  return groups[0] ?? null;
 }
 
 function activeTab(): EditorTab | null {
@@ -177,7 +178,7 @@ function renderTabs(g: EditorGroup) {
         draggable: true,
         dataset: { key: tab.key },
         onClick: () => {
-          focusedGroup = g.id;
+          focusedGroup = g;
           activateTab(g, tab.key);
         },
         onContextMenu: (e) => {
@@ -222,13 +223,6 @@ function renderTabs(g: EditorGroup) {
       el("span", { text: tab.title }),
       closeBtn,
     );
-    // middle-click close — standard editor muscle memory
-    node.addEventListener("auxclick", (e) => {
-      if (e.button === 1) {
-        e.preventDefault();
-        void closeTab(tab.key);
-      }
-    });
     g.tabsEl.append(node);
   }
 }
@@ -353,7 +347,7 @@ function mountActive(g: EditorGroup) {
     scheduleSymbolTrail(g, tab);
   });
   editor.onDidFocusEditorText(() => {
-    focusedGroup = g.id;
+    focusedGroup = g;
     for (const gr of groups) gr.rootEl.classList.toggle("focused-group", gr.id === g.id);
   });
   if (!suppressNextFocus) editor.focus();
@@ -631,7 +625,7 @@ export async function openFile(
   if (pos?.focus === false) suppressNextFocus = true;
   const existing = findTab(key);
   if (existing) {
-    focusedGroup = existing.group.id;
+    focusedGroup = existing.group;
     activateTab(existing.group, key);
     revealPosition(pos);
     return;
@@ -708,7 +702,7 @@ export function openDiff(payload: DiffPayload) {
   if (existing) {
     // refresh contents
     existing.tab.diff = payload;
-    focusedGroup = existing.group.id;
+    focusedGroup = existing.group;
     activateTab(existing.group, key);
     return;
   }
@@ -819,8 +813,16 @@ function makeGroup(): EditorGroup {
       moveTabToGroup(key, from, g.id);
     } catch {}
   });
+  // middle-click close, delegated to the strip so re-renders can't orphan listeners
+  tabsEl.addEventListener("auxclick", (e) => {
+    if (e.button !== 1) return;
+    const node = (e.target instanceof HTMLElement ? e.target : null)?.closest<HTMLElement>(".tab[data-key]");
+    if (!node || !tabsEl.contains(node)) return;
+    e.preventDefault();
+    void closeTab(node.dataset.key!);
+  });
   rootEl.addEventListener("mousedown", () => {
-    focusedGroup = g.id;
+    focusedGroup = g;
     for (const gr of groups) gr.rootEl.classList.toggle("focused-group", gr.id === g.id);
   });
   return g;
@@ -836,7 +838,7 @@ function moveTabToGroup(key: string, fromId: number, toId: number) {
   const [tab] = from.tabs.splice(idx, 1);
   to.tabs.push(tab);
   if (from.active === key) from.active = from.tabs[Math.min(idx, from.tabs.length - 1)]?.key ?? null;
-  focusedGroup = to.id;
+  focusedGroup = to;
   if (from.tabs.length === 0 && groups.length > 1) removeGroup(from);
   else {
     renderTabs(from);
@@ -863,8 +865,8 @@ function removeGroup(g: EditorGroup) {
   if (idx < 0) return;
   groups.splice(idx, 1);
   g.rootEl.remove();
-  if (focusedGroup === g.id) focusedGroup = groups[0]?.id ?? 0;
-  for (const gr of groups) gr.rootEl.classList.toggle("focused-group", gr.id === focusedGroup);
+  if (focusedGroup === g) focusedGroup = groups[0] ?? null;
+  for (const gr of groups) gr.rootEl.classList.toggle("focused-group", gr === focusedGroup);
   const remaining = groups[0];
   if (remaining) {
     renderTabs(remaining);

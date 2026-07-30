@@ -134,7 +134,7 @@ export function openSessionHistory(): void {
     const hhmm = `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
     return el(
       "div",
-      { class: "hd-row", onClick: () => void renderTranscript(s) },
+      { class: "hd-row", onClick: () => void renderTranscript(s, filterInput.value.trim()) },
       el("div", { class: "hd-row-main" },
         el("div", { class: "hd-label", text: label.slice(0, 120) }),
         el("div", { class: "hd-meta" },
@@ -146,7 +146,7 @@ export function openSessionHistory(): void {
     );
   }
 
-  async function renderTranscript(s: OmpSessionMeta) {
+  async function renderTranscript(s: OmpSessionMeta, query = "") {
     filterInput.style.display = "none";
     clear(body);
     body.append(el("div", { class: "dimmer", text: "Loading…", style: { padding: "12px" } }));
@@ -166,24 +166,38 @@ export function openSessionHistory(): void {
       body.append(el("div", { class: "hd-empty", text: "This session has no messages." }));
       return;
     }
+    // A-2 follow-through: when the list was filtered, land on the first
+    // message that contains the query instead of the transcript top.
+    // Meta-only hits (title/model) match nothing here and stay at the top.
+    const q = query.toLowerCase();
+    let jumpTo: HTMLElement | null = null;
     for (const e of entries) {
+      let node: HTMLElement;
       if (e.kind === "user") {
-        body.append(el("div", { class: "chat-user", text: e.text }));
+        node = el("div", { class: "chat-user", text: e.text });
       } else if (e.kind === "assistant") {
-        const div = el("div", { class: "chat-agent md" });
-        div.innerHTML = marked.parse(e.text, { async: false });
+        node = el("div", { class: "chat-agent md" });
+        node.innerHTML = marked.parse(e.text, { async: false });
         // history is inert: neutralize links' default nav, keep them readable
-        for (const a of div.querySelectorAll("a")) {
+        for (const a of node.querySelectorAll("a")) {
           a.addEventListener("click", (ev) => ev.preventDefault());
         }
-        body.append(div);
       } else if (e.kind === "tool") {
-        body.append(el("div", { class: "hd-tool mono", text: `⚙ ${e.name}` }));
+        node = el("div", { class: "hd-tool mono", text: `⚙ ${e.name}` });
       } else if (e.kind === "model") {
-        body.append(el("div", { class: "turn-marker", text: `· model: ${e.model} ·` }));
+        node = el("div", { class: "turn-marker", text: `· model: ${e.model} ·` });
       } else {
-        body.append(el("div", { class: "turn-marker", text: `· ${e.text} ·` }));
+        node = el("div", { class: "turn-marker", text: `· ${e.text} ·` });
       }
+      body.append(node);
+      if (!jumpTo && q && (e.kind === "user" || e.kind === "assistant") && e.text.toLowerCase().includes(q)) {
+        jumpTo = node;
+      }
+    }
+    if (jumpTo) {
+      jumpTo.classList.add("hd-match");
+      // after layout: banner + rows must have heights before scrollIntoView
+      requestAnimationFrame(() => jumpTo!.scrollIntoView({ block: "center" }));
     }
   }
 

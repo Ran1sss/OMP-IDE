@@ -9,7 +9,34 @@ let toastStack: HTMLElement | null = null;
 /** visible toasts by message — repeats pulse the existing one instead of stacking twins */
 const liveToasts = new Map<string, { node: HTMLElement; timer: number | undefined }>();
 
+// Every toast is also recorded here so the status-bar bell can re-surface
+// transient notices after they fade (see features/notifications.ts).
+export interface NotificationEntry {
+  message: string;
+  crit: boolean;
+  at: number;
+}
+const NOTIF_CAP = 100;
+const notifLog: NotificationEntry[] = [];
+let notifChanged: (() => void) | null = null;
+
+/** newest first */
+export function notificationLog(): readonly NotificationEntry[] {
+  return notifLog;
+}
+export function clearNotificationLog(): void {
+  notifLog.length = 0;
+  notifChanged?.();
+}
+/** single subscriber (the bell); fires on every new entry and on clear */
+export function onNotificationLogChange(cb: () => void): void {
+  notifChanged = cb;
+}
+
 export function toast(message: string, opts: { crit?: boolean } = {}): void {
+  notifLog.unshift({ message, crit: !!opts.crit, at: Date.now() });
+  if (notifLog.length > NOTIF_CAP) notifLog.length = NOTIF_CAP;
+  notifChanged?.();
   if (!toastStack) {
     toastStack = el("div", { class: "toast-stack" });
     document.body.append(toastStack);
