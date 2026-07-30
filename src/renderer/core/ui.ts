@@ -18,7 +18,10 @@ export interface NotificationEntry {
 }
 const NOTIF_CAP = 100;
 const notifLog: NotificationEntry[] = [];
-let notifChanged: (() => void) | null = null;
+const notifSubscribers = new Set<() => void>();
+function notifyLogChange(): void {
+  for (const cb of notifSubscribers) cb();
+}
 
 /** newest first */
 export function notificationLog(): readonly NotificationEntry[] {
@@ -26,17 +29,17 @@ export function notificationLog(): readonly NotificationEntry[] {
 }
 export function clearNotificationLog(): void {
   notifLog.length = 0;
-  notifChanged?.();
+  notifyLogChange();
 }
-/** single subscriber (the bell); fires on every new entry and on clear */
+/** subscribe to log changes (new entry or clear); multiple consumers supported */
 export function onNotificationLogChange(cb: () => void): void {
-  notifChanged = cb;
+  notifSubscribers.add(cb);
 }
 
 export function toast(message: string, opts: { crit?: boolean } = {}): void {
   notifLog.unshift({ message, crit: !!opts.crit, at: Date.now() });
   if (notifLog.length > NOTIF_CAP) notifLog.length = NOTIF_CAP;
-  notifChanged?.();
+  notifyLogChange();
   if (!toastStack) {
     toastStack = el("div", { class: "toast-stack" });
     document.body.append(toastStack);

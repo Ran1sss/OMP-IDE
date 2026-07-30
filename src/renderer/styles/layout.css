@@ -308,6 +308,19 @@
   box-shadow: var(--shadow-float);
 }
 
+/* rendered-markdown preview tab */
+.md-preview {
+  position: absolute;
+  inset: 0;
+  overflow-y: auto;
+  background: var(--bg-0);
+}
+.md-preview .md {
+  max-width: 780px;
+  margin: 0 auto;
+  padding: 24px 32px 48px;
+}
+
 /* terminal region */
 .term-region {
   display: flex;

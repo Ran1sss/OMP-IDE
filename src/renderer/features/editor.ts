@@ -4,6 +4,7 @@
  */
 
 import * as monaco from "monaco-editor";
+import { marked } from "marked";
 import { el, clear, svgIcon } from "../core/dom";
 import { I } from "../core/icons";
 import { on, emit } from "../core/bus";
@@ -86,12 +87,14 @@ interface DiffPayload {
 interface EditorTab {
   /** unique key: file path, or diff:<path> */
   key: string;
-  kind: "file" | "diff" | "image";
+  kind: "file" | "diff" | "image" | "mdprev";
   path: string;
   title: string;
   model?: monaco.editor.ITextModel;
   diff?: DiffPayload;
   imageSrc?: string;
+  /** rendered-markdown preview source (kind "mdprev") */
+  preview?: string;
   dirty: boolean;
   /** mtime of disk content backing the model */
   diskMtime: number;
@@ -107,6 +110,11 @@ interface EditorGroup {
   crumbsEl: HTMLElement;
   hostEl: HTMLElement;
   rootEl: HTMLElement;
+  /** this group's live widgets — per-group so both splits stay editable at once */
+  editor: monaco.editor.IStandaloneCodeEditor | null;
+  diffEditor: monaco.editor.IDiffEditor | null;
+  /** key of the tab currently mounted in hostEl */
+  mountedKey: string | null;
 }
 
 // ---------------------------------------------------------------- module state
@@ -114,24 +122,46 @@ interface EditorGroup {
 let areaEl: HTMLElement;
 const groups: EditorGroup[] = [];
 let focusedGroup: EditorGroup | null = null;
-let editor: monaco.editor.IStandaloneCodeEditor | null = null;
-let diffEditor: monaco.editor.IDiffEditor | null = null;
-let currentMount: { group: number; key: string } | null = null;
 let wordWrap = false;
 /** one-shot: mountActive skips editor.focus() (tree clicks keep explorer focus) */
 let suppressNextFocus = false;
 let groupSeq = 0;
+/** last emitted active-tab signature (focused group id + active key) — see emitActiveTabChanged */
+let lastActiveSig: string | null = null;
 
 const gitDecorations = new Map<string, string[]>(); // path -> decoration ids
 
 // ---------------------------------------------------------------- helpers
 
+/**
+ * Locate a tab by key, preferring the focused group. A tab OBJECT may be held
+ * by both groups at once (split duplicate) — model, dirty state, and save
+ * identity are shared; each group renders its own view.
+ */
 function findTab(key: string): { group: EditorGroup; tab: EditorTab } | null {
+  const pref = focusedGroupObj();
+  if (pref) {
+    const tab = pref.tabs.find((t) => t.key === key);
+    if (tab) return { group: pref, tab };
+  }
   for (const g of groups) {
+    if (g === pref) continue;
     const tab = g.tabs.find((t) => t.key === key);
     if (tab) return { group: g, tab };
   }
   return null;
+}
+
+/** number of groups currently holding this tab object (split views share the object) */
+function viewCount(tab: EditorTab): number {
+  let n = 0;
+  for (const g of groups) if (g.tabs.includes(tab)) n++;
+  return n;
+}
+
+/** re-render the strip of every group holding the tab (dirty dot stays coherent across views) */
+function renderGroupsHolding(tab: EditorTab): void {
+  for (const g of groups) if (g.tabs.includes(tab)) renderTabs(g);
 }
 
 /** The group the user last focused. Falls back to the first group when the reference is stale. */
@@ -152,9 +182,10 @@ export function activeFilePath(): string | null {
 }
 
 export function dirtyCount(): number {
-  let n = 0;
-  for (const g of groups) for (const t of g.tabs) if (t.dirty) n++;
-  return n;
+  // a tab shared across both groups is ONE dirty buffer, not two
+  const seen = new Set<EditorTab>();
+  for (const g of groups) for (const t of g.tabs) if (t.dirty) seen.add(t);
+  return seen.size;
 }
 
 // ---------------------------------------------------------------- rendering
@@ -166,7 +197,7 @@ function renderTabs(g: EditorGroup) {
       class: "tab-close",
       onClick: (e) => {
         e.stopPropagation();
-        void closeTab(tab.key);
+        void closeTab(tab.key, { group: g });
       },
     });
     closeBtn.append(svgIcon(I.close));
@@ -229,7 +260,7 @@ function renderTabs(g: EditorGroup) {
 
 function showTabMenu(g: EditorGroup, tab: EditorTab, x: number, y: number) {
   contextMenu(x, y, [
-    { label: "Close", key: "Ctrl+W", action: () => void closeTab(tab.key) },
+    { label: "Close", key: "Ctrl+W", action: () => void closeTab(tab.key, { group: g }) },
     { label: "Close Others", action: () => void closeOthers(g, tab.key) },
     { label: "Close All", action: () => void closeAllInGroup(g) },
     { separator: true },
@@ -245,11 +276,11 @@ function revealInExplorer(path: string) {
 }
 
 async function closeOthers(g: EditorGroup, keep: string) {
-  for (const key of g.tabs.map((t) => t.key)) if (key !== keep) await closeTab(key);
+  for (const key of g.tabs.map((t) => t.key)) if (key !== keep) await closeTab(key, { group: g });
 }
 
 async function closeAllInGroup(g: EditorGroup) {
-  for (const key of g.tabs.map((t) => t.key)) await closeTab(key);
+  for (const key of g.tabs.map((t) => t.key)) await closeTab(key, { group: g });
 }
 
 function renderEmpty(host: HTMLElement) {
@@ -265,21 +296,34 @@ function renderEmpty(host: HTMLElement) {
   );
 }
 
+/**
+ * Emit "active-tab-changed" only when the consumer-visible active tab actually
+ * changed (focused group identity + its active key). Same-tab re-mounts
+ * (e.g. relayout) are filtered at the source.
+ */
+function emitActiveTabChanged() {
+  queueMicrotask(() => {
+    const g = focusedGroupObj();
+    const sig = g ? `${g.id}:${g.active ?? ""}` : "";
+    if (sig === lastActiveSig) return;
+    lastActiveSig = sig;
+    emit("active-tab-changed", undefined);
+  });
+}
+
 /** (Re)mount the appropriate widget into the group's host. */
 function mountActive(g: EditorGroup) {
   const tab = g.active ? g.tabs.find((t) => t.key === g.active) : null;
   // every open/close/switch/collapse path funnels here — consumers (outline)
   // re-read the active tab after the mount settles
-  queueMicrotask(() => emit("active-tab-changed", undefined));
+  emitActiveTabChanged();
 
-  // Dispose current single-instance editors when they were mounted here.
-  if (currentMount && currentMount.group === g.id) {
-    editor?.dispose();
-    editor = null;
-    diffEditor?.dispose();
-    diffEditor = null;
-    currentMount = null;
-  }
+  // Dispose this group's own widgets; the other split's instances are untouched.
+  g.editor?.dispose();
+  g.editor = null;
+  g.diffEditor?.dispose();
+  g.diffEditor = null;
+  g.mountedKey = null;
   clear(g.hostEl);
 
   if (!tab) {
@@ -296,13 +340,27 @@ function mountActive(g: EditorGroup) {
     mount.className = "image-preview";
     mount.append(el("img", {}) as HTMLImageElement);
     (mount.firstChild as HTMLImageElement).src = tab.imageSrc ?? "";
+    g.mountedKey = tab.key;
+    return;
+  }
+
+  if (tab.kind === "mdprev") {
+    mount.className = "md-preview";
+    const body = el("div", { class: "md" });
+    body.innerHTML = marked.parse(tab.preview ?? "", { async: false });
+    // preview is inert: links must not navigate the app window
+    for (const a of body.querySelectorAll("a")) {
+      a.addEventListener("click", (e) => e.preventDefault());
+    }
+    mount.append(body);
+    g.mountedKey = tab.key;
     return;
   }
 
   if (tab.kind === "diff") {
     const orig = monaco.editor.createModel(tab.diff!.original, tab.diff!.language ?? "plaintext");
     const mod = monaco.editor.createModel(tab.diff!.modified, tab.diff!.language ?? "plaintext");
-    diffEditor = monaco.editor.createDiffEditor(mount, {
+    const de = monaco.editor.createDiffEditor(mount, {
       theme: "reactor",
       readOnly: true,
       renderSideBySide: true,
@@ -312,17 +370,18 @@ function mountActive(g: EditorGroup) {
       minimap: { enabled: false },
       scrollBeyondLastLine: false,
     });
-    diffEditor.setModel({ original: orig, modified: mod });
-    diffEditor.onDidDispose(() => {
+    de.setModel({ original: orig, modified: mod });
+    de.onDidDispose(() => {
       orig.dispose();
       mod.dispose();
     });
-    currentMount = { group: g.id, key: tab.key };
+    g.diffEditor = de;
+    g.mountedKey = tab.key;
     return;
   }
 
-  // file
-  editor = monaco.editor.create(mount, {
+  // file — editors are per-group; the same model can be live in both splits
+  const ed = monaco.editor.create(mount, {
     model: tab.model!,
     theme: "reactor",
     fontFamily: "JetBrains Mono",
@@ -338,29 +397,34 @@ function mountActive(g: EditorGroup) {
     padding: { top: 8 },
     multiCursorModifier: "ctrlCmd",
   });
-  currentMount = { group: g.id, key: tab.key };
+  g.editor = ed;
+  g.mountedKey = tab.key;
 
-  editor.onDidChangeCursorPosition((e) => {
+  ed.onDidChangeCursorPosition((e) => {
+    scheduleSymbolTrail(g, tab);
+    // a background split's cursor must not lie to the status bar
+    if (focusedGroupObj() !== g) return;
     emit("editor-status", {
       path: tab.path,
       line: e.position.lineNumber,
       column: e.position.column,
       language: tab.model!.getLanguageId(),
     });
-    scheduleSymbolTrail(g, tab);
   });
-  editor.onDidFocusEditorText(() => {
+  ed.onDidFocusEditorText(() => {
     focusedGroup = g;
     for (const gr of groups) gr.rootEl.classList.toggle("focused-group", gr.id === g.id);
   });
-  if (!suppressNextFocus) editor.focus();
+  if (!suppressNextFocus) ed.focus();
   suppressNextFocus = false;
-  emit("editor-status", {
-    path: tab.path,
-    line: editor.getPosition()?.lineNumber ?? 1,
-    column: editor.getPosition()?.column ?? 1,
-    language: tab.model!.getLanguageId(),
-  });
+  if (focusedGroupObj() === g) {
+    emit("editor-status", {
+      path: tab.path,
+      line: ed.getPosition()?.lineNumber ?? 1,
+      column: ed.getPosition()?.column ?? 1,
+      language: tab.model!.getLanguageId(),
+    });
+  }
   void refreshGitGutter(tab);
 }
 
@@ -478,7 +542,7 @@ async function fetchNavTree(tab: EditorTab): Promise<NavItem | null> {
 async function updateSymbolTrail(g: EditorGroup, tab: EditorTab) {
   const holder = g.crumbsEl.querySelector<HTMLElement>(".crumb-symbols");
   if (!holder || holder.dataset.key !== tab.key) return;
-  if (tab.kind !== "file" || !tab.model || !editor || currentMount?.key !== tab.key) return;
+  if (tab.kind !== "file" || !tab.model || !g.editor || g.mountedKey !== tab.key) return;
   const lang = tab.model.getLanguageId();
   if (lang !== "typescript" && lang !== "javascript") return;
   let tree: NavItem | null = null;
@@ -498,8 +562,8 @@ async function updateSymbolTrail(g: EditorGroup, tab: EditorTab) {
   }
   trailRetry = null;
   // async gap: the tab may have been switched away while the worker ran
-  if (!tree || holder.dataset.key !== tab.key || currentMount?.key !== tab.key || !editor) return;
-  const pos = editor.getPosition();
+  if (!tree || holder.dataset.key !== tab.key || g.mountedKey !== tab.key || !g.editor) return;
+  const pos = g.editor.getPosition();
   if (!pos) return;
   const offset = tab.model.getOffsetAt(pos);
   const chain: NavItem[] = [];
@@ -524,7 +588,7 @@ async function updateSymbolTrail(g: EditorGroup, tab: EditorTab) {
           contextMenu(
             r.left,
             r.bottom + 4,
-            siblings.map((s) => ({ label: s.text, action: () => jumpToNavItem(tab, s) })),
+            siblings.map((s) => ({ label: s.text, action: () => jumpToNavItem(g, tab, s) })),
           );
         },
       }),
@@ -532,14 +596,14 @@ async function updateSymbolTrail(g: EditorGroup, tab: EditorTab) {
   });
 }
 
-function jumpToNavItem(tab: EditorTab, item: NavItem) {
-  if (!editor || !tab.model || currentMount?.key !== tab.key) return;
+function jumpToNavItem(g: EditorGroup, tab: EditorTab, item: NavItem) {
+  if (!g.editor || !tab.model || g.mountedKey !== tab.key) return;
   const span = item.nameSpan ?? item.spans?.[0];
   if (!span) return;
   const p = tab.model.getPositionAt(span.start);
-  editor.setPosition(p);
-  editor.revealPositionInCenter(p);
-  editor.focus();
+  g.editor.setPosition(p);
+  g.editor.revealPositionInCenter(p);
+  g.editor.focus();
 }
 
 // ---------------------------------------------------------------- outline (side view)
@@ -595,21 +659,23 @@ export async function activeOutline(): Promise<OutlineSnapshot | null> {
 
 /** current cursor offset in the active file tab (outline highlight) */
 export function activeCursorOffset(): { path: string; offset: number } | null {
+  const g = focusedGroupObj();
   const tab = activeTab();
-  if (!tab || tab.kind !== "file" || !tab.model || !editor || currentMount?.key !== tab.key) return null;
-  const pos = editor.getPosition();
+  if (!g || !tab || tab.kind !== "file" || !tab.model || !g.editor || g.mountedKey !== tab.key) return null;
+  const pos = g.editor.getPosition();
   if (!pos) return null;
   return { path: tab.path, offset: tab.model.getOffsetAt(pos) };
 }
 
 /** jump the active editor to a model offset (outline click) */
 export function jumpToOffset(offset: number): void {
+  const g = focusedGroupObj();
   const tab = activeTab();
-  if (!tab || tab.kind !== "file" || !tab.model || !editor || currentMount?.key !== tab.key) return;
+  if (!g || !tab || tab.kind !== "file" || !tab.model || !g.editor || g.mountedKey !== tab.key) return;
   const p = tab.model.getPositionAt(offset);
-  editor.setPosition(p);
-  editor.revealPositionInCenter(p);
-  editor.focus();
+  g.editor.setPosition(p);
+  g.editor.revealPositionInCenter(p);
+  g.editor.focus();
 }
 
 function activateTab(g: EditorGroup, key: string) {
@@ -671,8 +737,7 @@ export async function openFile(
       const nowDirty = model.getAlternativeVersionId() !== tab.savedVersionId;
       if (nowDirty !== tab.dirty) {
         tab.dirty = nowDirty;
-        const loc = findTab(tab.key);
-        if (loc) renderTabs(loc.group);
+        renderGroupsHolding(tab);
       }
     });
     g.tabs.push(tab);
@@ -685,16 +750,17 @@ export async function openFile(
 }
 
 function revealPosition(pos?: { line?: number; column?: number; selectLength?: number }) {
-  if (!pos?.line || !editor) return;
+  const ed = focusedGroupObj()?.editor;
+  if (!pos?.line || !ed) return;
   const line = pos.line;
   const col = (pos.column ?? 0) + 1;
-  editor.revealLineInCenter(line);
+  ed.revealLineInCenter(line);
   if (pos.selectLength) {
-    editor.setSelection(new monaco.Selection(line, col, line, col + pos.selectLength));
+    ed.setSelection(new monaco.Selection(line, col, line, col + pos.selectLength));
   } else {
-    editor.setPosition({ lineNumber: line, column: col });
+    ed.setPosition({ lineNumber: line, column: col });
   }
-  editor.focus();
+  ed.focus();
 }
 
 export function openDiff(payload: DiffPayload) {
@@ -703,9 +769,10 @@ export function openDiff(payload: DiffPayload) {
   if (!g) return;
   const existing = findTab(key);
   if (existing) {
-    // refresh contents
+    // refresh contents in every group viewing this diff
     existing.tab.diff = payload;
     focusedGroup = existing.group;
+    for (const g of groups) if (g.mountedKey === key && g !== existing.group) mountActive(g);
     activateTab(existing.group, key);
     return;
   }
@@ -717,12 +784,14 @@ export function openDiff(payload: DiffPayload) {
   activateTab(g, key);
 }
 
-export async function closeTab(key: string, opts: { force?: boolean } = {}): Promise<boolean> {
-  const loc = findTab(key);
+export async function closeTab(key: string, opts: { force?: boolean; group?: EditorGroup } = {}): Promise<boolean> {
+  const inGroup = opts.group?.tabs.find((t) => t.key === key);
+  const loc = inGroup && opts.group ? { group: opts.group, tab: inGroup } : findTab(key);
   if (!loc) return true;
   const { group, tab } = loc;
 
-  if (tab.dirty && !opts.force) {
+  // Shared across splits: only the LAST view closing can drop unsaved work.
+  if (tab.dirty && !opts.force && viewCount(tab) === 1) {
     const ok = await confirmDialog({
       title: "Unsaved changes",
       message: `"${tab.title}" has unsaved changes. Close without saving?`,
@@ -734,8 +803,10 @@ export async function closeTab(key: string, opts: { force?: boolean } = {}): Pro
 
   const idx = group.tabs.indexOf(tab);
   group.tabs.splice(idx, 1);
-  tab.model?.dispose();
-  gitDecorations.delete(tab.key);
+  if (viewCount(tab) === 0) {
+    tab.model?.dispose();
+    gitDecorations.delete(tab.key);
+  }
 
   if (group.active === key) {
     const next = group.tabs[Math.min(idx, group.tabs.length - 1)];
@@ -756,7 +827,7 @@ export async function closeActiveTab() {
   const g = focusedGroupObj();
   if (!g) return;
   if (g.active) {
-    await closeTab(g.active);
+    await closeTab(g.active, { group: g });
   } else if (groups.length > 1) {
     // Ctrl+W on a focused empty split group collapses it
     removeGroup(g);
@@ -773,6 +844,51 @@ export function cycleTab(delta: 1 | -1) {
   activateTab(g, next.key);
 }
 
+/** Ctrl+Shift+V: rendered-markdown preview of the active .md tab (refreshes on save/disk change). */
+export async function openMarkdownPreview() {
+  const src = activeTab();
+  if (!src || src.kind !== "file" || !/\.(md|markdown)$/i.test(src.path)) {
+    toast("Markdown preview: open a .md file first");
+    return;
+  }
+  const key = `mdprev:${src.key}`;
+  const existing = findTab(key);
+  if (existing) {
+    focusedGroup = existing.group;
+    activateTab(existing.group, key);
+    return;
+  }
+  const g = focusedGroupObj();
+  if (!g) return;
+  const tab: EditorTab = {
+    key, kind: "mdprev", path: src.path, title: `Preview: ${src.title}`,
+    preview: src.model?.getValue() ?? "", dirty: false, diskMtime: 0, savedVersionId: 0,
+  };
+  g.tabs.push(tab);
+  activateTab(g, key);
+}
+
+/** refresh any open preview of `path` from the freshest source (open buffer, else disk) */
+async function refreshMarkdownPreview(path: string) {
+  const key = `mdprev:${normPath(path)}`;
+  const holders = groups.filter((g) => g.tabs.some((t) => t.key === key));
+  if (!holders.length) return;
+  const prev = holders[0].tabs.find((t) => t.key === key)!;
+  const srcTab = findTab(normPath(path));
+  if (srcTab?.tab.model) {
+    prev.preview = srcTab.tab.model.getValue();
+  } else {
+    try {
+      const res = await window.ide.fs.readFile(normPath(path));
+      if (res.binary) return;
+      prev.preview = res.content;
+    } catch {
+      return;
+    }
+  }
+  for (const g of holders) if (g.mountedKey === key) mountActive(g);
+}
+
 // ---------------------------------------------------------------- save
 
 export async function saveTab(tab: EditorTab): Promise<boolean> {
@@ -783,8 +899,7 @@ export async function saveTab(tab: EditorTab): Promise<boolean> {
     tab.diskMtime = st?.mtimeMs ?? Date.now();
     tab.savedVersionId = tab.model.getAlternativeVersionId();
     tab.dirty = false;
-    const loc = findTab(tab.key);
-    if (loc) renderTabs(loc.group);
+    renderGroupsHolding(tab);
     emit("user-saved", tab.path);
     emit("git-refresh", undefined);
     void refreshGitGutter(tab);
@@ -811,7 +926,7 @@ function makeGroup(): EditorGroup {
   const crumbsEl = el("div", { class: "editor-crumbs", style: { display: "none" } });
   const hostEl = el("div", { class: "editor-host" });
   const rootEl = el("div", { class: "editor-group" }, tabsEl, crumbsEl, hostEl);
-  const g: EditorGroup = { id: groupSeq++, tabs: [], active: null, tabsEl, crumbsEl, hostEl, rootEl };
+  const g: EditorGroup = { id: groupSeq++, tabs: [], active: null, tabsEl, crumbsEl, hostEl, rootEl, editor: null, diffEditor: null, mountedKey: null };
 
   // drop target for tab drag between groups
   rootEl.addEventListener("dragover", (e) => {
@@ -849,7 +964,8 @@ function moveTabToGroup(key: string, fromId: number, toId: number) {
   const idx = from.tabs.findIndex((t) => t.key === key);
   if (idx < 0) return;
   const [tab] = from.tabs.splice(idx, 1);
-  to.tabs.push(tab);
+  // target already shows this tab (split duplicate) → merge: the source view just closes
+  if (!to.tabs.includes(tab)) to.tabs.push(tab);
   if (from.active === key) from.active = from.tabs[Math.min(idx, from.tabs.length - 1)]?.key ?? null;
   focusedGroup = to;
   if (from.tabs.length === 0 && groups.length > 1) removeGroup(from);
@@ -877,31 +993,46 @@ function removeGroup(g: EditorGroup) {
   const idx = groups.indexOf(g);
   if (idx < 0) return;
   groups.splice(idx, 1);
+  g.editor?.dispose();
+  g.editor = null;
+  g.diffEditor?.dispose();
+  g.diffEditor = null;
+  g.mountedKey = null;
+  // defensive: a removed group is normally empty; dispose models no view holds anymore
+  for (const t of g.tabs) {
+    if (viewCount(t) === 0) {
+      t.model?.dispose();
+      gitDecorations.delete(t.key);
+    }
+  }
   g.rootEl.remove();
   if (focusedGroup === g) focusedGroup = groups[0] ?? null;
   for (const gr of groups) gr.rootEl.classList.toggle("focused-group", gr === focusedGroup);
-  const remaining = groups[0];
-  if (remaining) {
-    renderTabs(remaining);
-    mountActive(remaining);
-  }
+  // per-group editors: the remaining group's widget is untouched — no re-mount needed
+  emitActiveTabChanged();
   emit("relayout", undefined);
 }
 
+/** Ctrl+\: open a second group; the active tab is DUPLICATED into it (shared buffer, two views). */
 export function splitEditor() {
   if (groups.length >= 2) {
     toast("Two editor groups max");
     return;
   }
+  const src = focusedGroupObj();
   const g = makeGroup();
   groups.push(g);
   areaEl.append(g.rootEl);
+  const active = src?.active ? src.tabs.find((t) => t.key === src.active) ?? null : null;
+  if (active) {
+    // same tab OBJECT — model, dirty state, and save identity are shared
+    g.tabs.push(active);
+    g.active = active.key;
+  }
+  focusedGroup = g;
+  for (const gr of groups) gr.rootEl.classList.toggle("focused-group", gr === g);
   renderTabs(g);
   mountActive(g);
-  // Move the active tab over only when the source keeps at least one tab;
-  // otherwise the source group would immediately collapse and undo the split.
-  const src = groups[0];
-  if (src.active && src.tabs.length > 1) moveTabToGroup(src.active, src.id, g.id);
   emit("relayout", undefined);
 }
 
@@ -909,30 +1040,36 @@ export function splitEditor() {
 
 export function toggleWordWrap() {
   wordWrap = !wordWrap;
-  editor?.updateOptions({ wordWrap: wordWrap ? "on" : "off" });
+  for (const g of groups) g.editor?.updateOptions({ wordWrap: wordWrap ? "on" : "off" });
   toast(`Word wrap ${wordWrap ? "on" : "off"}`);
 }
 
 export function zoomFont(delta: number) {
   state.settings.fontSize = Math.max(9, Math.min(28, state.settings.fontSize + delta));
-  editor?.updateOptions({ fontSize: state.settings.fontSize });
-  diffEditor?.updateOptions({ fontSize: state.settings.fontSize });
+  for (const g of groups) {
+    g.editor?.updateOptions({ fontSize: state.settings.fontSize });
+    g.diffEditor?.updateOptions({ fontSize: state.settings.fontSize });
+  }
   void window.ide.store.setSettings({ fontSize: state.settings.fontSize });
 }
 
 export function goToLine() {
-  editor?.focus();
-  editor?.trigger("ide", "editor.action.gotoLine", null);
+  const ed = focusedGroupObj()?.editor;
+  ed?.focus();
+  ed?.trigger("ide", "editor.action.gotoLine", null);
 }
 
 export function findInFile() {
-  editor?.focus();
-  editor?.trigger("ide", "actions.find", null);
+  const ed = focusedGroupObj()?.editor;
+  ed?.focus();
+  ed?.trigger("ide", "actions.find", null);
 }
 
 export function relayoutEditors() {
-  editor?.layout();
-  diffEditor?.layout();
+  for (const g of groups) {
+    g.editor?.layout();
+    g.diffEditor?.layout();
+  }
 }
 
 // ---------------------------------------------------------------- git gutter
@@ -972,17 +1109,20 @@ async function reconcileExternalChange(path: string) {
   }
 
   if (!tab.dirty) {
-    // Clean buffer: refresh silently, preserving cursor.
-    const pos = editor?.getPosition();
+    // Clean buffer: refresh silently, preserving each viewing editor's cursor.
+    const views = groups
+      .filter((g) => g.mountedKey === tab.key && g.editor)
+      .map((g) => ({ g, pos: g.editor!.getPosition() }));
     model.setValue(res.content);
     tab.diskMtime = res.mtimeMs;
     tab.savedVersionId = model.getAlternativeVersionId();
     tab.dirty = false;
-    if (pos && currentMount?.key === tab.key) {
-      editor?.setPosition(pos);
-      editor?.revealPositionInCenterIfOutsideViewport(pos);
+    for (const { g, pos } of views) {
+      if (!pos) continue;
+      g.editor!.setPosition(pos);
+      g.editor!.revealPositionInCenterIfOutsideViewport(pos);
     }
-    renderTabs(loc.group);
+    renderGroupsHolding(tab);
     void refreshGitGutter(tab);
     return;
   }
@@ -999,7 +1139,7 @@ async function reconcileExternalChange(path: string) {
     tab.diskMtime = res.mtimeMs;
     tab.savedVersionId = model.getAlternativeVersionId();
     tab.dirty = false;
-    renderTabs(loc.group);
+    renderGroupsHolding(tab);
     void refreshGitGutter(tab);
   } else {
     tab.diskMtime = res.mtimeMs; // keep buffer; next save overwrites
@@ -1008,10 +1148,16 @@ async function reconcileExternalChange(path: string) {
 
 function handleDeleted(path: string) {
   const key = normPath(path);
-  const loc = findTab(key);
-  if (!loc) return;
-  if (!loc.tab.dirty) void closeTab(key, { force: true });
-  else toast(`${loc.tab.title} was deleted on disk — buffer kept`, { crit: true });
+  const first = findTab(key);
+  if (!first) return;
+  if (first.tab.dirty) {
+    toast(`${first.tab.title} was deleted on disk — buffer kept`, { crit: true });
+    return;
+  }
+  // close every split view of the file (force path never awaits — mutations are sync)
+  for (const g of [...groups]) {
+    if (g.tabs.some((t) => t.key === key)) void closeTab(key, { force: true, group: g });
+  }
 }
 
 // ---------------------------------------------------------------- init
@@ -1033,10 +1179,15 @@ export function initEditorArea(container: HTMLElement) {
   });
   on("fs-changed", (changes) => {
     for (const c of changes) {
-      if (c.type === "change" || c.type === "add") void reconcileExternalChange(c.path);
-      else if (c.type === "unlink") handleDeleted(c.path);
+      if (c.type === "change" || c.type === "add") {
+        // sequence: the preview reads the buffer AFTER reconcile settles it
+        void reconcileExternalChange(c.path).then(() => refreshMarkdownPreview(c.path));
+      } else if (c.type === "unlink") {
+        handleDeleted(c.path);
+      }
     }
   });
+  on("user-saved", (path) => void refreshMarkdownPreview(path));
 
   window.addEventListener("resize", relayoutEditors);
   // relayout after css transitions on panels

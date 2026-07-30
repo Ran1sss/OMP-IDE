@@ -26,7 +26,7 @@ export interface BusEvents {
   "reveal-in-tree": string;
   /** run a global search seeded with this query */
   "seed-search": string;
-  /** the active tab of any group changed (open/close/switch/collapse) */
+  /** the consumer-visible active tab changed (focused group id + active key; same-tab re-mounts filtered at the source) */
   "active-tab-changed": void;
 }
 
