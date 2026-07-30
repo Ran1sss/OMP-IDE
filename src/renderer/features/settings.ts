@@ -22,13 +22,17 @@ export function openSettingsDialog(): void {
   const fontInput = el("input", { class: "input mono", type: "number", value: String(state.settings.fontSize) }) as HTMLInputElement;
   const shellInput = el("input", { class: "input mono", value: state.settings.terminalShell, placeholder: "powershell.exe (default)" }) as HTMLInputElement;
   const ompInput = el("input", { class: "input mono", value: state.settings.ompPath, placeholder: "resolved from PATH" }) as HTMLInputElement;
+  const stallInput = el("input", { class: "input mono", type: "number", value: String(state.settings.stallSeconds) }) as HTMLInputElement;
 
   const save = async () => {
+    const stallRaw = parseInt(stallInput.value, 10);
     const patch: Partial<Settings> = {
       accent: accentInput.value.trim() || "#55e6c1",
       fontSize: Math.max(9, Math.min(28, parseInt(fontInput.value, 10) || 13)),
       terminalShell: shellInput.value.trim(),
       ompPath: ompInput.value.trim(),
+      // 0 disables the stall nudge entirely; anything else clamps to ≥5 s
+      stallSeconds: Number.isNaN(stallRaw) ? 20 : stallRaw === 0 ? 0 : Math.max(5, stallRaw),
     };
     state.settings = await window.ide.store.setSettings(patch);
     applyAccent(state.settings.accent);
@@ -56,6 +60,7 @@ export function openSettingsDialog(): void {
       field("Editor font size", fontInput, "9–28 px, also Ctrl+= / Ctrl+-"),
       field("Terminal shell", shellInput, "Full path to shell executable; blank = system default"),
       field("omp binary path", ompInput, "Blank = resolve from PATH. Restart the agent after changing."),
+      field("Agent stall warning (seconds)", stallInput, "Nudge card when the model streams nothing. 0 = off, minimum 5. Default 20."),
     ),
     el(
       "div",
@@ -72,6 +77,7 @@ export function openSettingsDialog(): void {
     if (e.key === "Escape") close();
   });
   document.body.append(overlay);
+  accentInput.focus();
   requestAnimationFrame(() => overlay.classList.add("visible"));
 }
 

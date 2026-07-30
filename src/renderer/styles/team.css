@@ -1,0 +1,318 @@
+/* Team Mode — deliberation feed, plan gate, live board.
+   Extends REACTOR: all agents are teal (--energy); glyph+name in mono
+   differentiate individuals; approval is --power; remote approval --gold.
+   State chips reuse the orb language — no new animation vocabulary. */
+
+/* toggle (composer row) */
+.team-toggle {
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: var(--r-s);
+  color: var(--text-low);
+  font: 600 10px var(--font-mono);
+  letter-spacing: 0.12em;
+  padding: 3px 9px;
+  cursor: pointer;
+  transition: all var(--t-fast) var(--ease-swift);
+}
+.team-toggle:hover { color: var(--energy); border-color: var(--energy-40); }
+.team-toggle.armed {
+  color: var(--energy);
+  border-color: var(--energy);
+  background: var(--energy-15);
+  box-shadow: 0 0 8px var(--energy-25);
+}
+
+/* surface between agent head and chat */
+.team-surface {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  max-height: 62%;
+  overflow-y: auto;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-0);
+}
+/* team runs own the strip surface: slices replace the flat todo list */
+.team-live .todo-strip { display: none !important; }
+
+.team-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+  position: sticky;
+  top: 0;
+  background: var(--bg-0);
+  z-index: 2;
+}
+.th-title {
+  font: 700 10px var(--font-mono);
+  letter-spacing: 0.14em;
+  color: var(--energy);
+}
+.th-phase { font-size: 11px; color: var(--text-mid); }
+.th-solo {
+  font-size: 10px;
+  color: var(--flare);
+  border: 1px solid var(--flare-40);
+  border-radius: var(--r-s);
+  padding: 1px 6px;
+  background: var(--flare-15);
+}
+.th-goal {
+  font-size: 11px;
+  color: var(--text-low);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 34%;
+}
+.th-btn { padding: 2px 10px; font-size: 11px; }
+
+.team-body { display: flex; flex-direction: column; min-height: 0; }
+
+/* ---------- agent cards (planners + workers) ---------- */
+.td-planners, .tb-cards {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 10px 12px;
+}
+.team-card {
+  flex: 1 1 130px;
+  min-width: 120px;
+  max-width: 200px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-m);
+  background: var(--bg-1);
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  transition: opacity var(--t-med) var(--ease-swift), border-color var(--t-med) var(--ease-swift);
+}
+.team-card .tc-row { display: flex; align-items: center; gap: 6px; }
+.tc-glyph { color: var(--energy); font-size: 13px; }
+.tc-agent { font-size: 12px; color: var(--text-hi); flex: 1; }
+.tc-chip {
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  border: 1px solid var(--line);
+  border-radius: var(--r-s);
+  padding: 1px 6px;
+  color: var(--text-mid);
+}
+.tc-meta { font-size: 10px; }
+.tc-wait, .tc-files { font-size: 10px; }
+.dim { color: var(--text-low); }
+
+/* sleep/wake/fail read at a glance — orb language, 40% sleepers */
+.team-card.st-sleeping { opacity: 0.4; }
+.team-card.st-working { border-color: var(--energy-40); }
+.team-card.st-working .tc-chip { color: var(--energy); border-color: var(--energy-40); }
+.team-card.st-failed { border-color: var(--crit-40); }
+.team-card.st-failed .tc-chip { color: var(--crit); border-color: var(--crit-40); }
+.team-card.st-done { opacity: 0.65; }
+.team-card.st-done .tc-chip { color: var(--energy); }
+
+/* the single 240ms materialize — the app's standard entrance */
+.materialize { animation: team-materialize var(--t-med) var(--ease-swift); }
+@keyframes team-materialize {
+  from { opacity: 0; transform: translateY(6px) scale(0.98); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+/* ---------- deliberation feed ---------- */
+.team-feed {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 12px 12px;
+  overflow-y: auto;
+  max-height: 260px;
+  border-top: 1px solid var(--line);
+}
+.tf-entry { display: flex; gap: 8px; font-size: 12px; line-height: 1.5; }
+.tf-author { color: var(--energy); font-size: 11px; white-space: nowrap; padding-top: 1px; }
+.tf-text { color: var(--text-mid); white-space: pre-wrap; word-break: break-word; }
+.tf-note .tf-author { color: var(--power); }
+.tf-note .tf-text { color: var(--text-hi); }
+.tf-sys {
+  text-align: center;
+  font: 500 10px var(--font-mono);
+  letter-spacing: 0.06em;
+  padding: 2px 0;
+}
+
+/* ---------- plan gate ---------- */
+.team-gate { display: flex; flex-direction: column; gap: 10px; padding: 12px; }
+.tg-summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+  color: var(--text-hi);
+}
+.tg-summary .mono { color: var(--power); font-size: 11px; }
+.tg-list {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--line);
+  border-radius: var(--r-m);
+  overflow: hidden;
+}
+.tg-slice {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-1);
+}
+.tg-slice:last-child { border-bottom: none; }
+.tg-id {
+  color: var(--energy);
+  font-size: 12px;
+  min-width: 20px;
+  text-align: center;
+}
+.tg-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.tg-title { font-size: 12px; color: var(--text-hi); }
+.tg-scope { font-size: 11px; }
+.tg-contract { font-size: 10px; }
+.tg-deps { font-size: 10px; white-space: nowrap; }
+.tg-worker { font-size: 11px; color: var(--energy); }
+.tg-btn { padding: 2px 8px; font-size: 10px; }
+.tg-del:hover { color: var(--crit); }
+.tg-actions { display: flex; align-items: center; gap: 8px; }
+
+/* ---------- DAG ---------- */
+.team-dag-wrap { padding: 4px 12px; overflow-x: auto; }
+.team-dag { width: 100%; min-width: 260px; max-height: 240px; display: block; }
+.dag-edge {
+  fill: none;
+  stroke: var(--line);
+  stroke-width: 1.2;
+  transition: stroke var(--t-med) var(--ease-swift);
+}
+/* light is information: only edges with flow actually moving carry energy */
+.dag-edge.live {
+  stroke: var(--energy-40);
+  stroke-dasharray: 6 5;
+  animation: dag-drift 1.6s linear infinite;
+}
+.dag-edge.pulse { animation: dag-edge-pulse 720ms var(--ease-swift) 1; stroke: var(--energy); }
+@keyframes dag-drift { to { stroke-dashoffset: -11; } }
+@keyframes dag-edge-pulse {
+  0%   { stroke: var(--energy); stroke-width: 2.2; }
+  100% { stroke: var(--energy-40); stroke-width: 1.2; }
+}
+.dag-node rect {
+  fill: var(--bg-1);
+  stroke: var(--line);
+  stroke-width: 1;
+  transition: stroke var(--t-med) var(--ease-swift);
+}
+.dag-node.st-active rect { stroke: var(--energy); filter: drop-shadow(0 0 4px var(--energy-25)); }
+.dag-node.st-done rect { stroke: var(--energy-40); }
+.dag-node.st-failed rect { stroke: var(--crit); }
+.dag-node.st-replanned rect { stroke: var(--flare-40); stroke-dasharray: 4 3; }
+.dag-id { font: 700 10px var(--font-mono); fill: var(--energy); }
+.dag-node.st-failed .dag-id { fill: var(--crit); }
+.dag-title { font: 500 9px var(--font-mono); fill: var(--text-low); }
+
+/* ---------- board extras ---------- */
+.tb-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 6px 12px;
+  border-top: 1px solid var(--line);
+}
+.tb-slice {
+  font-size: 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-s);
+  padding: 2px 8px;
+  color: var(--text-mid);
+  cursor: pointer;
+  transition: border-color var(--t-fast) var(--ease-swift);
+}
+.tb-slice:hover { border-color: var(--line-bright); }
+.tb-slice.st-active { color: var(--energy); border-color: var(--energy-40); }
+.tb-slice.st-done { color: var(--energy); opacity: 0.7; }
+.tb-slice.st-failed { color: var(--crit); border-color: var(--crit-40); }
+.tb-slice.st-replanned { color: var(--flare); border-color: var(--flare-40); }
+
+.slice-detail {
+  margin: 8px 12px;
+  border: 1px solid var(--line-bright);
+  border-radius: var(--r-m);
+  background: var(--bg-1);
+  overflow: hidden;
+}
+.sd-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--line);
+  font-size: 11px;
+  color: var(--text-hi);
+}
+.sd-head .tc-chip.st-failed { color: var(--crit); border-color: var(--crit-40); }
+.sd-head .tc-chip.st-done, .sd-head .tc-chip.st-active { color: var(--energy); border-color: var(--energy-40); }
+.sd-body { padding: 8px 10px; font-size: 12px; line-height: 1.5; white-space: pre-wrap; }
+
+.needs-call {
+  margin: 8px 12px;
+  border: 1px solid var(--crit-40);
+  border-radius: var(--r-m);
+  background: var(--crit-15);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.nc-title { font-size: 12px; font-weight: 600; color: var(--text-hi); }
+.nc-error { font-size: 11px; white-space: pre-wrap; }
+.nc-actions { display: flex; gap: 8px; }
+
+.tr-head {
+  padding: 10px 12px 0;
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  color: var(--energy);
+}
+.team-report {
+  margin: 6px 12px 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--energy-25);
+  border-radius: var(--r-m);
+  background: var(--bg-1);
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text-mid);
+}
+.team-report code { font-family: var(--font-mono); font-size: 11px; }
+
+.tb-frozen {
+  text-align: center;
+  font: 500 10px var(--font-mono);
+  letter-spacing: 0.06em;
+  padding: 8px 0 12px;
+}
+
+/* ---------- stalled / restart honesty ---------- */
+.team-stalled {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px 12px;
+}
+.ts-title { font-size: 13px; font-weight: 600; color: var(--flare); }
+.ts-goal { font-size: 11px; color: var(--text-mid); }
+.team-stalled .dim { font-size: 12px; line-height: 1.5; }

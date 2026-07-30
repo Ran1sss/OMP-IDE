@@ -22,6 +22,8 @@ interface OmpSession {
   status: OmpStatus;
   intentionalKill: boolean;
   startedAt: number;
+  /** an abort was requested this turn (IDE button OR remote /stop via bridge) */
+  abortRequested?: boolean;
 }
 
 const sessions = new Map<number, OmpSession>();
@@ -285,12 +287,17 @@ function handleFrame(s: OmpSession, frame: RpcFrame) {
       }
       break;
     }
-    case "agent_end":
+    case "agent_end": {
       setStatus(s, { state: "idle", model: s.status.model });
-      emit(s, { kind: "agent-end" });
+      // Both interrupt origins (IDE header/stall card and Telegram /stop) go
+      // through sendCmd {type:"abort"}; the flag lets the renderer mark the
+      // turn regardless of where the interrupt came from.
+      emit(s, { kind: "agent-end", aborted: s.abortRequested === true });
+      s.abortRequested = false;
       // Refresh todos snapshot after each run.
       sendCmd(s, { type: "get_state" });
       break;
+    }
     case "message_update": {
       const ev = frame.assistantMessageEvent;
       if (!ev) break;
@@ -540,6 +547,7 @@ export function getAgentBridge(): AgentBridge {
     abort() {
       const s = primarySession();
       if (!s) return false;
+      s.abortRequested = true;
       sendCmd(s, { type: "abort" });
       return true;
     },
@@ -601,7 +609,10 @@ export function registerOmpHandlers(ipc: IpcMain) {
 
   ipc.handle("omp:abort", async (e) => {
     const s = sessions.get(e.sender.id);
-    if (s) sendCmd(s, { type: "abort" });
+    if (s) {
+      s.abortRequested = true;
+      sendCmd(s, { type: "abort" });
+    }
   });
 
   ipc.handle("omp:newSession", async (e) => {

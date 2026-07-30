@@ -516,6 +516,65 @@ export function initExplorer(container: HTMLElement) {
         void deleteSelected(node);
       }
     }
+    // keyboard navigation: arrows move selection through the visible order,
+    // Enter opens, Right expands/steps in, Left collapses/steps out.
+    const order = visiblePaths();
+    if (!order.length) return;
+    const moveTo = (path: string | undefined) => {
+      if (!path) return;
+      selectSingle(path);
+      rerenderVisible(rootNode!);
+      const row = findNode(path)?.rowEl;
+      row?.scrollIntoView({ block: "nearest" });
+      row?.focus(); // rerender rebuilt the rows; keep keydown flowing through the tree
+    };
+    const idx = selectedPath ? order.indexOf(selectedPath) : -1;
+    switch (e.key) {
+      case "ArrowDown":
+        e.preventDefault();
+        moveTo(order[Math.min(idx + 1, order.length - 1)]);
+        break;
+      case "ArrowUp":
+        e.preventDefault();
+        moveTo(idx < 0 ? order[order.length - 1] : order[Math.max(idx - 1, 0)]);
+        break;
+      case "ArrowRight": {
+        if (!selectedPath) break;
+        const node = findNode(selectedPath);
+        if (!node?.isDir) break;
+        e.preventDefault();
+        if (!node.expanded) {
+          void toggleDir(node).then(() => moveTo(selectedPath!));
+        } else {
+          moveTo(order[idx + 1]); // first visible child
+        }
+        break;
+      }
+      case "ArrowLeft": {
+        if (!selectedPath) break;
+        const node = findNode(selectedPath);
+        e.preventDefault();
+        if (node?.isDir && node.expanded) {
+          void toggleDir(node).then(() => moveTo(selectedPath!));
+        } else {
+          const parent = dirName(selectedPath);
+          if (order.includes(parent)) moveTo(parent);
+        }
+        break;
+      }
+      case "Enter": {
+        if (!selectedPath) break;
+        const node = findNode(selectedPath);
+        if (!node) break;
+        e.preventDefault();
+        if (node.isDir) {
+          void toggleDir(node).then(() => moveTo(selectedPath!));
+        } else {
+          emit("open-file", { path: node.path, focus: true });
+        }
+        break;
+      }
+    }
   });
 
   on("user-saved", (path) => userSaved.set(normPath(path), Date.now()));

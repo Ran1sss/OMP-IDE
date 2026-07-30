@@ -1,7 +1,7 @@
 import type { IpcMain } from "electron";
 import { app } from "electron";
 import * as fs from "node:fs";
-import { join, basename } from "node:path";
+import { join, basename, resolve, isAbsolute } from "node:path";
 import {
   DEFAULT_SETTINGS,
   type Settings,
@@ -62,17 +62,38 @@ export function registerStoreHandlers(ipc: IpcMain) {
     return s.settings;
   });
 
+  // Paths are stored resolved; comparison is case-insensitive (win32 FS).
+  // Legacy entries may be relative ("."), duplicated by separator style, or dead.
   ipc.handle("store:getRecents", async (): Promise<RecentWorkspace[]> => {
     const s = load();
-    return s.recents.filter((r) => fs.existsSync(r.path)).slice(0, 8);
+    const seen = new Set<string>();
+    const out: RecentWorkspace[] = [];
+    for (const r of s.recents) {
+      if (!isAbsolute(r.path)) continue; // relative junk from pre-fix builds
+      const full = resolve(r.path);
+      const key = full.toLowerCase();
+      if (seen.has(key) || !fs.existsSync(full)) continue;
+      seen.add(key);
+      out.push({ ...r, path: full });
+    }
+    return out.slice(0, 8);
   });
 
   ipc.handle("store:addRecent", async (_e, path: string) => {
     const s = load();
+    const full = resolve(path);
+    const key = full.toLowerCase();
     s.recents = [
-      { path, name: basename(path), openedAt: Date.now() },
-      ...s.recents.filter((r) => r.path !== path),
+      { path: full, name: basename(full), openedAt: Date.now() },
+      ...s.recents.filter((r) => resolve(r.path).toLowerCase() !== key),
     ].slice(0, 12);
+    persist();
+  });
+
+  ipc.handle("store:removeRecent", async (_e, path: string) => {
+    const s = load();
+    const key = resolve(path).toLowerCase();
+    s.recents = s.recents.filter((r) => resolve(r.path).toLowerCase() !== key);
     persist();
   });
 

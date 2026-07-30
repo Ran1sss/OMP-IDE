@@ -30,6 +30,7 @@ export const I = {
   plus: `<path d="M8 3.5v9M3.5 8h9"/>`,
   kill: `<circle cx="8" cy="8" r="5.5"/><line x1="5.5" y1="5.5" x2="10.5" y2="10.5"/><line x1="10.5" y1="5.5" x2="5.5" y2="10.5"/>`,
   restart2: `<path d="M13 8a5 5 0 1 1-1.5-3.5"/><path d="M13 2.5V5h-2.5"/>`,
+  history: `<circle cx="8.5" cy="8" r="5"/><path d="M8.5 5.2V8l2 1.5"/><path d="M3.5 8H1.8M3 5.2l1.2.8"/>`,
   chevronDown: `<path d="M4 6l4 4 4-4"/>`,
   panelToggle: `<rect x="2" y="3" width="12" height="10" rx="1.2"/><line x1="2" y1="10" x2="14" y2="10"/>`,
   // git

@@ -14,7 +14,7 @@ import { I } from "./core/icons";
 import { on, emit } from "./core/bus";
 import { state, baseName, normPath } from "./core/state";
 import { registerCommand, installKeybindings } from "./core/commands";
-import { toast, confirmDialog } from "./core/ui";
+import { toast, confirmDialog, installDialogEscape } from "./core/ui";
 import { initEditorArea, saveActive, saveAll, closeActiveTab, splitEditor, toggleWordWrap, zoomFont, goToLine, findInFile, hasDirtyTabs, relayoutEditors, activeFilePath } from "./features/editor";
 import { initExplorer, loadWorkspaceTree, collapseAll } from "./features/explorer";
 import { initTerminal, toggleTerminal, createTerminal } from "./features/terminal";
@@ -22,6 +22,7 @@ import { initSearchPanel, focusSearch } from "./features/search";
 import { initGitPanel, refreshGit, switchBranch, onBranchChange } from "./features/git";
 import { openPalette, invalidateFileCache } from "./features/palette";
 import { initAgentPanel, startAgent, focusAgentInput } from "./features/agent";
+import { openSessionHistory } from "./features/history";
 import { openSettingsDialog, applyAccent } from "./features/settings";
 import { showWelcome } from "./features/welcome";
 import { initRemote, createBeacon } from "./features/remote";
@@ -29,6 +30,7 @@ import { initModels, createModelChip, openModelsDialog, switchModelViaPicker, as
 import "./styles/remote.css";
 import "./styles/models.css";
 import "./styles/mentions.css";
+import "./styles/team.css";
 import type { LayoutState, OmpStatus } from "../shared/types";
 
 type ViewId = "explorer" | "search" | "git" | "remote";
@@ -367,6 +369,7 @@ reg("git.refresh", "Git: Refresh", () => void refreshGit());
 reg("agent.interrupt", "Agent: Interrupt", () => void window.ide.omp.abort(), "Ctrl+Shift+X");
 reg("agent.newSession", "Agent: New Session", () => void window.ide.omp.newSession());
 reg("agent.restart", "Agent: Restart Process", () => void window.ide.omp.restart());
+reg("agent.history", "Agent: Session History…", () => openSessionHistory());
 reg("model.switch", "Model: Switch…", () => switchModelViaPicker("palette"));
 reg("model.assignRole", "Model: Assign Role…", () => assignRoleViaPicker("palette"));
 reg("model.settings", "Model: Open Settings", () => openModelsDialog());
@@ -381,6 +384,7 @@ reg("explorer.reveal", "Reveal Active File in Explorer", () => {
 });
 
 installKeybindings();
+installDialogEscape();
 
 // ---------------------------------------------------------------- workspace lifecycle
 

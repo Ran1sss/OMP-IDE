@@ -240,6 +240,36 @@
 .tab .tab-close:hover { background: var(--bg-2); color: var(--text-hi); }
 .tab .tab-close svg { width: 10px; height: 10px; }
 
+/* breadcrumbs — path (+ TS/JS symbol trail) between tabs and editor */
+.editor-crumbs {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  height: 22px;
+  padding: 0 10px;
+  overflow: hidden;
+  white-space: nowrap;
+  background: var(--bg-0);
+  border-bottom: 1px solid var(--line);
+  font-size: 11px;
+}
+.editor-crumbs .crumb {
+  border: none;
+  background: none;
+  padding: 1px 3px;
+  border-radius: var(--r-s);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-low);
+  cursor: pointer;
+  transition: color var(--t-fast) var(--ease-swift), background var(--t-fast) var(--ease-swift);
+}
+.editor-crumbs .crumb:hover { color: var(--text-hi); background: var(--bg-2); }
+.editor-crumbs .crumb-file { color: var(--text-mid); }
+.editor-crumbs .crumb-symbol { color: var(--power); font-family: var(--font-ui); }
+.editor-crumbs .crumb-sep { color: var(--text-low); opacity: 0.6; }
+.editor-crumbs .crumb-symbols { display: inline-flex; align-items: center; gap: 2px; }
+
 .editor-host { flex: 1; min-height: 0; position: relative; }
 .editor-host .monaco-mount { position: absolute; inset: 0; }
 

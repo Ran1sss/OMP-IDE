@@ -10,6 +10,7 @@ import { execFile } from "node:child_process";
 import { randomInt } from "node:crypto";
 import { basename } from "node:path";
 import { request as httpsRequest } from "node:https";
+import type { Agent } from "node:http";
 import { Bot, InlineKeyboard } from "grammy";
 import type {
   RemoteState,
@@ -30,8 +31,9 @@ import {
 } from "./vault";
 import { BotRuntime, type BotDelegate, type InboundMessage, type InboundCallback, type GroupMessage } from "./bot-runtime";
 import { WatchManager } from "./watch-manager";
-import { currentProxyAgent, validateProxyUrl } from "./proxy";
+import { agentForUrl, currentProxyAgent, validateProxyUrl } from "./proxy";
 import { registerSwapRemoteNotifier } from "../models/swap-engine";
+import { registerTeamGateNotifier, approveTeamFromRemote } from "../omp-team/team-service";
 import { SessionTracker } from "./session-tracker";
 import {
   escapeMd,
@@ -102,10 +104,26 @@ class RemoteManager implements BotDelegate {
     registerSwapRemoteNotifier((text) => {
       for (const t of this.targets()) t.runtime.sendMd(t.chatId, escapeMd(text));
     });
+    // Team plan gate: the converged plan reaches the phone with [Approve]
+    // [Open in IDE] — first decision wins with the IDE button.
+    registerTeamGateNotifier((packet) => {
+      const kb = new InlineKeyboard()
+        .text("Approve", `team:${packet.runId}`)
+        .text("Open in IDE", "team:open");
+      const lines = [
+        `🧩 Team plan ready${packet.solo ? " (solo fallback)" : ""}`,
+        `goal: ${packet.goal.slice(0, 200)}`,
+        packet.summary,
+        "",
+        ...packet.slices.map((s) => `${s.id}: ${s.title}${s.deps.length ? ` ← ${s.deps.join(",")}` : ""} · ${s.worker}`),
+      ].filter(Boolean);
+      for (const t of this.targets()) t.runtime.sendMd(t.chatId, escapeMd(lines.join("\n")), kb);
+    });
   }
 
   async dispose(): Promise<void> {
     registerSwapRemoteNotifier(null);
+    registerTeamGateNotifier(null);
     this.watch.dispose();
     // Flush a final broadcast if a task is mid-flight.
     const st = this.bridge.getStatus();
@@ -317,6 +335,29 @@ class RemoteManager implements BotDelegate {
     return { ok: true, probe };
   }
 
+  /**
+   * Probe api.telegram.org through an arbitrary proxy URL WITHOUT touching the
+   * stored config or bouncing bots. Empty url = test the direct connection.
+   * Powers the CC "Test" affordance for diagnosing an already-set proxy that
+   * died after being committed (commit-time probing can't catch that).
+   */
+  async testProxy(url: string): Promise<{ ok: boolean; detail: string }> {
+    const trimmed = url.trim();
+    const err = validateProxyUrl(trimmed);
+    if (err) return { ok: false, detail: err };
+    const started = Date.now();
+    try {
+      const res = await probeGetMe("0:probe", trimmed ? agentForUrl(trimmed) : undefined);
+      const via = trimmed ? "proxy OK" : "direct connection OK";
+      return { ok: true, detail: `${via} — api.telegram.org answered ${res.status} in ${Date.now() - started} ms` };
+    } catch (e) {
+      const msg = e instanceof Error && e.name === "TimeoutError"
+        ? "no answer within 15s"
+        : e instanceof Error ? e.message : String(e);
+      return { ok: false, detail: trimmed ? `Proxy failed: ${msg}` : `Direct connection failed: ${msg}` };
+    }
+  }
+
   revokeUser(botId: string, telegramId: number): void {
     const store = loadStore();
     const bot = store.bots.find((b) => b.id === botId);
@@ -460,6 +501,23 @@ class RemoteManager implements BotDelegate {
 
     // proposal decisions from the approver's DM: pp:<id>:do|skip
     if (this.watch.handleCallback(botId, cb.data, cb.username, cb.ack)) return;
+    // team plan approval: team:<runId> | team:open (informational)
+    if (cb.data.startsWith("team:")) {
+      const arg = cb.data.slice(5);
+      if (arg === "open") {
+        cb.ack("Open OMP IDE on the desktop to edit the plan");
+        return;
+      }
+      const res = approveTeamFromRemote(arg, `@${cb.username} via Telegram`);
+      if (res.ok) {
+        cb.ack("Approved — team is building");
+        this.log(botId, bot.username, `@${cb.username}`, "answer", "team plan approved");
+        this.broadcastMd(escapeMd(`🧩 @${cb.username} approved the team plan.`), botId, cb.chatId);
+      } else {
+        cb.ack(res.error ?? "That plan is no longer active");
+      }
+      return;
+    }
     // agent question buttons: ui:<reqId>:<optIndex|yes|no>
     if (cb.data.startsWith("ui:")) {
       const [, reqId, choice] = cb.data.split(":");
@@ -925,11 +983,14 @@ interface BotIdentity {
  * Runs over node:https (not global fetch) so the Telegram proxy agent —
  * http(s) or socks — applies to the probe exactly as it does to polling.
  */
-function probeGetMe(token: string): Promise<{ status: number; statusText: string; body: unknown }> {
+function probeGetMe(
+  token: string,
+  agent: Agent | undefined = currentProxyAgent(),
+): Promise<{ status: number; statusText: string; body: unknown }> {
   const { promise, resolve, reject } = Promise.withResolvers<{ status: number; statusText: string; body: unknown }>();
   const req = httpsRequest(
     `https://api.telegram.org/bot${token}/getMe`,
-    { agent: currentProxyAgent(), timeout: 15_000 },
+    { agent, timeout: 15_000 },
     (res) => {
       let raw = "";
       res.setEncoding("utf-8");
@@ -1047,6 +1108,7 @@ export function registerRemoteHandlers(ipc: IpcMain): void {
   ipc.handle("remote:setGlobalEnabled", async (_e, enabled: boolean) => m.setGlobalEnabled(enabled));
   ipc.handle("remote:setDigestInterval", async (_e, ms: number) => m.setDigestInterval(ms));
   ipc.handle("remote:setProxyUrl", async (_e, url: string) => m.setProxyUrl(url));
+  ipc.handle("remote:testProxy", async (_e, url: string) => m.testProxy(url));
   ipc.handle("remote:startPairing", async (_e, botId: string) => m.startPairing(botId));
   ipc.handle("remote:cancelPairing", async () => m.cancelPairing());
   ipc.handle("remote:revokeUser", async (_e, botId: string, telegramId: number) =>

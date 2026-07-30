@@ -7,8 +7,8 @@ import * as monaco from "monaco-editor";
 import { el, clear, svgIcon } from "../core/dom";
 import { I } from "../core/icons";
 import { on, emit } from "../core/bus";
-import { state, baseName, languageForPath, imageMime, normPath, noteRecentFile } from "../core/state";
-import { toast, confirmDialog } from "../core/ui";
+import { state, baseName, relPath, languageForPath, imageMime, normPath, noteRecentFile } from "../core/state";
+import { toast, confirmDialog, contextMenu } from "../core/ui";
 import { setMentionDragData } from "./mentions";
 
 // ---------------------------------------------------------------- monaco env
@@ -104,6 +104,7 @@ interface EditorGroup {
   tabs: EditorTab[];
   active: string | null;
   tabsEl: HTMLElement;
+  crumbsEl: HTMLElement;
   hostEl: HTMLElement;
   rootEl: HTMLElement;
 }
@@ -245,8 +246,10 @@ function mountActive(g: EditorGroup) {
 
   if (!tab) {
     renderEmpty(g.hostEl);
+    renderCrumbs(g, null);
     return;
   }
+  renderCrumbs(g, tab);
 
   const mount = el("div", { class: "monaco-mount" });
   g.hostEl.append(mount);
@@ -306,6 +309,7 @@ function mountActive(g: EditorGroup) {
       column: e.position.column,
       language: tab.model!.getLanguageId(),
     });
+    scheduleSymbolTrail(g, tab);
   });
   editor.onDidFocusEditorText(() => {
     focusedGroup = g.id;
@@ -320,6 +324,141 @@ function mountActive(g: EditorGroup) {
     language: tab.model!.getLanguageId(),
   });
   void refreshGitGutter(tab);
+}
+
+// ---------------------------------------------------------------- breadcrumbs
+// Path segments for every file/diff tab; TS/JS additionally get a symbol trail
+// from the bundled TypeScript worker's navigation tree. Other languages keep
+// path-only crumbs — no provider, no fake symbols.
+
+interface NavItem {
+  text: string;
+  kind: string;
+  spans?: Array<{ start: number; length: number }>;
+  nameSpan?: { start: number; length: number };
+  childItems?: NavItem[];
+}
+
+/** the subset of monaco's TS worker we rely on; its d.ts omits navtree */
+interface NavTreeWorker {
+  getNavigationTree(fileName: string): Promise<NavItem | null>;
+}
+
+/**
+ * monaco 0.56 re-exports the TS language runtime at the module top level
+ * (`export { …register.js as typescript }` in editor.main.js); the old
+ * `languages.typescript` is a `{deprecated: true}` stub and the navtree
+ * method is missing from the d.ts. No runtime check is possible against a
+ * worker proxy — assert the two members we call, at one named boundary.
+ */
+interface TsRuntimeNamespace {
+  getTypeScriptWorker(): Promise<(uri: monaco.Uri) => Promise<NavTreeWorker>>;
+  /** JS models activate only the JavaScript mode — its worker is separate */
+  getJavaScriptWorker(): Promise<(uri: monaco.Uri) => Promise<NavTreeWorker>>;
+}
+
+const tsRuntimeNs: TsRuntimeNamespace | undefined =
+  (monaco as unknown as { typescript?: TsRuntimeNamespace }).typescript;
+
+let crumbTimer: number | undefined;
+
+function renderCrumbs(g: EditorGroup, tab: EditorTab | null) {
+  const c = g.crumbsEl;
+  clear(c);
+  if (!tab || tab.kind === "image") {
+    c.style.display = "none";
+    return;
+  }
+  c.style.display = "";
+  const parts = relPath(tab.path).split(/[\\/]/).filter(Boolean);
+  parts.forEach((p, i) => {
+    if (i) c.append(el("span", { class: "crumb-sep", text: "›" }));
+    c.append(
+      el("button", {
+        class: i === parts.length - 1 ? "crumb crumb-file" : "crumb",
+        text: p,
+        title: "Reveal in Explorer",
+        onClick: () => emit("reveal-in-tree", tab.path),
+      }),
+    );
+  });
+  c.append(el("span", { class: "crumb-symbols", dataset: { key: tab.key } }));
+  scheduleSymbolTrail(g, tab);
+}
+
+function scheduleSymbolTrail(g: EditorGroup, tab: EditorTab) {
+  clearTimeout(crumbTimer);
+  crumbTimer = window.setTimeout(() => void updateSymbolTrail(g, tab), 150);
+}
+
+async function updateSymbolTrail(g: EditorGroup, tab: EditorTab) {
+  const holder = g.crumbsEl.querySelector<HTMLElement>(".crumb-symbols");
+  if (!holder || holder.dataset.key !== tab.key) return;
+  if (tab.kind !== "file" || !tab.model || !editor || currentMount?.key !== tab.key) return;
+  const lang = tab.model.getLanguageId();
+  if (lang !== "typescript" && lang !== "javascript") return;
+  let tree: NavItem | null = null;
+  try {
+    if (!tsRuntimeNs) return; // non-TS build shape — path-only crumbs
+    // Each language activates its own mode+worker; asking the TS worker about
+    // a JS model rejects with "TypeScript not registered!". The accessor's
+    // promise never SETTLES until the mode is set up (first-open race), so
+    // race it against a timeout instead of hanging the trail forever.
+    const accessor = lang === "typescript"
+      ? tsRuntimeNs.getTypeScriptWorker()
+      : tsRuntimeNs.getJavaScriptWorker();
+    const timeout = new Promise<never>((_, rej) => setTimeout(() => rej(new Error("worker timeout")), 3000));
+    const getWorker = await Promise.race([accessor, timeout]);
+    const client = await Promise.race([getWorker(tab.model.uri), timeout]);
+    tree = await Promise.race([client.getNavigationTree(tab.model.uri.toString()), timeout]);
+  } catch (err) {
+    // worker/mode not up yet — path-only crumbs now, retry on next cursor move
+    console.debug(`[crumbs] navtree unavailable: ${err instanceof Error ? err.message : String(err)}`);
+    return;
+  }
+  // async gap: the tab may have been switched away while the worker ran
+  if (!tree || holder.dataset.key !== tab.key || currentMount?.key !== tab.key || !editor) return;
+  const pos = editor.getPosition();
+  if (!pos) return;
+  const offset = tab.model.getOffsetAt(pos);
+  const chain: NavItem[] = [];
+  let level = tree.childItems ?? [];
+  while (level.length) {
+    const hit = level.find((it) => (it.spans ?? []).some((s) => offset >= s.start && offset <= s.start + s.length));
+    if (!hit) break;
+    chain.push(hit);
+    level = hit.childItems ?? [];
+  }
+  clear(holder);
+  chain.forEach((item, i) => {
+    holder.append(el("span", { class: "crumb-sep", text: "›" }));
+    const siblings = i === 0 ? tree!.childItems ?? [] : chain[i - 1].childItems ?? [];
+    holder.append(
+      el("button", {
+        class: "crumb crumb-symbol",
+        text: item.text,
+        title: "Siblings…",
+        onClick: (e) => {
+          const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+          contextMenu(
+            r.left,
+            r.bottom + 4,
+            siblings.map((s) => ({ label: s.text, action: () => jumpToNavItem(tab, s) })),
+          );
+        },
+      }),
+    );
+  });
+}
+
+function jumpToNavItem(tab: EditorTab, item: NavItem) {
+  if (!editor || !tab.model || currentMount?.key !== tab.key) return;
+  const span = item.nameSpan ?? item.spans?.[0];
+  if (!span) return;
+  const p = tab.model.getPositionAt(span.start);
+  editor.setPosition(p);
+  editor.revealPositionInCenter(p);
+  editor.focus();
 }
 
 function activateTab(g: EditorGroup, key: string) {
@@ -500,9 +639,10 @@ export async function saveAll() {
 
 function makeGroup(): EditorGroup {
   const tabsEl = el("div", { class: "tabs" });
+  const crumbsEl = el("div", { class: "editor-crumbs", style: { display: "none" } });
   const hostEl = el("div", { class: "editor-host" });
-  const rootEl = el("div", { class: "editor-group" }, tabsEl, hostEl);
-  const g: EditorGroup = { id: groupSeq++, tabs: [], active: null, tabsEl, hostEl, rootEl };
+  const rootEl = el("div", { class: "editor-group" }, tabsEl, crumbsEl, hostEl);
+  const g: EditorGroup = { id: groupSeq++, tabs: [], active: null, tabsEl, crumbsEl, hostEl, rootEl };
 
   // drop target for tab drag between groups
   rootEl.addEventListener("dragover", (e) => {

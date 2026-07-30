@@ -125,6 +125,10 @@ function botCard(bot: RemoteBotInfo): HTMLElement {
   );
   if (bot.detail && (bot.state === "auth-error" || bot.state === "degraded")) {
     card.append(el("div", { class: "bc-detail", text: bot.detail.slice(0, 160) }));
+    // A proxy that died AFTER being committed shows up as generic network
+    // failures; point at the likely culprit instead of leaving the user to guess.
+    if (bot.state === "degraded" && state.proxyUrl)
+      card.append(el("div", { class: "bc-detail", text: "A Telegram proxy is set — if this persists, hit Test in the proxy row or clear it." }));
   }
 
   if (bot.paired.length) {
@@ -455,14 +459,17 @@ function renderControlCenter(): void {
       "div",
       { class: "cc-global" },
       switchEl(state.globalEnabled, (next) => void window.ide.remote.setGlobalEnabled(next), "Master remote toggle"),
-      el("div", { style: { flex: "1" } },
+      el("div", { style: { flex: "1 1 130px" } },
         el("div", { style: { fontWeight: "700", fontSize: "12.5px" }, text: "Remote control" }),
         el("div", { class: "cc-note", text: "Works only while OMP IDE is running on this machine." }),
       ),
-      el("span", { class: "cc-note", text: "digest" }),
-      digestInput,
-      el("span", { class: "cc-note", text: "s" }),
-      ...cooldownControl(),
+      // digest+cooldown wrap below the title as ONE unit at narrow widths
+      el("span", { class: "cc-dials" },
+        el("span", { class: "cc-note", text: "digest" }),
+        digestInput,
+        el("span", { class: "cc-note", text: "s" }),
+        ...cooldownControl(),
+      ),
     ),
   );
 
@@ -474,6 +481,7 @@ function renderControlCenter(): void {
     title: "Proxy for all Telegram traffic: http(s):// or socks(4/5)://, with optional user:pass@. Applies immediately — bots restart on save.",
   }) as HTMLInputElement;
   const proxyApply = el("button", { class: "btn", text: "Apply" }) as HTMLButtonElement;
+  const proxyTest = el("button", { class: "btn", text: "Test", title: "Probe api.telegram.org through this proxy without applying it" }) as HTMLButtonElement;
   const applyProxy = () => {
     const url = proxyInput.value.trim();
     if (url === state.proxyUrl) return;
@@ -484,7 +492,15 @@ function renderControlCenter(): void {
       else toast(res.error ?? "Invalid proxy URL", { crit: true });
     });
   };
+  const testProxy = () => {
+    proxyTest.disabled = true;
+    void window.ide.remote.testProxy(proxyInput.value).then((res) => {
+      proxyTest.disabled = false;
+      toast(res.detail, { crit: !res.ok });
+    });
+  };
   proxyApply.addEventListener("click", applyProxy);
+  proxyTest.addEventListener("click", testProxy);
   proxyInput.addEventListener("keydown", (e) => {
     if (e.key === "Enter") applyProxy();
   });
@@ -495,6 +511,7 @@ function renderControlCenter(): void {
       el("span", { class: "cc-note", text: "proxy" }),
       proxyInput,
       proxyApply,
+      proxyTest,
     ),
   );
 

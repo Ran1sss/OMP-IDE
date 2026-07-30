@@ -5,7 +5,7 @@
 
 import { el, clear, svgIcon } from "../core/dom";
 import { I } from "../core/icons";
-import { emit } from "../core/bus";
+import { on, emit } from "../core/bus";
 import { state, baseName, relPath, dirName } from "../core/state";
 import { toast, confirmDialog } from "../core/ui";
 import type { SearchMatch, ReplaceEdit } from "../../shared/types";
@@ -21,6 +21,9 @@ let excludeInput: HTMLInputElement;
 let regexOn = false;
 let caseOn = false;
 let currentSearch = 0;
+/** completed search with a real query — distinguishes "no query" from "0 hits" */
+let searchDone = false;
+let staleBar: HTMLElement | null = null;
 let matchesByFile = new Map<string, SearchMatch[]>();
 let totalMatches = 0;
 /** match key -> excluded from replace */
@@ -57,6 +60,21 @@ function renderEmptyHint() {
         el("span", { class: "keycap", text: "Aa" }),
         el("span", { text: "case" }),
       ),
+    ),
+  );
+}
+
+/** Designed zero-hit state — never the onboarding hint (that means "no query"). */
+function renderNoMatches() {
+  clear(resultsEl);
+  const filters = [includeInput.value.trim() && "include", excludeInput.value.trim() && "exclude", caseOn && "case", regexOn && "regex"].filter(Boolean).join(" · ");
+  resultsEl.append(
+    el(
+      "div",
+      { class: "search-empty" },
+      svgIcon(I.search),
+      el("div", {}, "No matches for ", el("span", { class: "mono", text: `"${queryInput.value}"` })),
+      filters ? el("div", { class: "hint-row", text: `active filters: ${filters}` }) : null,
     ),
   );
 }
@@ -98,6 +116,7 @@ function highlightSegments(m: SearchMatch, replacement: string | null): HTMLElem
 }
 
 function renderResults() {
+  staleBar = null; // clear() drops the node; a new fs event may re-add it
   clear(resultsEl);
   const replacing = replaceInput.value.length > 0;
   for (const [file, matches] of matchesByFile) {
@@ -140,7 +159,10 @@ function renderResults() {
     }
     resultsEl.append(group);
   }
-  if (matchesByFile.size === 0) renderEmptyHint();
+  if (matchesByFile.size === 0) {
+    if (searchDone && queryInput.value.trim()) renderNoMatches();
+    else renderEmptyHint();
+  }
 }
 
 // ---------------------------------------------------------------- search driver
@@ -154,6 +176,8 @@ async function startSearch() {
   matchesByFile = new Map();
   totalMatches = 0;
   excluded.clear();
+  searchDone = false;
+  staleBar = null;
   if (!pattern.trim() || !state.root) {
     renderEmptyHint();
     return;
@@ -281,8 +305,22 @@ export function initSearchPanel(container: HTMLElement) {
   });
   window.ide.search.onDone((d) => {
     if (d.id !== `s${currentSearch}`) return;
+    searchDone = true;
     renderResults();
     renderSummary(true, d.hitLimit, d.error);
+  });
+
+  // Results silently rot when the workspace changes underneath them (agent
+  // edits, terminal git ops). Mark them stale instead of pretending.
+  on("fs-changed", () => {
+    if (!searchDone || !queryInput.value.trim() || staleBar) return;
+    staleBar = el(
+      "div",
+      { class: "search-stale" },
+      el("span", { text: "Files changed since this search" }),
+      el("button", { class: "btn", text: "Re-run", onClick: () => void startSearch() }),
+    );
+    resultsEl.prepend(staleBar);
   });
 }
 

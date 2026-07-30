@@ -20,8 +20,8 @@ const SKIP_DIRS: Record<string, true> = {
   __pycache__: true, ".idea": true, ".vs": true,
 };
 
-/** One watcher per window (webContents). */
-const watchers = new Map<number, FSWatcher>();
+/** Watchers per window (webContents): workspace tree + git metadata. */
+const watchers = new Map<number, FSWatcher[]>();
 /** Debounce buffers per window. */
 const pending = new Map<number, FsChange[]>();
 const timers = new Map<number, NodeJS.Timeout>();
@@ -118,7 +118,7 @@ export function registerFsHandlers(ipc: IpcMain) {
   ipc.handle("fs:watch", async (e, root: string) => {
     const wc = e.sender;
     const prev = watchers.get(wc.id);
-    if (prev) await prev.close();
+    if (prev) await Promise.all(prev.map((w) => w.close()));
     const watcher = chokidar.watch(root, {
       ignored: (path, stats) => {
         const parts = path.split(/[\\/]/);
@@ -131,18 +131,36 @@ export function registerFsHandlers(ipc: IpcMain) {
     watcher.on("all", (event, path) => {
       queueChange(wc, { type: event as FsChange["type"], path });
     });
-    watchers.set(wc.id, watcher);
+    // The tree watcher must ignore .git noise, but the SCM panel needs to know
+    // when the index/HEAD/refs change OUTSIDE the UI (terminal commit, reset,
+    // branch switch) — the renderer re-runs git status on any change batch.
+    // Bounded on purpose: refs/heads + refs/remotes at depth 1 plus packed-refs
+    // (repos with thousands of refs keep them packed; a recursive refs/ watch
+    // would track every loose-ref subtree for no additional signal).
+    const gitDir = join(root, ".git");
+    const gitWatcher = chokidar.watch(
+      [
+        join(gitDir, "index"),
+        join(gitDir, "HEAD"),
+        join(gitDir, "packed-refs"),
+        join(gitDir, "refs", "heads"),
+        join(gitDir, "refs", "remotes"),
+      ],
+      { ignoreInitial: true, awaitWriteFinish: { stabilityThreshold: 120, pollInterval: 40 }, depth: 1 },
+    );
+    gitWatcher.on("all", (_event, path) => queueChange(wc, { type: "change", path }));
+    watchers.set(wc.id, [watcher, gitWatcher]);
     wc.once("destroyed", () => {
-      const w = watchers.get(wc.id);
+      const ws = watchers.get(wc.id);
       watchers.delete(wc.id);
-      w?.close();
+      for (const w of ws ?? []) void w.close();
     });
   });
 
   ipc.handle("fs:unwatch", async (e) => {
-    const w = watchers.get(e.sender.id);
+    const ws = watchers.get(e.sender.id);
     watchers.delete(e.sender.id);
-    await w?.close();
+    if (ws) await Promise.all(ws.map((w) => w.close()));
   });
 
   ipc.handle("fs:listAllFiles", async (_e, root: string): Promise<string[]> => {
@@ -171,6 +189,6 @@ export function registerFsHandlers(ipc: IpcMain) {
 }
 
 export function disposeWatchers() {
-  for (const w of watchers.values()) w.close();
+  for (const ws of watchers.values()) for (const w of ws) void w.close();
   watchers.clear();
 }

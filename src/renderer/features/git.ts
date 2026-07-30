@@ -7,12 +7,14 @@ import { el, clear, svgIcon } from "../core/dom";
 import { I } from "../core/icons";
 import { on, emit } from "../core/bus";
 import { state, baseName, dirName, joinPath, normPath, languageForPath } from "../core/state";
-import { toast, confirmDialog, selectDialog } from "../core/ui";
+import { toast, confirmDialog, selectDialog, formDialog } from "../core/ui";
 import { updateGitIndex } from "./explorer";
 import type { GitStatus, GitFileStatus, GitCommitInfo } from "../../shared/types";
 
 let panelEl: HTMLElement;
 let commitMsg: HTMLTextAreaElement;
+/** Survives panel re-renders (stage/unstage/watcher refresh recreate the textarea). */
+let pendingMsg = "";
 let status: GitStatus = { isRepo: false, branch: "", ahead: 0, behind: 0, files: [] };
 let branchListeners: ((branch: string) => void)[] = [];
 
@@ -81,22 +83,61 @@ async function doCommit() {
   if (!state.root) return;
   const msg = commitMsg.value.trim();
   if (!msg) {
-    toast("Commit message is empty", { crit: true });
+    toast("Commit message is empty");
     commitMsg.focus();
     return;
   }
   const stagedCount = status.files.filter((f) => f.index !== " " && f.index !== "?").length;
   if (stagedCount === 0) {
-    toast("No staged changes", { crit: true });
-    return;
+    const unstaged = status.files.filter((f) => f.worktree !== " ");
+    if (unstaged.length === 0) {
+      toast("No changes to commit");
+      return;
+    }
+    const ok = await confirmDialog({
+      title: "Nothing staged",
+      message: `Stage all ${unstaged.length} ${unstaged.length === 1 ? "change" : "changes"} and commit?`,
+      confirmLabel: "Stage All & Commit",
+      focusConfirm: true,
+    });
+    if (!ok) return;
+    await window.ide.git.stage(state.root, unstaged.map((f) => f.path));
   }
   try {
     await window.ide.git.commit(state.root, msg);
     commitMsg.value = "";
+    pendingMsg = "";
     emit("git-refresh", undefined);
     toast("Committed");
   } catch (err) {
-    toast(`Commit failed: ${err instanceof Error ? err.message : err}`, { crit: true });
+    const text = err instanceof Error ? err.message : String(err);
+    // Fresh machine / fresh repo: git refuses without user.name+email. Walk the
+    // user through a repo-local identity instead of dumping 8 lines of stderr.
+    if (/unable to auto-detect email|Please tell me who you are/i.test(text)) {
+      const identity = await formDialog({
+        title: "Git needs your identity",
+        message: "This repository has no user.name/user.email. Set them for THIS repo to commit.",
+        fields: [
+          { key: "name", label: "Name", placeholder: "Your Name" },
+          { key: "email", label: "Email", placeholder: "you@example.com" },
+        ],
+        confirmLabel: "Save & Commit",
+      });
+      if (!identity) return;
+      const { name, email } = identity;
+      try {
+        await window.ide.git.setIdentity(state.root, name, email);
+        await window.ide.git.commit(state.root, msg);
+        commitMsg.value = "";
+        pendingMsg = "";
+        emit("git-refresh", undefined);
+        toast("Committed");
+      } catch (err2) {
+        toast(`Commit failed: ${err2 instanceof Error ? err2.message : err2}`, { crit: true });
+      }
+      return;
+    }
+    toast(`Commit failed: ${text}`, { crit: true });
   }
 }
 
@@ -202,6 +243,9 @@ function renderPanel() {
   commitMsg = el("textarea", {
     class: "input",
     placeholder: `Message (commit on ${status.branch})`,
+    onInput: () => {
+      pendingMsg = commitMsg.value;
+    },
     onKeyDown: (e) => {
       if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
         e.preventDefault();
@@ -209,7 +253,7 @@ function renderPanel() {
       }
     },
   }) as HTMLTextAreaElement;
-  commitMsg.rows = 2;
+  commitMsg.value = pendingMsg;
 
   panelEl.append(
     el(
@@ -279,9 +323,16 @@ function renderPanel() {
   void renderLog();
 }
 
+let logToken = 0;
+
 async function renderLog() {
   if (!state.root || !status.isRepo) return;
+  const token = ++logToken;
   const commits: GitCommitInfo[] = await window.ide.git.log(state.root, 12);
+  // A concurrent refresh may have re-rendered the panel while we awaited; only
+  // the newest call may attach, and never twice (duplicate-section race).
+  if (token !== logToken) return;
+  panelEl.querySelector(".git-log")?.remove();
   if (!commits.length) return;
   const logEl = el("div", { class: "git-log" });
   logEl.append(el("div", { class: "gs-head", style: { marginBottom: "2px" } }, el("span", { text: "Recent Commits" })));

@@ -91,6 +91,13 @@ export function registerGitHandlers(ipc: IpcMain) {
     return out.trim();
   });
 
+  // Repo-local identity for the commit-rescue flow (first commit on a fresh
+  // machine). Never touches --global config.
+  ipc.handle("git:setIdentity", async (_e, root: string, name: string, email: string) => {
+    await git(root, ["config", "user.name", name]);
+    await git(root, ["config", "user.email", email]);
+  });
+
   ipc.handle("git:branches", async (_e, root: string): Promise<string[]> => {
     const out = await git(root, ["branch", "--format=%(refname:short)"]);
     return out.split("\n").map((s) => s.trim()).filter(Boolean);

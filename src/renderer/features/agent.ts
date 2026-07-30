@@ -11,6 +11,8 @@ import { state, relPath, baseName, normPath, joinPath, languageForPath } from ".
 import { toast, confirmDialog, inputDialog, selectDialog } from "../core/ui";
 import type { OmpEvent, OmpStatus, OmpTodoPhase, OmpFileEdit, OmpUiRequest, RemoteVia } from "../../shared/types";
 import { switchModelViaPicker, mountUsageStrip, mountModelWarning, openModelsDialog, setSessionThinkingViaPicker, createBoostToggle } from "./models";
+import { openSessionHistory } from "./history";
+import { createTeamToggle, teamConsumesPrompt, initTeamSurface, stripTeamMarkers } from "./team";
 import {
   initMentionInput,
   serializePrompt,
@@ -36,6 +38,56 @@ let headModel: HTMLElement;
 let stopBtn: HTMLButtonElement;
 let status: OmpStatus = { state: "starting" };
 
+// -------- silent-model feedback: elapsed ticker + stall nudge ---------------
+// Providers that stream nothing (dead endpoint, overloaded proxy) leave only a
+// breathing orb; the user can't tell slow from dead. Wall-clock elapsed rides
+// on the header label, and after the configured stall threshold (Settings →
+// "Agent stall warning", 0 = off) with zero stream events a designed card
+// offers the two real remedies: interrupt or switch model.
+let turnStartedAt = 0;
+let gotTurnData = false;
+let headLabel = "";
+let elapsedTimer: number | undefined;
+let stallCard: HTMLElement | null = null;
+
+function noteTurnData() {
+  gotTurnData = true;
+  if (stallCard) {
+    stallCard.remove();
+    stallCard = null;
+  }
+}
+
+function elapsedTick() {
+  const busy = status.state === "thinking" || status.state === "tool";
+  if (!busy) return;
+  const secs = Math.floor((Date.now() - turnStartedAt) / 1000);
+  if (secs >= 3) headModel.textContent = `${headLabel} · ${secs}s`;
+  const stallMs = state.settings.stallSeconds * 1000;
+  if (!gotTurnData && stallMs > 0 && secs * 1000 >= stallMs) {
+    if (!stallCard) {
+      const counter = el("span", { class: "mono", text: `${secs}s` });
+      stallCard = el(
+        "div",
+        { class: "stall-card" },
+        el("div", { class: "sc-title" }, "Still waiting for the first token — ", counter),
+        el("p", { text: "The model hasn't sent anything since this turn started. It may be slow — or unresponsive." }),
+        el(
+          "div",
+          { class: "sc-actions" },
+          el("button", { class: "btn", text: "Interrupt", onClick: () => void interruptAgent() }),
+          el("button", { class: "btn", text: "Switch model…", onClick: () => switchModelViaPicker("stall-nudge") }),
+        ),
+      );
+      chatEl.append(stallCard);
+      stallCard.scrollIntoView({ block: "nearest" });
+    } else {
+      const counter = stallCard.querySelector(".sc-title .mono");
+      if (counter) counter.textContent = `${secs}s`;
+    }
+  }
+}
+
 /** streaming text accumulation per messageId */
 const streamBuffers = new Map<number, { el: HTMLElement; text: string }>();
 /** tool cards by toolCallId */
@@ -50,15 +102,33 @@ const EXAMPLE_PROMPTS = [
 // ---------------------------------------------------------------- status
 
 function applyStatus(s: OmpStatus) {
+  const wasBusy = status.state === "thinking" || status.state === "tool";
   status = s;
   emit("agent-status", s);
   headOrb.className = `orb ${s.state}`;
-  headModel.textContent =
+  headLabel =
     s.state === "unavailable" ? "unavailable" :
     s.state === "dead" ? "process exited" :
     s.state === "tool" && s.tool ? `running ${s.tool}` :
     s.model ?? "";
+  headModel.textContent = headLabel;
   stopBtn.disabled = !(s.state === "thinking" || s.state === "tool");
+
+  const busy = s.state === "thinking" || s.state === "tool";
+  if (busy && !wasBusy) {
+    // turn boundary: reset the silent-model clock
+    turnStartedAt = Date.now();
+    gotTurnData = false;
+    clearInterval(elapsedTimer);
+    elapsedTimer = window.setInterval(elapsedTick, 1000);
+  } else if (!busy) {
+    clearInterval(elapsedTimer);
+    elapsedTimer = undefined;
+    if (stallCard) {
+      stallCard.remove();
+      stallCard = null;
+    }
+  }
 
   if (s.state === "unavailable") renderUnavailable(s.detail);
   else if (s.state === "dead") renderDead(s.detail);
@@ -252,7 +322,8 @@ function chipReasoningPulse(live: boolean): void {
 }
 
 function renderMarkdownInto(target: HTMLElement, text: string) {
-  target.innerHTML = marked.parse(text, { async: false });
+  // team runs: protocol marker lines feed the board, not the transcript
+  target.innerHTML = marked.parse(stripTeamMarkers(text), { async: false });
   for (const a of target.querySelectorAll("a")) {
     a.addEventListener("click", (e) => {
       e.preventDefault();
@@ -413,10 +484,12 @@ function handleEvent(e: OmpEvent) {
     case "agent-start":
       break;
     case "text-start":
+      noteTurnData();
       closeThinkBlock(); // reasoning phase ends when the answer starts
       ensureStream(e.messageId);
       break;
     case "text-delta": {
+      noteTurnData();
       const buf = ensureStream(e.messageId);
       buf.text += e.delta;
       renderMarkdownInto(buf.el, buf.text);
@@ -437,6 +510,7 @@ function handleEvent(e: OmpEvent) {
       break;
     }
     case "thinking-delta": {
+      noteTurnData();
       const t = ensureThinkBlock();
       t.chars += e.delta.length;
       t.body.textContent += e.delta;
@@ -446,17 +520,25 @@ function handleEvent(e: OmpEvent) {
       break;
     }
     case "tool-start":
+      noteTurnData();
       addToolCard(e.toolCallId, e.toolName, e.args, e.intent);
       break;
     case "tool-end":
       finishToolCard(e.toolCallId, e.isError, e.resultText, e.fileEdit);
       break;
     case "todos":
+      noteTurnData();
       renderTodos(e.phases);
       break;
     case "agent-end":
       closeThinkBlock();
       for (const buf of streamBuffers.values()) buf.el.classList.remove("streaming");
+      // Marks BOTH interrupt origins (IDE button/stall card AND remote /stop):
+      // without a trace an aborted turn later reads as "the model never answered".
+      if (e.aborted) {
+        chatEl.append(el("div", { class: "turn-marker", text: "· turn interrupted ·" }));
+        if (nearBottom()) scrollBottom();
+      }
       break;
   }
 }
@@ -501,6 +583,8 @@ function sendPrompt() {
   const message = serializePrompt(text);
   promptInput.value = "";
   clearMentions();
+  // Team mode intercepts: goal start or mid-run steering (never a plain prompt)
+  if (teamConsumesPrompt(message)) return;
   // Chips are rendered locally with the snapshot; suppress the plain echo by
   // rendering here and letting the main-process user-message event carry text.
   pendingLocalMentions = mentions.length ? mentions : null;
@@ -514,6 +598,7 @@ async function interruptAgent() {
   if (status.state === "thinking" || status.state === "tool") {
     await window.ide.omp.abort();
     toast("Interrupt sent");
+    // transcript marker arrives with the agent-end {aborted} event
   }
 }
 
@@ -566,6 +651,12 @@ export function initAgentPanel(container: HTMLElement) {
     onClick: () => void window.ide.omp.restart(),
   });
   restartBtn.append(svgIcon(I.restart2));
+  const historyBtn = el("button", {
+    class: "icon-btn",
+    title: "Session history (read-only)",
+    onClick: () => openSessionHistory(),
+  });
+  historyBtn.append(svgIcon(I.history));
   // Compact model selector: omp supports live per-session set_model (applies
   // next turn), so this button IS the per-session override surface.
   const modelBtn = el("button", {
@@ -588,7 +679,7 @@ export function initAgentPanel(container: HTMLElement) {
     headOrb,
     el("span", { class: "agent-title", text: "OMP AGENT" }),
     headModel,
-    el("span", { class: "agent-actions" }, modelBtn, thinkBtn, stopBtn, newBtn, restartBtn),
+    el("span", { class: "agent-actions" }, modelBtn, thinkBtn, stopBtn, historyBtn, newBtn, restartBtn),
   );
 
   chatEl = el("div", { class: "agent-chat" });
@@ -624,6 +715,7 @@ export function initAgentPanel(container: HTMLElement) {
       "div",
       { class: "composer-row" },
       el("span", { style: { flex: "1" } }),
+      createTeamToggle(),
       createBoostToggle(),
       sendBtn,
     ),
@@ -637,6 +729,7 @@ export function initAgentPanel(container: HTMLElement) {
   panelEl.append(head, chatEl, todoEl, composerEl);
   mountUsageStrip(panelEl);
   mountModelWarning(panelEl);
+  initTeamSurface({ panel: panelEl, input: promptInput });
   renderWelcomeState();
 
   window.ide.omp.onStatus((s) => applyStatus(s));

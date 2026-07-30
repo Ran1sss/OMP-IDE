@@ -1,13 +1,15 @@
 import { app, BrowserWindow, ipcMain, dialog, shell, Menu } from "electron";
-import { join, dirname } from "node:path";
+import { join, dirname, resolve } from "node:path";
 import { existsSync, statSync } from "node:fs";
 import { registerFsHandlers, disposeWatchers } from "./fs-service";
 import { registerPtyHandlers, disposePtys } from "./pty-service";
 import { registerSearchHandlers } from "./search-service";
 import { registerGitHandlers } from "./git-service";
 import { registerOmpHandlers, disposeOmp } from "./omp-service";
+import { registerSessionHistoryHandlers } from "./session-history";
 import { registerStoreHandlers } from "./store-service";
 import { registerRemoteHandlers, disposeRemote } from "./remote/manager";
+import { registerTeamHandlers, disposeTeam } from "./omp-team/team-service";
 import { registerModelsHandlers, disposeModels } from "./models/manager";
 import { hydrateEnvFromRegistry } from "./env-hydrate";
 
@@ -64,8 +66,10 @@ app.whenReady().then(() => {
   registerSearchHandlers(ipcMain);
   registerGitHandlers(ipcMain);
   registerOmpHandlers(ipcMain);
+  registerSessionHistoryHandlers(ipcMain);
   registerStoreHandlers(ipcMain);
   registerRemoteHandlers(ipcMain);
+  registerTeamHandlers(ipcMain);
   registerModelsHandlers(ipcMain);
 
   ipcMain.handle("dialog:openFolder", async (e) => {
@@ -90,9 +94,14 @@ app.whenReady().then(() => {
   ipcMain.on("win:openWorkspaceWindow", (_e, path: string) => createWindow(path));
 
   // CLI: `OMP IDE.exe <folder>` opens that folder as the workspace.
+  // Args resolve to absolute paths; the app's own path (electron dev launch
+  // passes it first) is never mistaken for a workspace.
+  const appPath = resolve(app.getAppPath());
   const dirArg = process.argv
     .slice(1)
-    .find((a) => !a.startsWith("-") && existsSync(a) && statSync(a).isDirectory());
+    .filter((a) => !a.startsWith("-"))
+    .map((a) => resolve(a))
+    .find((a) => a !== appPath && existsSync(a) && statSync(a).isDirectory());
   createWindow(dirArg);
 });
 
@@ -104,6 +113,7 @@ app.on("window-all-closed", () => {
   disposePtys();
   // Flush the "IDE closed, task interrupted" broadcast before the agent dies.
   void disposeRemote().finally(() => {
+    disposeTeam();
     disposeModels();
     disposeOmp();
     app.quit();

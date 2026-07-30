@@ -162,7 +162,7 @@ export interface OmpTodoPhase {
 /** Renderer-facing normalized agent events. */
 export type OmpEvent =
   | { kind: "agent-start" }
-  | { kind: "agent-end" }
+  | { kind: "agent-end"; aborted?: boolean }
   | { kind: "text-start"; messageId: number }
   | { kind: "text-delta"; messageId: number; delta: string }
   | { kind: "text-end"; messageId: number; text: string }
@@ -209,7 +209,27 @@ export interface Settings {
   fontSize: number;
   terminalShell: string;
   ompPath: string;
+  /** silent-model stall warning, seconds until the nudge card; 0 = disabled, min 5 */
+  stallSeconds: number;
 }
+
+/** one past conversation on disk (read-only history browser) */
+export interface OmpSessionMeta {
+  file: string;
+  startedAt: number;
+  /** omp's own title line; often empty */
+  title: string;
+  firstPrompt: string;
+  model: string;
+  sizeKb: number;
+}
+
+export type OmpSessionEntry =
+  | { kind: "user"; text: string; at: number }
+  | { kind: "assistant"; text: string; at: number }
+  | { kind: "tool"; name: string; at: number }
+  | { kind: "model"; model: string; at: number }
+  | { kind: "notice"; text: string; at: number };
 
 export interface LayoutState {
   sideWidth: number;
@@ -504,6 +524,120 @@ export interface ValidateResult {
   models: ModelEntry[];
 }
 
+// ---------------------------------------------------------------- team mode
+//
+// OMP multi-agent surface (discovered from omp v17.1.3, 2026-07-30):
+//   - `task` tool: batch-spawns background subagents (tasks[], agent types);
+//     results auto-deliver as async notices into the root session.
+//   - `hub` tool: inter-agent messaging (send/wait/jobs/cancel) and parked
+//     wait states — the sleep/wake primitive.
+//   - Stream visibility: subagent lifecycle appears in the root RPC stream
+//     ONLY as task/hub tool_execution frames; there are no dedicated spawn/
+//     state frames. The orchestrating agent therefore narrates team state
+//     through @@TEAM@@ marker lines (single-line JSON) in its text stream;
+//     the main process parses them and drives the board. The IDE never
+//     simulates agents.
+//   - Capability probe result in this environment (2026-07-30): a trivial
+//     scout spawn produced zero model turns ("exited without calling yield
+//     after 3 reminders") — solo fallback is the expected live path here.
+
+export type TeamPhase =
+  | "probe"
+  | "deliberate"
+  | "gate"
+  | "execute"
+  | "verify"
+  | "done"
+  /** user stopped/discarded or new session killed the run */
+  | "stopped"
+  /** agent turn ended mid-run without protocol completion — resumable by the user, never auto */
+  | "stalled";
+
+export type TeamAgentState = "deliberating" | "working" | "sleeping" | "waking" | "done" | "failed";
+
+export interface TeamAgent {
+  name: string;
+  glyph: string;
+  kind: "planner" | "worker";
+  state: TeamAgentState;
+  /** slice id currently worked (workers) */
+  slice?: string;
+  /** slice ids a sleeper waits for */
+  waitingFor?: string[];
+  /** epoch ms of the last state flip — elapsed-on-slice ticker */
+  sinceMs: number;
+  filesTouched: number;
+}
+
+export type TeamSliceState = "pending" | "active" | "done" | "failed" | "replanned";
+
+export interface TeamSlice {
+  id: string;
+  title: string;
+  scope: string;
+  worker: string;
+  deps: string[];
+  contract?: string;
+  state: TeamSliceState;
+  /** one-paragraph hand-off note written by the finisher */
+  handoff?: string;
+  add: number;
+  del: number;
+}
+
+export interface TeamFeedEntry {
+  author: string;
+  glyph?: string;
+  text: string;
+  at: number;
+  kind: "argument" | "note" | "system";
+}
+
+export interface TeamRunState {
+  runId: string;
+  goal: string;
+  phase: TeamPhase;
+  /** capability probe failed → single agent plays the roles sequentially */
+  solo: boolean;
+  round: number;
+  maxRounds: number;
+  agents: TeamAgent[];
+  slices: TeamSlice[];
+  planSummary: string;
+  feed: TeamFeedEntry[];
+  /** two failures on one slice → paused, waiting for the user's call */
+  needsCall: { sliceId: string; error: string } | null;
+  /** "IDE" | "@username via Telegram" once approved */
+  approvedVia: string | null;
+  startedAt: number;
+  /** persisted run found on boot that was live when the app died */
+  didNotSurvive?: boolean;
+  report: string | null;
+}
+
+export interface TeamApi {
+  getState(): Promise<TeamRunState | null>;
+  /** kick off a team run for a goal (probe → deliberate) */
+  start(goal: string): Promise<{ ok: boolean; error?: string }>;
+  /** mid-run message; target = named worker, omitted = planners note / team note */
+  steer(text: string, target?: string): Promise<boolean>;
+  approve(): Promise<{ ok: boolean; error?: string }>;
+  discard(): Promise<void>;
+  stop(): Promise<void>;
+  // ---- plan gate editing (graph re-validated in main; cycles rejected)
+  editSlice(id: string, patch: { title?: string; scope?: string }): Promise<{ ok: boolean; error?: string }>;
+  addSlice(input: { title: string; scope: string; deps: string[] }): Promise<{ ok: boolean; error?: string }>;
+  deleteSlice(id: string): Promise<{ ok: boolean; error?: string }>;
+  setDeps(id: string, deps: string[]): Promise<{ ok: boolean; error?: string }>;
+  /** resolve the two-failures pause */
+  needsCall(choice: "retry" | "abort", editedScope?: string): Promise<void>;
+  /** drop a finished/stopped/stalled run from the board */
+  clear(): Promise<void>;
+  /** re-run the same goal from scratch (restart-honesty affordance) */
+  restartRun(): Promise<{ ok: boolean; error?: string }>;
+  onState(cb: (s: TeamRunState | null) => void): () => void;
+}
+
 // ---------------------------------------------------------------- api surface
 
 export interface IdeApi {
@@ -542,6 +676,8 @@ export interface IdeApi {
     stage(root: string, paths: string[]): Promise<void>;
     unstage(root: string, paths: string[]): Promise<void>;
     commit(root: string, message: string): Promise<string>;
+    /** repo-local `git config user.name/email` — the commit identity rescue flow */
+    setIdentity(root: string, name: string, email: string): Promise<void>;
     branches(root: string): Promise<string[]>;
     checkout(root: string, branch: string): Promise<string>;
     discard(root: string, paths: string[]): Promise<void>;
@@ -558,10 +694,14 @@ export interface IdeApi {
     restart(): Promise<void>;
     dispose(): Promise<void>;
     uiResponse(id: string, payload: Record<string, unknown>): Promise<void>;
+    /** read-only browser over on-disk session transcripts */
+    listSessions(root: string): Promise<OmpSessionMeta[]>;
+    readSession(file: string): Promise<OmpSessionEntry[]>;
     onStatus(cb: (s: OmpStatus) => void): () => void;
     onEvent(cb: (e: OmpEvent) => void): () => void;
     onUiRequest(cb: (req: OmpUiRequest) => void): () => void;
   };
+  team: TeamApi;
   dialog: {
     openFolder(): Promise<string | null>;
   };
@@ -580,6 +720,7 @@ export interface IdeApi {
     setSettings(s: Partial<Settings>): Promise<Settings>;
     getRecents(): Promise<RecentWorkspace[]>;
     addRecent(path: string): Promise<void>;
+    removeRecent(path: string): Promise<void>;
     getLayout(workspace: string): Promise<LayoutState | null>;
     setLayout(workspace: string, l: LayoutState): Promise<void>;
   };
@@ -594,6 +735,8 @@ export interface IdeApi {
     setDigestInterval(ms: number): Promise<void>;
     /** telegram proxy ("" = direct); validates AND live-probes the proxy before committing */
     setProxyUrl(url: string): Promise<{ ok: boolean; error?: string; probe?: string }>;
+    /** probe api.telegram.org through a proxy URL ("" = direct) without committing or bouncing bots */
+    testProxy(url: string): Promise<{ ok: boolean; detail: string }>;
     startPairing(botId: string): Promise<RemotePairing>;
     cancelPairing(): Promise<void>;
     revokeUser(botId: string, telegramId: number): Promise<void>;
@@ -684,4 +827,5 @@ export const DEFAULT_SETTINGS: Settings = {
   fontSize: 13,
   terminalShell: "",
   ompPath: "",
+  stallSeconds: 20,
 };

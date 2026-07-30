@@ -27,11 +27,16 @@ export function validateProxyUrl(url: string): string | null {
   return null;
 }
 
+/** agent for an arbitrary proxy URL; undefined = direct/invalid */
+export function agentForUrl(url: string): Agent | undefined {
+  const trimmed = url.trim();
+  if (!trimmed || validateProxyUrl(trimmed) !== null) return undefined;
+  return trimmed.startsWith("socks")
+    ? new SocksProxyAgent(trimmed)
+    : new HttpsProxyAgent(trimmed);
+}
+
 /** agent for the CURRENT stored proxy; undefined = direct */
 export function currentProxyAgent(): Agent | undefined {
-  const url = loadStore().proxyUrl.trim();
-  if (!url || validateProxyUrl(url) !== null) return undefined;
-  return url.startsWith("socks")
-    ? new SocksProxyAgent(url)
-    : new HttpsProxyAgent(url);
+  return agentForUrl(loadStore().proxyUrl);
 }

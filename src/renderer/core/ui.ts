@@ -6,11 +6,28 @@ import { I } from "./icons";
 // ---------------------------------------------------------------- toasts
 
 let toastStack: HTMLElement | null = null;
+/** visible toasts by message — repeats pulse the existing one instead of stacking twins */
+const liveToasts = new Map<string, { node: HTMLElement; timer: number | undefined }>();
 
 export function toast(message: string, opts: { crit?: boolean } = {}): void {
   if (!toastStack) {
     toastStack = el("div", { class: "toast-stack" });
     document.body.append(toastStack);
+  }
+  const existing = liveToasts.get(message);
+  if (existing && existing.node.isConnected) {
+    // same message already on screen: pulse it and restart its clock
+    existing.node.classList.remove("toast-pulse");
+    void existing.node.offsetWidth;
+    existing.node.classList.add("toast-pulse");
+    if (existing.timer !== undefined) {
+      clearTimeout(existing.timer);
+      existing.timer = window.setTimeout(() => {
+        existing.node.remove();
+        liveToasts.delete(message);
+      }, 5000);
+    }
+    return;
   }
   while (toastStack.children.length >= 3) toastStack.firstChild?.remove();
   const node = el(
@@ -21,12 +38,21 @@ export function toast(message: string, opts: { crit?: boolean } = {}): void {
   );
   const closeBtn = el("button", {
     class: "icon-btn toast-close",
-    onClick: () => node.remove(),
+    onClick: () => {
+      node.remove();
+      liveToasts.delete(message);
+    },
   });
   closeBtn.append(svgIcon(I.close));
   node.append(closeBtn);
   toastStack.append(node);
-  if (!opts.crit) setTimeout(() => node.remove(), 5000);
+  const timer = opts.crit
+    ? undefined
+    : window.setTimeout(() => {
+        node.remove();
+        liveToasts.delete(message);
+      }, 5000);
+  liveToasts.set(message, { node, timer });
 }
 
 // ---------------------------------------------------------------- dialogs
@@ -36,6 +62,8 @@ export interface ConfirmOptions {
   message: string;
   confirmLabel?: string;
   danger?: boolean;
+  /** Non-destructive confirms may default focus to the action button (Enter confirms). */
+  focusConfirm?: boolean;
 }
 
 export function confirmDialog(opts: ConfirmOptions): Promise<boolean> {
@@ -68,7 +96,7 @@ export function confirmDialog(opts: ConfirmOptions): Promise<boolean> {
     if (e.key === "Enter" && document.activeElement === confirmBtn) done(true);
   });
   document.body.append(overlay);
-  cancelBtn.focus(); // destructive default: Cancel; synchronous — rAF throttles when occluded
+  (opts.focusConfirm && !opts.danger ? confirmBtn : cancelBtn).focus(); // destructive default: Cancel; synchronous — rAF throttles when occluded
   requestAnimationFrame(() => overlay.classList.add("visible"));
   return promise;
 }
@@ -122,6 +150,86 @@ export function inputDialog(opts: InputDialogOptions): Promise<string | null> {
   document.body.append(overlay);
   input.focus();
   input.select();
+  requestAnimationFrame(() => overlay.classList.add("visible"));
+  return promise;
+}
+
+export interface FormDialogField {
+  key: string;
+  label: string;
+  placeholder?: string;
+  value?: string;
+}
+
+export interface FormDialogOptions {
+  title: string;
+  message?: string;
+  fields: FormDialogField[];
+  confirmLabel?: string;
+}
+
+/**
+ * Multi-field input dialog. Tab moves between fields (DOM order), Enter
+ * submits from any field, Escape cancels. Submit requires every field
+ * non-empty — the first empty one gets focus instead.
+ */
+export function formDialog(opts: FormDialogOptions): Promise<Record<string, string> | null> {
+  const { promise, resolve } = Promise.withResolvers<Record<string, string> | null>();
+  const overlay = el("div", { class: "overlay centered" });
+  const done = (v: Record<string, string> | null) => {
+    overlay.classList.remove("visible");
+    setTimeout(() => overlay.remove(), 170);
+    resolve(v);
+  };
+  const inputs = new Map<string, HTMLInputElement>();
+  const submit = () => {
+    const out: Record<string, string> = {};
+    for (const f of opts.fields) {
+      const val = inputs.get(f.key)!.value.trim();
+      if (!val) {
+        inputs.get(f.key)!.focus();
+        return;
+      }
+      out[f.key] = val;
+    }
+    done(out);
+  };
+  const form = el("div", { class: "settings-form" });
+  for (const f of opts.fields) {
+    const input = el("input", {
+      class: "input",
+      placeholder: f.placeholder ?? "",
+      value: f.value ?? "",
+      onKeyDown: (e) => {
+        if (e.key === "Enter") submit();
+        if (e.key === "Escape") done(null);
+      },
+    }) as HTMLInputElement;
+    inputs.set(f.key, input);
+    form.append(el("div", { class: "sf-field" }, el("label", { text: f.label }), input));
+  }
+  const dialog = el(
+    "div",
+    { class: "dialog", style: { minWidth: "400px" } },
+    el("h2", { text: opts.title }),
+    opts.message ? el("p", { text: opts.message }) : null,
+    form,
+    el(
+      "div",
+      { class: "dialog-actions" },
+      el("button", { class: "btn", text: "Cancel", onClick: () => done(null) }),
+      el("button", { class: "btn btn-primary", text: opts.confirmLabel ?? "OK", onClick: submit }),
+    ),
+  );
+  overlay.append(dialog);
+  overlay.addEventListener("mousedown", (e) => {
+    if (e.target === overlay) done(null);
+  });
+  overlay.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") done(null);
+  });
+  document.body.append(overlay);
+  inputs.get(opts.fields[0].key)?.focus();
   requestAnimationFrame(() => overlay.classList.add("visible"));
   return promise;
 }
@@ -227,4 +335,29 @@ export function closeContextMenu(): void {
   openMenu = null;
   window.removeEventListener("mousedown", onGlobalDown, { capture: true });
   window.removeEventListener("keydown", onGlobalKey, { capture: true });
+}
+
+/**
+ * Dialogs bind Escape on their own overlay, which only fires while focus is
+ * INSIDE it. Mouse-opened dialogs (Settings via activity bar, Models via chip)
+ * leave focus on the opener, so Escape went nowhere. Forward it to the topmost
+ * visible overlay — each dialog's own handler keeps its close semantics.
+ * Installed once at boot, alongside installKeybindings().
+ */
+export function installDialogEscape(): void {
+  window.addEventListener(
+    "keydown",
+    (e) => {
+      if (e.key !== "Escape") return;
+      // NOT ".overlay.visible": the visible class lands via rAF, which is
+      // throttled to zero while the window is occluded — the dialog would be
+      // un-closeable until repaint. DOM order still gives the topmost overlay.
+      const overlays = document.querySelectorAll<HTMLElement>("body > .overlay");
+      const top = overlays[overlays.length - 1];
+      if (!top || top.contains(e.target as Node)) return; // dialog handles its own
+      e.preventDefault();
+      top.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    },
+    { capture: true },
+  );
 }

@@ -168,15 +168,24 @@ function renderChip(): void {
   const activeProfile = active ? state.providers.find((p) => p.id === active.provider) : null;
   const activeModel = activeProfile?.models.find((m) => m.id === active?.id) ?? null;
   chipEl.style.setProperty("--mc-fill", ctxClass(activeModel?.contextWindow ?? null));
-  chipPendingEl.style.display = state.pending || state.thinking.pending ? "" : "none";
+  chipPendingEl.textContent = switchInFlight ? "SWITCHING" : "PENDING";
+  chipPendingEl.style.display = switchInFlight || state.pending || state.thinking.pending ? "" : "none";
   // qualifier: shown exactly while another enabled profile exposes the same id
   if (chipQual) {
     const ambiguous = active !== null && ambiguousModelIds().has(active.id);
     chipQual.style.display = ambiguous ? "" : "none";
     if (active && ambiguous) chipQual.textContent = `${active.provider}·`;
   }
+  // Balance rides on the tooltip when the profile has a probed wallet —
+  // spot-checking funds shouldn't require opening the Models dialog.
+  // Spec rule: a balance is never shown without its age.
+  const bal = activeProfile?.balance;
+  const balAge = bal ? Math.max(0, Math.round((Date.now() - bal.checkedAt) / 60_000)) : 0;
+  const balText = bal && bal.value !== null
+    ? ` — balance ${bal.value.toFixed(2)}${bal.currency ? " " + bal.currency : ""} · ${balAge < 1 ? "now" : `${balAge}m`}`
+    : "";
   chipEl.title = active
-    ? `${active.provider}/${active.id} — click to switch`
+    ? `${active.provider}/${active.id}${balText} — click to switch`
     : "Active model — click to switch";
   // thinking glyph: hidden entirely for no-thinking models
   if (chipThinkEl) {
@@ -354,8 +363,17 @@ function showSwitchPopover(anchor: HTMLElement): void {
 
 // ---------------------------------------------------------------- shared actions
 
+/** a switch invoke is in flight — early state pushes must not hide the badge */
+let switchInFlight = false;
+
 async function switchAction(selector: string, origin: string): Promise<void> {
+  // The omp RPC takes 1–4 s on a live session; without this the popover closes
+  // and NOTHING moves until the state push. Honest feedback: it IS switching.
+  switchInFlight = true;
+  renderChip();
   const res = await window.ide.models.switchModel(selector, origin);
+  switchInFlight = false;
+  renderChip();
   if (!res.ok) {
     const hint = res.error?.includes("Model not found")
       ? " — the agent session predates this provider; restart the session and retry"

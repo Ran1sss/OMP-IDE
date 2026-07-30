@@ -107,6 +107,7 @@
 
 .cc-global {
   display: flex;
+  flex-wrap: wrap; /* 300px side panel: dials drop below the title as a unit */
   align-items: center;
   gap: 10px;
   padding: 10px 12px;
@@ -115,6 +116,13 @@
   border-radius: var(--r-m);
 }
 .cc-global .cc-note { font-size: 10.5px; color: var(--text-low); }
+.cc-global .cc-dials {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  white-space: nowrap;
+}
 
 /* toggle switch */
 .switch {
@@ -528,6 +536,7 @@
 /* ---------- telegram proxy row ---------- */
 .cc-proxy {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 6px;
   padding: 0 2px 4px;
