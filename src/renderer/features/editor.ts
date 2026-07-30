@@ -126,16 +126,21 @@ const gitDecorations = new Map<string, string[]>(); // path -> decoration ids
 
 // ---------------------------------------------------------------- helpers
 
-function findTab(key: string): { group: EditorGroup; tab: EditorTab; gi: number } | null {
-  for (let gi = 0; gi < groups.length; gi++) {
-    const tab = groups[gi].tabs.find((t) => t.key === key);
-    if (tab) return { group: groups[gi], tab, gi };
+function findTab(key: string): { group: EditorGroup; tab: EditorTab } | null {
+  for (const g of groups) {
+    const tab = g.tabs.find((t) => t.key === key);
+    if (tab) return { group: g, tab };
   }
   return null;
 }
 
+/** The group the user last focused. `focusedGroup` stores a group ID, never an array index. */
+function focusedGroupObj(): EditorGroup | null {
+  return groups.find((g) => g.id === focusedGroup) ?? groups[0] ?? null;
+}
+
 function activeTab(): EditorTab | null {
-  const g = groups[focusedGroup];
+  const g = focusedGroupObj();
   if (!g || !g.active) return null;
   return g.tabs.find((t) => t.key === g.active) ?? null;
 }
@@ -175,6 +180,10 @@ function renderTabs(g: EditorGroup) {
           focusedGroup = g.id;
           activateTab(g, tab.key);
         },
+        onContextMenu: (e) => {
+          e.preventDefault();
+          showTabMenu(g, tab, e.clientX, e.clientY);
+        },
         onDragStart: (e) => {
           e.dataTransfer?.setData("omp/tab", JSON.stringify({ key: tab.key, from: g.id }));
           // mention payload for the agent prompt (files only, not diff/image views)
@@ -213,8 +222,40 @@ function renderTabs(g: EditorGroup) {
       el("span", { text: tab.title }),
       closeBtn,
     );
+    // middle-click close — standard editor muscle memory
+    node.addEventListener("auxclick", (e) => {
+      if (e.button === 1) {
+        e.preventDefault();
+        void closeTab(tab.key);
+      }
+    });
     g.tabsEl.append(node);
   }
+}
+
+function showTabMenu(g: EditorGroup, tab: EditorTab, x: number, y: number) {
+  contextMenu(x, y, [
+    { label: "Close", key: "Ctrl+W", action: () => void closeTab(tab.key) },
+    { label: "Close Others", action: () => void closeOthers(g, tab.key) },
+    { label: "Close All", action: () => void closeAllInGroup(g) },
+    { separator: true },
+    { label: "Copy Path", action: () => void navigator.clipboard.writeText(tab.path) },
+    ...(tab.kind === "file"
+      ? [{ label: "Reveal in Explorer", action: () => revealInExplorer(tab.path) }]
+      : []),
+  ]);
+}
+function revealInExplorer(path: string) {
+  emit("view-switch", "explorer");
+  emit("reveal-in-tree", path);
+}
+
+async function closeOthers(g: EditorGroup, keep: string) {
+  for (const key of g.tabs.map((t) => t.key)) if (key !== keep) await closeTab(key);
+}
+
+async function closeAllInGroup(g: EditorGroup) {
+  for (const key of g.tabs.map((t) => t.key)) await closeTab(key);
 }
 
 function renderEmpty(host: HTMLElement) {
@@ -405,7 +446,7 @@ function renderCrumbs(g: EditorGroup, tab: EditorTab | null) {
         class: i === parts.length - 1 ? "crumb crumb-file" : "crumb",
         text: p,
         title: "Reveal in Explorer",
-        onClick: () => emit("reveal-in-tree", tab.path),
+        onClick: () => revealInExplorer(tab.path),
       }),
     );
   });
@@ -590,14 +631,15 @@ export async function openFile(
   if (pos?.focus === false) suppressNextFocus = true;
   const existing = findTab(key);
   if (existing) {
-    focusedGroup = existing.gi;
+    focusedGroup = existing.group.id;
     activateTab(existing.group, key);
     revealPosition(pos);
     return;
   }
 
   const mime = imageMime(key);
-  const g = groups[focusedGroup] ?? groups[0];
+  const g = focusedGroupObj();
+  if (!g) return;
 
   if (mime) {
     try {
@@ -660,12 +702,13 @@ function revealPosition(pos?: { line?: number; column?: number; selectLength?: n
 
 export function openDiff(payload: DiffPayload) {
   const key = `diff:${payload.title}:${payload.path}`;
-  const g = groups[focusedGroup] ?? groups[0];
+  const g = focusedGroupObj();
+  if (!g) return;
   const existing = findTab(key);
   if (existing) {
     // refresh contents
     existing.tab.diff = payload;
-    focusedGroup = existing.gi;
+    focusedGroup = existing.group.id;
     activateTab(existing.group, key);
     return;
   }
@@ -713,8 +756,14 @@ export async function closeTab(key: string, opts: { force?: boolean } = {}): Pro
 }
 
 export async function closeActiveTab() {
-  const g = groups[focusedGroup];
-  if (g?.active) await closeTab(g.active);
+  const g = focusedGroupObj();
+  if (!g) return;
+  if (g.active) {
+    await closeTab(g.active);
+  } else if (groups.length > 1) {
+    // Ctrl+W on a focused empty split group collapses it
+    removeGroup(g);
+  }
 }
 
 // ---------------------------------------------------------------- save
@@ -815,6 +864,7 @@ function removeGroup(g: EditorGroup) {
   groups.splice(idx, 1);
   g.rootEl.remove();
   if (focusedGroup === g.id) focusedGroup = groups[0]?.id ?? 0;
+  for (const gr of groups) gr.rootEl.classList.toggle("focused-group", gr.id === focusedGroup);
   const remaining = groups[0];
   if (remaining) {
     renderTabs(remaining);
