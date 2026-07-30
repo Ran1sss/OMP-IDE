@@ -919,10 +919,21 @@ export async function closeActiveTab() {
 let switcher: { g: EditorGroup; order: string[]; idx: number; el: HTMLElement } | null = null;
 
 /**
+ * Physical Ctrl state. The overlay's commit gesture is "release Ctrl", so opening
+ * it when Ctrl is NOT held (palette-invoked "Next Editor Tab", Enter commit)
+ * would strand it — no keyup will ever arrive. Tracked globally because the
+ * command registry invokes handlers without the originating event.
+ */
+let ctrlHeld = false;
+window.addEventListener("keydown", (e) => { if (e.key === "Control") ctrlHeld = true; }, { capture: true });
+window.addEventListener("keyup", (e) => { if (e.key === "Control") ctrlHeld = false; }, { capture: true });
+window.addEventListener("blur", () => (ctrlHeld = false));
+
+/**
  * Ctrl+Tab / Ctrl+Shift+Tab. Default: most-recently-used order with a hold-Ctrl
  * overlay (release commits, Escape cancels). Strip-order cycling (EVO-29) is the
- * fallback when the setting is "strip" or the group has exactly 2 tabs — a
- * 2-tab MRU toggle IS the strip toggle, so the overlay earns nothing there.
+ * fallback when the setting is "strip", the group has exactly 2 tabs (a 2-tab
+ * MRU toggle IS the strip toggle), or Ctrl isn't physically held (palette invoke).
  */
 export function cycleTab(delta: 1 | -1) {
   const g = focusedGroupObj();
@@ -931,7 +942,7 @@ export function cycleTab(delta: 1 | -1) {
     stepSwitcher(delta);
     return;
   }
-  if (state.settings.tabSwitcher === "strip" || g.tabs.length === 2) {
+  if (state.settings.tabSwitcher === "strip" || g.tabs.length === 2 || !ctrlHeld) {
     const idx = g.tabs.findIndex((t) => t.key === g.active);
     if (idx < 0) return;
     const next = g.tabs[(idx + delta + g.tabs.length) % g.tabs.length];
@@ -1139,6 +1150,12 @@ function makeGroup(): EditorGroup {
     e.preventDefault();
     void closeTab(node.dataset.key!);
   });
+  // EVO-37: the strip scrolls horizontally with a hidden scrollbar — map the wheel
+  tabsEl.addEventListener("wheel", (e) => {
+    if (!e.deltaY || e.deltaX) return; // horizontal gestures already work natively
+    e.preventDefault();
+    tabsEl.scrollLeft += e.deltaY;
+  }, { passive: false });
   rootEl.addEventListener("mousedown", () => {
     focusedGroup = g;
     for (const gr of groups) gr.rootEl.classList.toggle("focused-group", gr.id === g.id);

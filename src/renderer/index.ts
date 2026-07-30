@@ -180,8 +180,15 @@ function switchView(id: ViewId | "agent") {
     return;
   }
 
+  // EVO-38: revealing a side view while zen hides the panel would light the
+  // button over an invisible panel (silent no-op clicks) — exit zen first.
+  // A press that exits zen is a reveal, never a collapse-toggle: the user asked
+  // to SEE the view, even if it was the active one before zen hid it.
+  const exitedZen = state.zen;
+  if (state.zen) toggleZen();
+
   // side panel views
-  if (activeView === id && !sidepanel.classList.contains("collapsed")) {
+  if (!exitedZen && activeView === id && !sidepanel.classList.contains("collapsed")) {
     sidepanel.classList.add("collapsed");
     viewButtons.get(id)?.classList.remove("active");
     if (id === "outline") setOutlineVisible(false);
