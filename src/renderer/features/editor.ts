@@ -414,6 +414,7 @@ function mountActive(g: EditorGroup) {
   ed.onDidFocusEditorText(() => {
     focusedGroup = g;
     for (const gr of groups) gr.rootEl.classList.toggle("focused-group", gr.id === g.id);
+    emitActiveTabChanged(); // focus can move consumers (outline) to a different file
   });
   if (!suppressNextFocus) ed.focus();
   suppressNextFocus = false;
@@ -844,6 +845,16 @@ export function cycleTab(delta: 1 | -1) {
   activateTab(g, next.key);
 }
 
+/** Ctrl+1 / Ctrl+2: focus the Nth editor group (keyboard path to what a group click does). */
+export function focusGroup(index: number) {
+  const g = groups[index];
+  if (!g || g === focusedGroupObj()) return;
+  focusedGroup = g;
+  for (const gr of groups) gr.rootEl.classList.toggle("focused-group", gr === g);
+  g.editor?.focus();
+  emitActiveTabChanged();
+}
+
 /** Ctrl+Shift+V: rendered-markdown preview of the active .md tab (refreshes on save/disk change). */
 export async function openMarkdownPreview() {
   const src = activeTab();
@@ -952,6 +963,7 @@ function makeGroup(): EditorGroup {
   rootEl.addEventListener("mousedown", () => {
     focusedGroup = g;
     for (const gr of groups) gr.rootEl.classList.toggle("focused-group", gr.id === g.id);
+    emitActiveTabChanged(); // cross-group focus change is a consumer-visible active-tab change
   });
   return g;
 }
