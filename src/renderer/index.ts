@@ -23,6 +23,7 @@ import { initGitPanel, refreshGit, switchBranch, onBranchChange } from "./featur
 import { openPalette, invalidateFileCache } from "./features/palette";
 import { initAgentPanel, startAgent, focusAgentInput } from "./features/agent";
 import { openSessionHistory } from "./features/history";
+import { initOutline, setOutlineVisible } from "./features/outline";
 import { openSettingsDialog, applyAccent } from "./features/settings";
 import { showWelcome } from "./features/welcome";
 import { initRemote, createBeacon } from "./features/remote";
@@ -33,7 +34,7 @@ import "./styles/mentions.css";
 import "./styles/team.css";
 import type { LayoutState, OmpStatus } from "../shared/types";
 
-type ViewId = "explorer" | "search" | "git" | "remote";
+type ViewId = "explorer" | "search" | "git" | "remote" | "outline";
 
 // ---------------------------------------------------------------- shell DOM
 
@@ -75,6 +76,7 @@ const activitybar = el(
   { class: "activitybar" },
   actButton("explorer", I.files, "Explorer"),
   actButton("search", I.search, "Search"),
+  actButton("outline", I.outline, "Outline"),
   actButton("git", I.git, "Source Control"),
   actButton("remote", I.zap, "Remote Control Center"),
   actButton("agent", I.agent, "OMP Agent", "agent-act"),
@@ -87,6 +89,7 @@ const sideTitle = el("span", { class: "panel-header" });
 const sideActions = el("span", { class: "actions" });
 const explorerView = el("div", { style: { display: "flex", flexDirection: "column", flex: "1", minHeight: "0" } });
 const searchView = el("div", { style: { display: "none", flexDirection: "column", flex: "1", minHeight: "0" } });
+const outlineView = el("div", { style: { display: "none", flexDirection: "column", flex: "1", minHeight: "0" } });
 const gitView = el("div", { style: { display: "none", flexDirection: "column", flex: "1", minHeight: "0" } });
 const remoteView = el("div", { style: { display: "none", flexDirection: "column", flex: "1", minHeight: "0" } });
 const sidepanel = el(
@@ -95,6 +98,7 @@ const sidepanel = el(
   el("div", { class: "panel-title" }, sideTitle, sideActions),
   explorerView,
   searchView,
+  outlineView,
   gitView,
   remoteView,
 );
@@ -180,6 +184,7 @@ function switchView(id: ViewId | "agent") {
   if (activeView === id && !sidepanel.classList.contains("collapsed")) {
     sidepanel.classList.add("collapsed");
     viewButtons.get(id)?.classList.remove("active");
+    if (id === "outline") setOutlineVisible(false);
     emit("relayout", undefined);
     saveLayoutSoon();
     return;
@@ -190,10 +195,12 @@ function switchView(id: ViewId | "agent") {
   }
   explorerView.style.display = id === "explorer" ? "flex" : "none";
   searchView.style.display = id === "search" ? "flex" : "none";
+  outlineView.style.display = id === "outline" ? "flex" : "none";
   gitView.style.display = id === "git" ? "flex" : "none";
   remoteView.style.display = id === "remote" ? "flex" : "none";
   sideTitle.textContent =
     id === "explorer" ? "Explorer" : id === "search" ? "Search" :
+    id === "outline" ? "Outline" :
     id === "git" ? "Source Control" : "Remote Control";
   clear(sideActions);
   if (id === "explorer") {
@@ -206,6 +213,7 @@ function switchView(id: ViewId | "agent") {
   activeView = id;
   if (id === "search") focusSearch();
   if (id === "git") void refreshGit();
+  setOutlineVisible(id === "outline");
   emit("relayout", undefined);
   saveLayoutSoon();
 }
@@ -353,6 +361,7 @@ reg("workbench.settings", "Open Settings", () => openSettingsDialog(), "Ctrl+,")
 reg("workbench.zen", "Toggle Zen Mode", () => toggleZen(), "Ctrl+K Z");
 reg("view.explorer", "View: Explorer", () => switchView("explorer"), "Ctrl+Shift+E");
 reg("view.search", "View: Search", () => switchView("search"), "Ctrl+Shift+F");
+reg("view.outline", "View: Outline", () => switchView("outline"), "Ctrl+Shift+O");
 reg("view.git", "View: Source Control", () => switchView("git"), "Ctrl+Shift+G");
 reg("view.agent", "View: OMP Agent", () => switchView("agent"), "Ctrl+Shift+A");
 reg("file.save", "File: Save", () => void saveActive(), "Ctrl+S");
@@ -441,6 +450,7 @@ async function boot() {
   initEditorArea(editorArea);
   initExplorer(explorerView);
   initSearchPanel(searchView);
+  initOutline(outlineView);
   initGitPanel(gitView);
   initRemote(remoteView);
   initModels();

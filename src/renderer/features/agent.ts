@@ -322,8 +322,11 @@ function chipReasoningPulse(live: boolean): void {
 }
 
 function renderMarkdownInto(target: HTMLElement, text: string) {
-  // team runs: protocol marker lines feed the board, not the transcript
-  target.innerHTML = marked.parse(stripTeamMarkers(text), { async: false });
+  // team runs: protocol marker lines feed the board, not the transcript —
+  // a bubble that was ONLY markers collapses instead of rendering empty
+  const cleaned = stripTeamMarkers(text);
+  target.classList.toggle("md-empty", text.length > 0 && cleaned.trim().length === 0);
+  target.innerHTML = marked.parse(cleaned, { async: false });
   for (const a of target.querySelectorAll("a")) {
     a.addEventListener("click", (e) => {
       e.preventDefault();

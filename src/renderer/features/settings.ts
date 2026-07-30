@@ -3,6 +3,7 @@
 import { el } from "../core/dom";
 import { state } from "../core/state";
 import { toast } from "../core/ui";
+import { refreshCrumbs } from "./editor";
 import type { Settings } from "../../shared/types";
 
 let settingsClose: (() => void) | null = null;
@@ -23,9 +24,21 @@ export function openSettingsDialog(): void {
   const shellInput = el("input", { class: "input mono", value: state.settings.terminalShell, placeholder: "powershell.exe (default)" }) as HTMLInputElement;
   const ompInput = el("input", { class: "input mono", value: state.settings.ompPath, placeholder: "resolved from PATH" }) as HTMLInputElement;
   const stallInput = el("input", { class: "input mono", type: "number", value: String(state.settings.stallSeconds) }) as HTMLInputElement;
+  const crumbSelect = el("select", { class: "input" }) as HTMLSelectElement;
+  for (const [value, label] of [
+    ["auto", "Auto — only when a symbol trail can show"],
+    ["on", "On — always"],
+    ["off", "Off"],
+  ] as const) {
+    const opt = el("option", { text: label }) as HTMLOptionElement;
+    opt.value = value;
+    crumbSelect.append(opt);
+  }
+  crumbSelect.value = state.settings.breadcrumbs;
 
   const save = async () => {
     const stallRaw = parseInt(stallInput.value, 10);
+    const crumbRaw = crumbSelect.value;
     const patch: Partial<Settings> = {
       accent: accentInput.value.trim() || "#55e6c1",
       fontSize: Math.max(9, Math.min(28, parseInt(fontInput.value, 10) || 13)),
@@ -33,9 +46,11 @@ export function openSettingsDialog(): void {
       ompPath: ompInput.value.trim(),
       // 0 disables the stall nudge entirely; anything else clamps to ≥5 s
       stallSeconds: Number.isNaN(stallRaw) ? 20 : stallRaw === 0 ? 0 : Math.max(5, stallRaw),
+      breadcrumbs: crumbRaw === "auto" || crumbRaw === "off" ? crumbRaw : "on",
     };
     state.settings = await window.ide.store.setSettings(patch);
     applyAccent(state.settings.accent);
+    refreshCrumbs();
     toast("Settings saved");
     close();
   };
@@ -61,6 +76,7 @@ export function openSettingsDialog(): void {
       field("Terminal shell", shellInput, "Full path to shell executable; blank = system default"),
       field("omp binary path", ompInput, "Blank = resolve from PATH. Restart the agent after changing."),
       field("Agent stall warning (seconds)", stallInput, "Nudge card when the model streams nothing. 0 = off, minimum 5. Default 20."),
+      field("Breadcrumbs", crumbSelect, "Auto hides the bar when only the file path would show (non-TS/JS files)."),
     ),
     el(
       "div",

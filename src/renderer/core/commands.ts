@@ -73,7 +73,7 @@ export function installKeybindings(): void {
   window.addEventListener(
     "keydown",
     (e) => {
-      const target = e.target as HTMLElement | null;
+      const target = e.target instanceof HTMLElement ? e.target : null;
       const inInput =
         !!target &&
         (target.tagName === "INPUT" ||

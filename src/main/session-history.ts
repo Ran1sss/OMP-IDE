@@ -14,6 +14,8 @@ import type { OmpSessionMeta, OmpSessionEntry } from "../shared/types";
 const META_SCAN_BYTES = 64 * 1024;
 const MAX_SESSIONS = 50;
 const MAX_ENTRIES = 2000;
+/** transcript reads are bounded: a huge session parses only its tail window */
+const TAIL_READ_BYTES = 4 * 1024 * 1024;
 
 function sessionsRoot(): string {
   return join(homedir(), ".omp", "agent", "sessions");
@@ -118,7 +120,27 @@ export function registerSessionHistoryHandlers(ipc: IpcMain) {
     const full = resolve(file);
     if (!samePath(full.slice(0, sessionsRoot().length), sessionsRoot()))
       throw new Error("Not a session file");
-    const raw = fs.readFileSync(full, "utf-8");
+    // Bounded read: never pull a whole multi-MB jsonl into memory. Large
+    // sessions read only the last TAIL_READ_BYTES; the first (possibly
+    // partial) line of the window is discarded so every parsed line is whole.
+    const stat = await fs.promises.stat(full);
+    let raw: string;
+    let tailOnly = false;
+    if (stat.size > TAIL_READ_BYTES) {
+      const fh = await fs.promises.open(full, "r");
+      try {
+        const buf = Buffer.alloc(TAIL_READ_BYTES);
+        await fh.read(buf, 0, TAIL_READ_BYTES, stat.size - TAIL_READ_BYTES);
+        raw = buf.toString("utf-8");
+      } finally {
+        await fh.close();
+      }
+      const firstNl = raw.indexOf("\n");
+      raw = firstNl >= 0 ? raw.slice(firstNl + 1) : "";
+      tailOnly = true;
+    } else {
+      raw = await fs.promises.readFile(full, "utf-8");
+    }
     const entries: OmpSessionEntry[] = [];
     for (const l of parseLines(raw)) {
       const at = l.timestamp ? Date.parse(l.timestamp) : 0;
@@ -138,12 +160,12 @@ export function registerSessionHistoryHandlers(ipc: IpcMain) {
         }
       }
     }
-    if (entries.length > MAX_ENTRIES) {
-      const dropped = entries.length - MAX_ENTRIES;
-      return [
-        { kind: "notice", text: `${dropped} earlier entries omitted (session too large)`, at: 0 },
-        ...entries.slice(dropped),
-      ];
+    if (entries.length > MAX_ENTRIES || tailOnly) {
+      const dropped = Math.max(0, entries.length - MAX_ENTRIES);
+      const note = tailOnly
+        ? `earlier entries omitted (large session — parsed the last ${Math.round(TAIL_READ_BYTES / 1048576)} MB of ${Math.round(stat.size / 1048576)} MB)`
+        : `${dropped} earlier entries omitted (session too large)`;
+      return [{ kind: "notice", text: note, at: 0 }, ...entries.slice(dropped)];
     }
     return entries;
   });

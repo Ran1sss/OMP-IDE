@@ -313,7 +313,11 @@ function applyMarker(raw: string): void {
       break;
     }
     case "verify": {
+      // needs-call means PAUSED: the user owns the next move. A model that
+      // keeps narrating past the pause must not complete the run underneath
+      // the decision card.
       if (run.phase !== "execute" && run.phase !== "verify") break;
+      if (run.needsCall) break;
       run.phase = "verify";
       sysNote(
         ev.result === "pass"
@@ -324,6 +328,7 @@ function applyMarker(raw: string): void {
     }
     case "report": {
       if (run.phase !== "execute" && run.phase !== "verify") break;
+      if (run.needsCall) break;
       run.report = typeof ev.text === "string" ? ev.text : "";
       run.phase = "done";
       for (const a of run.agents) if (a.state !== "failed") a.state = "done";
@@ -420,8 +425,11 @@ function onAgentEvent(e: OmpEvent): void {
     }
     case "turn-error": {
       if (!live) break;
-      run.phase = "stalled";
-      sysNote(`provider error ended the run: ${e.message.slice(0, 200)}`);
+      // NOT fatal by itself: omp retries transient provider failures within
+      // the same run (stream timeouts, 5xx). Flipping to stalled here would
+      // freeze the board while the turn recovers and keeps emitting markers.
+      // If the failure IS fatal, agent-end lands next and stalls the run.
+      sysNote(`provider error mid-run (retrying): ${e.message.slice(0, 200)}`);
       pushState();
       break;
     }

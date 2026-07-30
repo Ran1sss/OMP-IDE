@@ -56,6 +56,7 @@ export const I = {
   save: `<path d="M3 3.8A.8.8 0 0 1 3.8 3h7L13 5.2v7a.8.8 0 0 1-.8.8H3.8a.8.8 0 0 1-.8-.8V3.8z"/><path d="M5 3v3h5V3M5 13V9.5h6V13"/>`,
   splitH: `<rect x="2" y="3" width="12" height="10" rx="1.2"/><line x1="8" y1="3" x2="8" y2="13"/>`,
   zap: `<path d="M8.8 2L3.5 9h3.4L7.2 14l5.3-7H9.1L8.8 2z"/>`,
+  outline: `<line x1="6" y1="4" x2="13" y2="4"/><line x1="8" y1="8" x2="13" y2="8"/><line x1="10" y1="12" x2="13" y2="12"/><circle cx="3.5" cy="4" r="1"/><circle cx="5.5" cy="8" r="1"/><circle cx="7.5" cy="12" r="1"/>`,
 } as const;
 
 const TOOL_ICON: Record<string, string> = {

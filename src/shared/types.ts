@@ -211,6 +211,8 @@ export interface Settings {
   ompPath: string;
   /** silent-model stall warning, seconds until the nudge card; 0 = disabled, min 5 */
   stallSeconds: number;
+  /** crumb bar: auto = only when a symbol trail can show (TS/JS), on = always, off = never */
+  breadcrumbs: "auto" | "on" | "off";
 }
 
 /** one past conversation on disk (read-only history browser) */
@@ -828,4 +830,5 @@ export const DEFAULT_SETTINGS: Settings = {
   terminalShell: "",
   ompPath: "",
   stallSeconds: 20,
+  breadcrumbs: "on",
 };

@@ -316,3 +316,6 @@
 .ts-title { font-size: 13px; font-weight: 600; color: var(--flare); }
 .ts-goal { font-size: 11px; color: var(--text-mid); }
 .team-stalled .dim { font-size: 12px; line-height: 1.5; }
+
+/* chat bubbles whose whole content was protocol markers collapse */
+.chat-agent.md-empty { display: none; }

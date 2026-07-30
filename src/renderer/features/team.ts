@@ -33,13 +33,23 @@ let elapsedTimer: number | undefined;
 
 const MARKER = "@@TEAM@@";
 
-/** strip protocol marker lines from agent chat text (team run narration) */
+/**
+ * Strip protocol marker lines from agent chat text (team run narration).
+ * Separator lines (`---`/`***`/`___`) adjacent to a stripped marker are
+ * dropped too — orphaned they render as a stack of bare <hr>s.
+ */
 export function stripTeamMarkers(text: string): string {
   if (!text.includes(MARKER)) return text;
-  return text
-    .split("\n")
-    .filter((l) => !l.trimStart().startsWith(MARKER))
-    .join("\n");
+  const lines = text.split("\n");
+  const isMarker = lines.map((l) => l.trimStart().startsWith(MARKER));
+  const isSep = lines.map((l) => /^(-{3,}|\*{3,}|_{3,})$/.test(l.trim()));
+  const out: string[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (isMarker[i]) continue;
+    if (isSep[i] && (isMarker[i - 1] || isMarker[i + 1])) continue;
+    out.push(lines[i]);
+  }
+  return out.join("\n");
 }
 
 // ---------------------------------------------------------------- toggle + composer routing

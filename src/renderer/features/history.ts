@@ -44,12 +44,17 @@ export function openSessionHistory(): void {
   historyClose = close;
 
   const head = el("div", { class: "hd-head" }, el("h2", { text: "Session History" }));
+  const filterInput = el("input", {
+    class: "input hd-filter",
+    placeholder: "Filter sessions… (title, prompt, model)",
+  }) as HTMLInputElement;
   const body = el("div", { class: "hd-scroll" });
   const backBtn = el("button", { class: "btn", text: "Back", style: { display: "none" }, onClick: () => void renderList() });
   const dialog = el(
     "div",
     { class: "dialog history-dialog" },
     head,
+    filterInput,
     body,
     el("div", { class: "dialog-actions" }, backBtn, el("span", { style: { flex: "1" } }), el("button", { class: "btn", text: "Close", onClick: close })),
   );
@@ -60,6 +65,24 @@ export function openSessionHistory(): void {
   overlay.addEventListener("keydown", (e) => {
     if (e.key === "Escape") close();
   });
+  let allSessions: OmpSessionMeta[] = [];
+  const applyFilter = () => {
+    const q = filterInput.value.trim().toLowerCase();
+    const hits = !q
+      ? allSessions
+      : allSessions.filter((s) =>
+          (s.title + " " + s.firstPrompt + " " + s.model).toLowerCase().includes(q));
+    renderRows(hits, q);
+  };
+  filterInput.addEventListener("input", applyFilter);
+  filterInput.addEventListener("keydown", (e) => {
+    e.stopPropagation(); // dialog Escape handler stays; registry keys must not fire
+    if (e.key === "Escape") close();
+    if (e.key === "Enter") {
+      const first = body.querySelector<HTMLElement>(".hd-row");
+      first?.click();
+    }
+  });
   document.body.append(overlay);
   overlay.tabIndex = -1;
   overlay.focus();
@@ -67,11 +90,18 @@ export function openSessionHistory(): void {
 
   async function renderList() {
     backBtn.style.display = "none";
+    filterInput.style.display = "";
     clear(body);
     body.append(el("div", { class: "dimmer", text: "Loading…", style: { padding: "12px" } }));
-    const sessions = await window.ide.omp.listSessions(state.root!);
+    allSessions = await window.ide.omp.listSessions(state.root!);
+    applyFilter();
+    if (allSessions.length) filterInput.focus();
+  }
+
+  function renderRows(sessions: OmpSessionMeta[], q: string) {
     clear(body);
-    if (!sessions.length) {
+    if (!allSessions.length) {
+      filterInput.style.display = "none";
       body.append(
         el(
           "div",
@@ -80,6 +110,10 @@ export function openSessionHistory(): void {
           el("div", { class: "dimmer", text: "Conversations appear here after the agent has run at least once." }),
         ),
       );
+      return;
+    }
+    if (!sessions.length) {
+      body.append(el("div", { class: "hd-empty" }, el("div", { text: `No sessions match "${q}".` })));
       return;
     }
     // rows group under dim day headers; row meta then shows time only
@@ -113,6 +147,7 @@ export function openSessionHistory(): void {
   }
 
   async function renderTranscript(s: OmpSessionMeta) {
+    filterInput.style.display = "none";
     clear(body);
     body.append(el("div", { class: "dimmer", text: "Loading…", style: { padding: "12px" } }));
     let entries: OmpSessionEntry[];

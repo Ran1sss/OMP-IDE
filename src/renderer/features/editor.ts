@@ -361,11 +361,38 @@ const tsRuntimeNs: TsRuntimeNamespace | undefined =
   (monaco as unknown as { typescript?: TsRuntimeNamespace }).typescript;
 
 let crumbTimer: number | undefined;
+/**
+ * Cold-worker resilience: the first navtree ask after app start can time out
+ * while the TS mode is still booting. Instead of waiting for the next cursor
+ * move, failed asks retry on a short backoff (bounded) keyed to the tab; any
+ * fresh schedule (cursor move / tab switch) resets the ladder.
+ */
+const TRAIL_RETRY_DELAYS_MS = [500, 1000, 2000, 4000];
+let trailRetry: { key: string; attempt: number } | null = null;
+
+/** does this tab's language get a symbol trail? (auto mode shows crumbs only then) */
+function hasSymbolTrail(tab: EditorTab): boolean {
+  if (tab.kind !== "file" || !tab.model) return false;
+  const lang = tab.model.getLanguageId();
+  return lang === "typescript" || lang === "javascript";
+}
+
+/** Re-render every group's crumb bar (settings change applies live). */
+export function refreshCrumbs(): void {
+  for (const g of groups) {
+    const tab = g.active ? g.tabs.find((t) => t.key === g.active) ?? null : null;
+    renderCrumbs(g, tab);
+  }
+}
 
 function renderCrumbs(g: EditorGroup, tab: EditorTab | null) {
   const c = g.crumbsEl;
   clear(c);
-  if (!tab || tab.kind === "image") {
+  const mode = state.settings.breadcrumbs;
+  const visible =
+    tab && tab.kind !== "image" &&
+    (mode === "on" || (mode === "auto" && hasSymbolTrail(tab)));
+  if (!tab || !visible) {
     c.style.display = "none";
     return;
   }
@@ -387,8 +414,27 @@ function renderCrumbs(g: EditorGroup, tab: EditorTab | null) {
 }
 
 function scheduleSymbolTrail(g: EditorGroup, tab: EditorTab) {
+  trailRetry = null; // a user-driven schedule restarts the retry ladder
   clearTimeout(crumbTimer);
   crumbTimer = window.setTimeout(() => void updateSymbolTrail(g, tab), 150);
+}
+
+/** One raced navtree fetch (worker may be cold — the caller owns retries). */
+async function fetchNavTree(tab: EditorTab): Promise<NavItem | null> {
+  if (tab.kind !== "file" || !tab.model || !tsRuntimeNs) return null;
+  const lang = tab.model.getLanguageId();
+  if (lang !== "typescript" && lang !== "javascript") return null;
+  // Each language activates its own mode+worker; asking the TS worker about
+  // a JS model rejects with "TypeScript not registered!". The accessor's
+  // promise never SETTLES until the mode is set up (first-open race), so
+  // race it against a timeout instead of hanging forever.
+  const accessor = lang === "typescript"
+    ? tsRuntimeNs.getTypeScriptWorker()
+    : tsRuntimeNs.getJavaScriptWorker();
+  const timeout = new Promise<never>((_, rej) => setTimeout(() => rej(new Error("worker timeout")), 3000));
+  const getWorker = await Promise.race([accessor, timeout]);
+  const client = await Promise.race([getWorker(tab.model.uri), timeout]);
+  return Promise.race([client.getNavigationTree(tab.model.uri.toString()), timeout]);
 }
 
 async function updateSymbolTrail(g: EditorGroup, tab: EditorTab) {
@@ -399,23 +445,20 @@ async function updateSymbolTrail(g: EditorGroup, tab: EditorTab) {
   if (lang !== "typescript" && lang !== "javascript") return;
   let tree: NavItem | null = null;
   try {
-    if (!tsRuntimeNs) return; // non-TS build shape — path-only crumbs
-    // Each language activates its own mode+worker; asking the TS worker about
-    // a JS model rejects with "TypeScript not registered!". The accessor's
-    // promise never SETTLES until the mode is set up (first-open race), so
-    // race it against a timeout instead of hanging the trail forever.
-    const accessor = lang === "typescript"
-      ? tsRuntimeNs.getTypeScriptWorker()
-      : tsRuntimeNs.getJavaScriptWorker();
-    const timeout = new Promise<never>((_, rej) => setTimeout(() => rej(new Error("worker timeout")), 3000));
-    const getWorker = await Promise.race([accessor, timeout]);
-    const client = await Promise.race([getWorker(tab.model.uri), timeout]);
-    tree = await Promise.race([client.getNavigationTree(tab.model.uri.toString()), timeout]);
+    tree = await fetchNavTree(tab);
   } catch (err) {
-    // worker/mode not up yet — path-only crumbs now, retry on next cursor move
+    // worker/mode not up yet — path-only crumbs now; retry on a bounded
+    // backoff so a cold ts.worker still yields a trail without user input
     console.debug(`[crumbs] navtree unavailable: ${err instanceof Error ? err.message : String(err)}`);
+    const attempt = trailRetry?.key === tab.key ? trailRetry.attempt : 0;
+    if (attempt < TRAIL_RETRY_DELAYS_MS.length) {
+      trailRetry = { key: tab.key, attempt: attempt + 1 };
+      clearTimeout(crumbTimer);
+      crumbTimer = window.setTimeout(() => void updateSymbolTrail(g, tab), TRAIL_RETRY_DELAYS_MS[attempt]);
+    }
     return;
   }
+  trailRetry = null;
   // async gap: the tab may have been switched away while the worker ran
   if (!tree || holder.dataset.key !== tab.key || currentMount?.key !== tab.key || !editor) return;
   const pos = editor.getPosition();
@@ -456,6 +499,76 @@ function jumpToNavItem(tab: EditorTab, item: NavItem) {
   const span = item.nameSpan ?? item.spans?.[0];
   if (!span) return;
   const p = tab.model.getPositionAt(span.start);
+  editor.setPosition(p);
+  editor.revealPositionInCenter(p);
+  editor.focus();
+}
+
+// ---------------------------------------------------------------- outline (side view)
+
+/** flattened navtree node for the outline panel */
+export interface OutlineNode {
+  text: string;
+  kind: string;
+  depth: number;
+  /** offset of the name (jump target) */
+  jump: number;
+  /** enclosing span for cursor highlight */
+  start: number;
+  end: number;
+}
+
+export interface OutlineSnapshot {
+  path: string;
+  /** true when the language has no symbol provider (honest empty state) */
+  unsupported: boolean;
+  nodes: OutlineNode[];
+}
+
+function flattenNav(items: NavItem[], depth: number, out: OutlineNode[]): void {
+  for (const it of items) {
+    const span = it.spans?.[0];
+    if (!span) continue;
+    out.push({
+      text: it.text,
+      kind: it.kind,
+      depth,
+      jump: it.nameSpan?.start ?? span.start,
+      start: span.start,
+      end: span.start + span.length,
+    });
+    if (it.childItems?.length) flattenNav(it.childItems, depth + 1, out);
+  }
+}
+
+/** Outline of the active tab; null = no file tab. Throws while the worker is cold. */
+export async function activeOutline(): Promise<OutlineSnapshot | null> {
+  const tab = activeTab();
+  if (!tab || tab.kind !== "file" || !tab.model) return null;
+  const lang = tab.model.getLanguageId();
+  if (lang !== "typescript" && lang !== "javascript") {
+    return { path: tab.path, unsupported: true, nodes: [] };
+  }
+  const tree = await fetchNavTree(tab);
+  const nodes: OutlineNode[] = [];
+  if (tree?.childItems) flattenNav(tree.childItems, 0, nodes);
+  return { path: tab.path, unsupported: false, nodes };
+}
+
+/** current cursor offset in the active file tab (outline highlight) */
+export function activeCursorOffset(): { path: string; offset: number } | null {
+  const tab = activeTab();
+  if (!tab || tab.kind !== "file" || !tab.model || !editor || currentMount?.key !== tab.key) return null;
+  const pos = editor.getPosition();
+  if (!pos) return null;
+  return { path: tab.path, offset: tab.model.getOffsetAt(pos) };
+}
+
+/** jump the active editor to a model offset (outline click) */
+export function jumpToOffset(offset: number): void {
+  const tab = activeTab();
+  if (!tab || tab.kind !== "file" || !tab.model || !editor || currentMount?.key !== tab.key) return;
+  const p = tab.model.getPositionAt(offset);
   editor.setPosition(p);
   editor.revealPositionInCenter(p);
   editor.focus();

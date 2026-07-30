@@ -24,6 +24,8 @@ interface OmpSession {
   startedAt: number;
   /** an abort was requested this turn (IDE button OR remote /stop via bridge) */
   abortRequested?: boolean;
+  /** stopReason of the last turn_end this run — omp's own verdict ("aborted", "stop", …) */
+  lastStopReason?: string;
 }
 
 const sessions = new Map<number, OmpSession>();
@@ -267,6 +269,7 @@ function handleFrame(s: OmpSession, frame: RpcFrame) {
     }
     case "agent_start":
       setStatus(s, { state: "thinking", model: s.status.model });
+      s.lastStopReason = undefined;
       emit(s, { kind: "agent-start" });
       break;
     case "turn_end": {
@@ -276,6 +279,7 @@ function handleFrame(s: OmpSession, frame: RpcFrame) {
       // API key …","provider":"<profile>","model":"<id>"}). The swap engine
       // listens for this event.
       const msg = frame.message && typeof frame.message === "object" ? (frame.message as Record<string, unknown>) : null;
+      if (msg && typeof msg.stopReason === "string") s.lastStopReason = msg.stopReason;
       if (msg && msg.stopReason === "error") {
         emit(s, {
           kind: "turn-error",
@@ -289,11 +293,17 @@ function handleFrame(s: OmpSession, frame: RpcFrame) {
     }
     case "agent_end": {
       setStatus(s, { state: "idle", model: s.status.model });
-      // Both interrupt origins (IDE header/stall card and Telegram /stop) go
-      // through sendCmd {type:"abort"}; the flag lets the renderer mark the
-      // turn regardless of where the interrupt came from.
-      emit(s, { kind: "agent-end", aborted: s.abortRequested === true });
+      // Interrupt marking prefers omp's own verdict: the final turn_end's
+      // stopReason ("aborted" vs "stop"/"toolUse"/…). The local abortRequested
+      // flag is only a fallback for runs that die before any turn_end — it
+      // races: a turn finishing naturally just after the user clicks
+      // Interrupt must NOT read as interrupted.
+      const aborted = s.lastStopReason !== undefined
+        ? s.lastStopReason === "aborted"
+        : s.abortRequested === true;
+      emit(s, { kind: "agent-end", aborted });
       s.abortRequested = false;
+      s.lastStopReason = undefined;
       // Refresh todos snapshot after each run.
       sendCmd(s, { type: "get_state" });
       break;

@@ -29,6 +29,11 @@ const windows = new Set<BrowserWindow>();
 // The default menu owns Ctrl+W/Ctrl+R accelerators; all keybindings live in the renderer registry.
 Menu.setApplicationMenu(null);
 
+// Test-harness mode (dev-only): OMP_IDE_TEST_WINDOW=1 keeps the window
+// always-on-top and never background-throttled, so CDP-driven runs don't lose
+// rAF-dependent behavior when the window is occluded. No effect otherwise.
+const TEST_WINDOW = process.env.OMP_IDE_TEST_WINDOW === "1";
+
 function createWindow(workspacePath?: string) {
   const win = new BrowserWindow({
     width: 1500,
@@ -38,13 +43,16 @@ function createWindow(workspacePath?: string) {
     frame: false,
     backgroundColor: "#05060a",
     show: false,
+    alwaysOnTop: TEST_WINDOW,
     webPreferences: {
       preload: join(__dirname, "../preload/index.js"),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false,
+      backgroundThrottling: !TEST_WINDOW,
     },
   });
+  if (TEST_WINDOW) win.setAlwaysOnTop(true, "screen-saver");
 
   windows.add(win);
   win.on("closed", () => windows.delete(win));
