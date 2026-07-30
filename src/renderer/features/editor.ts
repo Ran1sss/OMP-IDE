@@ -268,6 +268,9 @@ function renderEmpty(host: HTMLElement) {
 /** (Re)mount the appropriate widget into the group's host. */
 function mountActive(g: EditorGroup) {
   const tab = g.active ? g.tabs.find((t) => t.key === g.active) : null;
+  // every open/close/switch/collapse path funnels here — consumers (outline)
+  // re-read the active tab after the mount settles
+  queueMicrotask(() => emit("active-tab-changed", undefined));
 
   // Dispose current single-instance editors when they were mounted here.
   if (currentMount && currentMount.group === g.id) {
@@ -758,6 +761,16 @@ export async function closeActiveTab() {
     // Ctrl+W on a focused empty split group collapses it
     removeGroup(g);
   }
+}
+
+/** Ctrl+Tab / Ctrl+Shift+Tab: cycle the focused group's tabs in strip order. */
+export function cycleTab(delta: 1 | -1) {
+  const g = focusedGroupObj();
+  if (!g || g.tabs.length < 2 || !g.active) return;
+  const idx = g.tabs.findIndex((t) => t.key === g.active);
+  if (idx < 0) return;
+  const next = g.tabs[(idx + delta + g.tabs.length) % g.tabs.length];
+  activateTab(g, next.key);
 }
 
 // ---------------------------------------------------------------- save

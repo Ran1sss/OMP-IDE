@@ -26,6 +26,8 @@ export interface BusEvents {
   "reveal-in-tree": string;
   /** run a global search seeded with this query */
   "seed-search": string;
+  /** the active tab of any group changed (open/close/switch/collapse) */
+  "active-tab-changed": void;
 }
 
 type Handler<T> = (payload: T) => void;
