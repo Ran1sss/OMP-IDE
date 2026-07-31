@@ -193,6 +193,8 @@ export function dirtyCount(): number {
 // ---------------------------------------------------------------- rendering
 
 function renderTabs(g: EditorGroup) {
+  // rebuilding empties the strip, which clamps scrollLeft to 0 — preserve it
+  const scroll = g.tabsEl.scrollLeft;
   clear(g.tabsEl);
   for (const tab of g.tabs) {
     const closeBtn = el("span", {
@@ -258,6 +260,7 @@ function renderTabs(g: EditorGroup) {
     );
     g.tabsEl.append(node);
   }
+  g.tabsEl.scrollLeft = scroll;
 }
 
 function showTabMenu(g: EditorGroup, tab: EditorTab, x: number, y: number) {
@@ -739,6 +742,21 @@ function activateTab(g: EditorGroup, key: string) {
   noteMru(g, key);
   renderTabs(g);
   mountActive(g);
+  revealActiveTab(g);
+}
+
+/** EVO-37 debt: keyboard/programmatic activation (Ctrl+Tab, quick-open, MRU
+ * commit) can land on a tab clipped outside the visible strip — scroll it into
+ * view. Manual math instead of scrollIntoView so no ancestor scrolls. */
+function revealActiveTab(g: EditorGroup) {
+  const node = g.tabsEl.querySelector<HTMLElement>(".tab.active");
+  if (!node) return;
+  // offsetLeft is relative to the nearest positioned ancestor (not tabsEl) —
+  // measure via rects so the math holds regardless of positioning context.
+  const strip = g.tabsEl.getBoundingClientRect();
+  const r = node.getBoundingClientRect();
+  if (r.left < strip.left) g.tabsEl.scrollLeft += r.left - strip.left;
+  else if (r.right > strip.right) g.tabsEl.scrollLeft += r.right - strip.right;
 }
 
 /** move `key` to the front of the group's MRU list */
@@ -928,6 +946,9 @@ let ctrlHeld = false;
 window.addEventListener("keydown", (e) => { if (e.key === "Control") ctrlHeld = true; }, { capture: true });
 window.addEventListener("keyup", (e) => { if (e.key === "Control") ctrlHeld = false; }, { capture: true });
 window.addEventListener("blur", () => (ctrlHeld = false));
+// EVO-36 self-heal: OS-level chords can steal focus without a blur (e.g. Win+L,
+// virtual-desktop switches) — the tab going hidden is the other signal we get.
+document.addEventListener("visibilitychange", () => { if (document.hidden) ctrlHeld = false; });
 
 /**
  * Ctrl+Tab / Ctrl+Shift+Tab. Default: most-recently-used order with a hold-Ctrl

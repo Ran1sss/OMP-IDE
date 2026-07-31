@@ -163,9 +163,17 @@ app.append(titlebar, workbench, statusbar);
 let activeView: ViewId | "agent" | null = null;
 
 function switchView(id: ViewId | "agent") {
+  // EVO-38 (+ run-7 agent-branch fix): revealing ANY view while zen hides its
+  // panel would light the button over an invisible panel (silent no-op clicks)
+  // — exit zen first, before the agent branch too. A press that exits zen is a
+  // reveal, never a collapse-toggle: the user asked to SEE the view, even if it
+  // was the active one before zen hid it.
+  const exitedZen = state.zen;
+  if (state.zen) toggleZen();
+
   if (id === "agent") {
     // toggle behavior: clicking agent icon shows/hides right panel
-    if (activeView === "agent" && !agentpanel.classList.contains("collapsed")) {
+    if (!exitedZen && activeView === "agent" && !agentpanel.classList.contains("collapsed")) {
       agentpanel.classList.add("collapsed");
       viewButtons.get("agent")?.classList.remove("active");
       activeView = "explorer";
@@ -180,12 +188,6 @@ function switchView(id: ViewId | "agent") {
     return;
   }
 
-  // EVO-38: revealing a side view while zen hides the panel would light the
-  // button over an invisible panel (silent no-op clicks) — exit zen first.
-  // A press that exits zen is a reveal, never a collapse-toggle: the user asked
-  // to SEE the view, even if it was the active one before zen hid it.
-  const exitedZen = state.zen;
-  if (state.zen) toggleZen();
 
   // side panel views
   if (!exitedZen && activeView === id && !sidepanel.classList.contains("collapsed")) {
