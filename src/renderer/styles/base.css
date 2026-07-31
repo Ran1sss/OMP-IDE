@@ -256,12 +256,31 @@ textarea.input { resize: none; line-height: 1.5; }
 }
 .row.active { color: var(--text-hi); }
 
-/* pulse animation — color parameterized via --pulse-color */
+/* pulse animation — color parameterized via --pulse-color; one light sweep
+   rides every pulse (lab: tree rows). Re-pulsing a running row merges. */
 @keyframes row-pulse {
   0%   { background-color: var(--pulse-color); }
   100% { background-color: transparent; }
 }
-.row.pulse { animation: row-pulse 600ms var(--ease-swift) 1; }
+.row.pulse {
+  animation: row-pulse 600ms var(--ease-swift) 1;
+  position: relative;
+  overflow: hidden;
+}
+.row.pulse::after {
+  content: "";
+  position: absolute;
+  top: 0; bottom: 0; left: 0;
+  width: 40%;
+  background: linear-gradient(90deg, rgba(255, 255, 255, 0.05), transparent);
+  transform: translateX(-110%);
+  animation: row-sweep var(--t-row-sweep) var(--ease-swift) 1;
+  pointer-events: none;
+}
+@keyframes row-sweep {
+  from { transform: translateX(-110%); }
+  to   { transform: translateX(260%); }
+}
 
 /* ---------- dialogs ---------- */
 .overlay {
@@ -274,9 +293,14 @@ textarea.input { resize: none; line-height: 1.5; }
   background: rgba(5, 6, 10, 0.55);
   backdrop-filter: blur(6px);
   opacity: 0;
-  transition: opacity 160ms var(--ease-swift);
+  transition: opacity var(--t-fast) var(--ease-swift);
 }
-.overlay.visible { opacity: 1; }
+.overlay.visible { opacity: 1; animation: overlay-blur-in var(--t-med) var(--ease-swift) 1; }
+@keyframes overlay-blur-in {
+  from { backdrop-filter: blur(0px); }
+  60%  { backdrop-filter: blur(9px); }
+  to   { backdrop-filter: blur(6px); }
+}
 /* logically-closed overlays must be inert immediately: their removal rides a
    170ms setTimeout, which Chromium throttles in occluded windows — without
    this the invisible layer keeps eating clicks at z-1000 */
@@ -293,7 +317,7 @@ textarea.input { resize: none; line-height: 1.5; }
   box-shadow: var(--shadow-float);
   padding: 20px;
   transform: scale(0.98);
-  transition: transform 160ms var(--ease-swift);
+  transition: transform var(--t-fast) var(--ease-swift);
 }
 .overlay.visible .dialog { transform: scale(1); }
 
@@ -337,10 +361,23 @@ textarea.input { resize: none; line-height: 1.5; }
   box-shadow: var(--shadow-float);
   font-size: 12.5px;
   color: var(--text-hi);
-  animation: toast-in var(--t-med) var(--ease-swift);
+  position: relative;
+  overflow: hidden;
+  animation: card-in var(--t-card-in) var(--ease-swift);
   user-select: text;
 }
+/* one-time glow sweep on entry — the toast speaks card language now */
+.toast::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(105deg, transparent 30%, var(--power-15) 50%, transparent 70%);
+  transform: translateX(-120%);
+  animation: glow-sweep var(--t-glow-sweep) var(--ease-swift) forwards;
+  pointer-events: none;
+}
 .toast.crit { border-color: var(--crit-40); }
+.toast.crit::after { background: linear-gradient(105deg, transparent 30%, var(--crit-15) 50%, transparent 70%); }
 .toast.crit .toast-dot { background: var(--crit); box-shadow: 0 0 8px var(--crit-40); }
 .toast .toast-dot {
   width: 7px; height: 7px;
@@ -351,12 +388,13 @@ textarea.input { resize: none; line-height: 1.5; }
   flex-shrink: 0;
 }
 .toast .toast-close { margin-left: auto; }
+/* popover entrance (model-pop, ctx-menu, beacon-pop, notif-pop) */
 @keyframes toast-in {
   from { opacity: 0; transform: translateY(8px); }
   to   { opacity: 1; transform: translateY(0); }
 }
 /* repeated identical toast: pulse the existing one instead of stacking a twin */
-.toast.toast-pulse { animation: toast-pulse 240ms var(--ease-swift); }
+.toast.toast-pulse { animation: toast-pulse var(--t-med) var(--ease-swift); }
 @keyframes toast-pulse {
   0%   { transform: scale(1); }
   40%  { transform: scale(1.04); }
@@ -374,7 +412,7 @@ textarea.input { resize: none; line-height: 1.5; }
   border: 1px solid var(--line-bright);
   border-radius: var(--r-m);
   box-shadow: var(--shadow-float);
-  animation: toast-in 140ms var(--ease-swift);
+  animation: toast-in var(--t-fast) var(--ease-swift);
 }
 .ctx-menu .ctx-item {
   display: flex;
@@ -394,7 +432,10 @@ textarea.input { resize: none; line-height: 1.5; }
 .ctx-menu .ctx-sep { height: 1px; margin: 4px 6px; background: var(--line); }
 .ctx-menu .ctx-key { font-family: var(--font-mono); font-size: 10.5px; color: var(--text-low); }
 
-/* ---------- reactor orb (agent heartbeat) ---------- */
+/* ---------- reactor orb (agent heartbeat) ----------
+   4 lab states: idle = dim static · thinking = breath + expanding ring ·
+   tool = tight 550ms pulse with scale · error = crit with periodic shake.
+   Reasoning levels override --orb-breath (models.css). */
 .orb {
   position: relative;
   width: 10px;
@@ -404,16 +445,27 @@ textarea.input { resize: none; line-height: 1.5; }
   opacity: 0.35;
   flex-shrink: 0;
   transition: opacity var(--t-med) var(--ease-swift), background var(--t-med) var(--ease-swift);
+  --orb-breath: var(--t-orb-breath);
+}
+/* thinking ring — expands and fades once per breath */
+.orb::after {
+  content: "";
+  position: absolute;
+  inset: -4px;
+  border-radius: 50%;
+  border: 1px solid var(--energy-60);
+  opacity: 0;
 }
 .orb.idle { opacity: 0.35; }
-.orb.starting { opacity: 0.35; animation: orb-breathe 2s var(--ease-swift) infinite; }
+.orb.starting { opacity: 0.35; animation: orb-breathe var(--orb-breath) var(--ease-swift) infinite; }
 .orb.thinking {
   opacity: 1;
-  animation: orb-breathe 2s var(--ease-swift) infinite;
+  animation: orb-breathe var(--orb-breath) var(--ease-swift) infinite;
 }
+.orb.thinking::after { animation: orb-ring var(--orb-breath) var(--ease-swift) infinite; }
 .orb.tool {
   opacity: 1;
-  animation: orb-pulse 640ms var(--ease-swift) infinite;
+  animation: orb-pulse var(--t-orb-pulse) var(--ease-swift) infinite;
 }
 .orb.awaiting-input {
   opacity: 1;
@@ -423,16 +475,26 @@ textarea.input { resize: none; line-height: 1.5; }
 .orb.dead, .orb.unavailable {
   opacity: 1;
   background: var(--crit);
-  box-shadow: 0 0 8px var(--crit-40);
-  animation: none;
+  box-shadow: 0 0 12px var(--crit-40);
+  animation: orb-shake var(--t-orb-shake) var(--ease-swift) infinite;
 }
 @keyframes orb-breathe {
-  0%, 100% { box-shadow: 0 0 3px var(--energy-25); }
-  50%      { box-shadow: 0 0 14px var(--energy-40), 0 0 30px var(--energy-15); }
+  0%, 100% { box-shadow: 0 0 4px var(--energy-40); }
+  50%      { box-shadow: 0 0 14px var(--energy-85), 0 0 30px var(--energy-25); }
+}
+@keyframes orb-ring {
+  0%   { transform: scale(0.7); opacity: 0.7; }
+  100% { transform: scale(1.6); opacity: 0; }
 }
 @keyframes orb-pulse {
-  0%, 100% { box-shadow: 0 0 4px var(--energy-40); transform: scale(1); }
-  50%      { box-shadow: 0 0 16px var(--energy-40); transform: scale(1.25); }
+  0%, 100% { box-shadow: 0 0 5px var(--energy-60); transform: scale(1); }
+  50%      { box-shadow: 0 0 18px var(--energy-85); transform: scale(1.12); }
+}
+@keyframes orb-shake {
+  0%, 88%, 100% { transform: translateX(0); }
+  90%           { transform: translateX(-1.5px); }
+  93%           { transform: translateX(1.5px); }
+  96%           { transform: translateX(-1px); }
 }
 
 /* ---------- skeleton shimmer ---------- */

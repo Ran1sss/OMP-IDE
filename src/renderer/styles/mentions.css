@@ -63,7 +63,7 @@
   from { transform: scale(0.92); opacity: 0; }
   to   { transform: scale(1); opacity: 1; }
 }
-.mention-chip.land { animation: chip-land 240ms var(--ease-swift); }
+.mention-chip.land { animation: chip-land var(--t-med) var(--ease-swift); }
 
 /* dedup pulse: one 240ms --power glow */
 @keyframes chip-pulse {
@@ -71,7 +71,7 @@
   50%  { box-shadow: 0 0 10px var(--power-40); border-color: var(--power); }
   100% { box-shadow: 0 0 0 0 transparent; }
 }
-.mention-chip.pulse { animation: chip-pulse 240ms var(--ease-swift); }
+.mention-chip.pulse { animation: chip-pulse var(--t-med) var(--ease-swift); }
 
 /* ---------- drop-zone states on the composer ---------- */
 .agent-composer { position: relative; }

@@ -92,6 +92,11 @@ function elapsedTick() {
 const streamBuffers = new Map<number, { el: HTMLElement; text: string }>();
 /** tool cards by toolCallId */
 const toolCards = new Map<string, { card: HTMLElement; summary: HTMLElement; name: string }>();
+/** entrance stagger: cards arriving within one stagger window queue behind each other.
+ *  Mirrors --t-card-stagger in tokens.css (CSS animates, TS only schedules). */
+const CARD_STAGGER_MS = 350;
+let lastCardAt = 0;
+let cardChain = 0;
 
 const EXAMPLE_PROMPTS = [
   "Explain the structure of this project",
@@ -216,6 +221,7 @@ function renderWelcomeState() {
     el(
       "div",
       { class: "agent-blank" },
+      el("div", { class: "grain-layer" }),
       el("div", { class: "ab-orb" }),
       el("h3", { text: "OMP Agent" }),
       el("p", { text: "Converse with the agent about this workspace. It can read, edit and run code — you watch every action here." }),
@@ -391,7 +397,19 @@ function addToolCard(toolCallId: string, toolName: string, args: unknown, intent
     summary,
     spinner,
   );
-  const card = el("div", { class: "tool-card running" }, head, body);
+  const card = el("div", { class: "tool-card running enter" }, head, body);
+  // stagger burst arrivals: cards landing within one stagger window of the
+  // previous one chain behind it (lab timing); a later lone card starts fresh
+  const now = performance.now();
+  cardChain = now - lastCardAt < CARD_STAGGER_MS ? cardChain + 1 : 0;
+  lastCardAt = now;
+  if (cardChain > 0) card.style.setProperty("--card-delay", `${Math.min(cardChain, 4) * CARD_STAGGER_MS}ms`);
+  card.addEventListener("animationend", (e) => {
+    if (e.animationName !== "glow-sweep") return;
+    // entrance done: drop the class so scrollback/toggling never replays it
+    card.classList.remove("enter");
+    card.style.removeProperty("--card-delay");
+  });
   chatEl.append(card);
   toolCards.set(toolCallId, { card, summary, name: toolName });
   if (nearBottom()) scrollBottom();

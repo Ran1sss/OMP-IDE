@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, dialog, shell, Menu } from "electron";
+import { app, BrowserWindow, ipcMain, dialog, shell, Menu, powerMonitor } from "electron";
 import { join, dirname, resolve } from "node:path";
 import { existsSync, statSync } from "node:fs";
 import { registerFsHandlers, disposeWatchers } from "./fs-service";
@@ -99,6 +99,15 @@ app.whenReady().then(() => {
   ipcMain.on("win:openExternal", (_e, url: string) => {
     if (/^https?:\/\//.test(url)) shell.openExternal(url);
   });
+
+  // Ambient-motion pause discipline (Motion Upgrade §2): battery saver pauses
+  // the aurora layer. powerMonitor is main-process-only; renderers subscribe.
+  ipcMain.handle("win:isOnBattery", () => powerMonitor.isOnBatteryPower());
+  const pushBattery = (on: boolean) => {
+    for (const w of windows) w.webContents.send("win:battery", on);
+  };
+  powerMonitor.on("on-battery", () => pushBattery(true));
+  powerMonitor.on("on-ac", () => pushBattery(false));
   ipcMain.on("win:openWorkspaceWindow", (_e, path: string) => createWindow(path));
 
   // CLI: `OMP IDE.exe <folder>` opens that folder as the workspace.

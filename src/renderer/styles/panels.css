@@ -298,7 +298,7 @@
   box-shadow: var(--shadow-float);
   overflow: hidden;
   transform: scale(0.98);
-  transition: transform 160ms var(--ease-swift);
+  transition: transform var(--t-fast) var(--ease-swift);
 }
 .overlay.visible .palette { transform: scale(1); }
 .palette .pal-input {
@@ -387,14 +387,40 @@
 }
 .chat-agent.streaming { border-left-color: var(--energy); }
 
-/* tool cards */
+/* tool cards — entrance: translateY+fade + one diagonal glow sweep (lab).
+   .enter is added ONLY on live creation, never on scrollback re-render;
+   --card-delay staggers simultaneous arrivals (agent.ts). */
 .tool-card {
   align-self: stretch;
   background: var(--bg-1);
   border: 1px solid var(--line);
   border-radius: var(--r-m);
   overflow: hidden;
+  position: relative;
+  /* overflow:hidden zeroes the automatic flex minimum — without this the
+     chat column squashes cards flat once content exceeds the viewport */
+  flex-shrink: 0;
   transition: border-color var(--t-med) var(--ease-swift);
+}
+.tool-card.enter {
+  opacity: 0;
+  animation: card-in var(--t-card-in) var(--ease-swift) var(--card-delay, 0ms) forwards;
+}
+.tool-card.enter::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(105deg, transparent 30%, var(--energy-15) 50%, transparent 70%);
+  transform: translateX(-120%);
+  animation: glow-sweep var(--t-glow-sweep) var(--ease-swift) var(--card-delay, 0ms) forwards;
+  pointer-events: none;
+}
+@keyframes card-in {
+  from { opacity: 0; transform: translateY(14px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes glow-sweep {
+  to { transform: translateX(120%); }
 }
 .tool-card.running { border-color: var(--energy-40); }
 .tool-card.error { border-color: var(--crit-40); }
@@ -492,7 +518,7 @@
 .todo-strip .todo-item.active .ti-dot {
   background: var(--energy);
   box-shadow: 0 0 8px var(--energy-40);
-  animation: orb-breathe 2s var(--ease-swift) infinite;
+  animation: orb-breathe var(--t-orb-breath) var(--ease-swift) infinite;
 }
 .todo-strip .todo-item.done { color: var(--text-low); text-decoration: line-through; }
 .todo-strip .todo-item.done .ti-dot { background: var(--energy); opacity: 0.5; }
@@ -606,34 +632,8 @@
   background: var(--void);
   overflow: hidden;
 }
-.welcome::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='120' height='120' filter='url(%23n)' opacity='0.05'/%3E%3C/svg%3E");
-  animation: grain 900ms steps(3) infinite;
-  pointer-events: none;
-}
-@keyframes grain {
-  0% { transform: translate(0, 0); }
-  33% { transform: translate(-6px, 4px); }
-  66% { transform: translate(5px, -5px); }
-  100% { transform: translate(0, 0); }
-}
-.welcome::after {
-  content: "";
-  position: absolute;
-  top: 50%; left: 50%;
-  width: 700px; height: 700px;
-  transform: translate(-50%, -62%);
-  background: radial-gradient(circle, var(--energy-15) 0%, transparent 60%);
-  animation: welcome-glow 6s var(--ease-swift) infinite;
-  pointer-events: none;
-}
-@keyframes welcome-glow {
-  0%, 100% { opacity: 0.5; }
-  50% { opacity: 1; }
-}
+/* welcome ambient (aurora pair + grain + cursor glow) lives in motion.css —
+   gated on body.motion-full so "events"/"minimal" carry zero ambient motion */
 .welcome .wordmark {
   position: relative;
   z-index: 1;
@@ -833,7 +833,7 @@
   border: 1px solid var(--line-bright);
   border-radius: var(--r-m);
   box-shadow: var(--shadow-float);
-  animation: toast-in 140ms var(--ease-swift);
+  animation: toast-in var(--t-fast) var(--ease-swift);
 }
 .notif-pop .mp-section {
   font-size: 10px;

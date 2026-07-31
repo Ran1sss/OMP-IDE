@@ -42,12 +42,19 @@
   color: var(--flare);
   font-weight: 700;
   letter-spacing: 0.05em;
+  /* display:none → visible restarts this: one pulse each time the chip appears */
+  animation: pending-pulse var(--t-med) var(--ease-swift) 1;
+}
+@keyframes pending-pulse {
+  0%   { opacity: 0; transform: scale(0.9); }
+  60%  { opacity: 1; transform: scale(1.08); }
+  100% { opacity: 1; transform: scale(1); }
 }
 /* switch crossfade: old slides down-and-out, new slides in */
 @keyframes chip-out { from { transform: translateY(0); opacity: 1; } to { transform: translateY(10px); opacity: 0; } }
 @keyframes chip-in  { from { transform: translateY(-10px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
-.model-chip .mc-name.switch-out { animation: chip-out 120ms var(--ease-swift) forwards; }
-.model-chip .mc-name.switch-in  { animation: chip-in 120ms var(--ease-swift); }
+.model-chip .mc-name.switch-out { animation: chip-out var(--t-fast) var(--ease-swift) forwards; }
+.model-chip .mc-name.switch-in  { animation: chip-in var(--t-fast) var(--ease-swift); }
 
 /* ---------- switcher popover ---------- */
 .model-pop {
@@ -61,7 +68,7 @@
   border: 1px solid var(--line-bright);
   border-radius: var(--r-m);
   box-shadow: var(--shadow-float);
-  animation: toast-in 140ms var(--ease-swift);
+  animation: toast-in var(--t-fast) var(--ease-swift);
 }
 .model-pop .mp-section {
   font-size: 10px;
@@ -458,13 +465,14 @@
 }
 
 /* ---------- orb breathing reflects the level while reasoning ----------
-   high = slower, deeper breaths (the reactor working harder) */
-.orb.thinking.reasoning { animation-duration: 2s; }
-.orb.thinking.reasoning.level-low { animation-duration: 1.6s; }
-.orb.thinking.reasoning.level-med { animation-duration: 2.4s; }
-.orb.thinking.reasoning.level-high { animation-duration: 3.4s; }
-.orb.thinking.reasoning.level-xhigh { animation-duration: 4.4s; }
-.orb.thinking.reasoning.level-max { animation-duration: 5.6s; }
+   high = slower, deeper breaths (the reactor working harder).
+   Overrides --orb-breath so the expanding ring stays in phase with the body. */
+.orb.thinking.reasoning { --orb-breath: 2s; }
+.orb.thinking.reasoning.level-low { --orb-breath: 1.6s; }
+.orb.thinking.reasoning.level-med { --orb-breath: 2.4s; }
+.orb.thinking.reasoning.level-high { --orb-breath: 3.4s; }
+.orb.thinking.reasoning.level-xhigh { --orb-breath: 4.4s; }
+.orb.thinking.reasoning.level-max { --orb-breath: 5.6s; }
 
 /* ---------- auto-swap & balance (depleted = flare: wallet empty, key fine) ---------- */
 .mprov-card.depleted { border-color: var(--flare-40); }

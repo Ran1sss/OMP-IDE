@@ -1,0 +1,197 @@
+/* =========================================================================
+   Motion Upgrade A+D — mode gates + Aurora Ambient layer.
+
+   The root switch (core/motion.ts) reflects the effective mode as classes on
+   <body>: .motion-full / .motion-events / .motion-minimal, plus
+   .ambient-paused while full-mode ambient must freeze (blur / battery).
+   Everything here keys off those classes — no per-component conditionals.
+
+   Layer rules (spec §2, supersession):
+   - Ambient animation ONLY on: welcome screen, agent-panel empty state,
+     void-level chrome (grain only), large designed empty states.
+   - Ambient = teal + blue at low opacity. Gold/crit never ambient.
+   - Compositor properties only: transform / opacity / filter.
+   ========================================================================= */
+
+/* ---------------------------------------------------------------- ambient
+   Every ambient effect requires body.motion-full — "events" removes the layer
+   entirely (gone, not dimmed), "minimal" never had it. */
+
+/* -- aurora pair: welcome screen (full treatment) -- */
+.motion-full .welcome::before {
+  content: "";
+  position: absolute;
+  width: 65%;
+  height: 150%;
+  left: -10%;
+  top: -40%;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(85, 230, 193, 0.55), transparent 65%);
+  filter: blur(50px);
+  opacity: 0.32;
+  animation: aurora-a var(--t-aurora-a) var(--ease-swift) infinite alternate;
+  pointer-events: none;
+}
+.motion-full .welcome::after {
+  content: "";
+  position: absolute;
+  width: 65%;
+  height: 150%;
+  right: -10%;
+  bottom: -45%;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(94, 162, 255, 0.5), transparent 65%);
+  filter: blur(50px);
+  opacity: 0.3;
+  animation: aurora-b var(--t-aurora-b) var(--ease-swift) infinite alternate;
+  pointer-events: none;
+}
+@keyframes aurora-a {
+  from { transform: translate(0, 0) rotate(0); }
+  to   { transform: translate(22%, 14%) rotate(28deg); }
+}
+@keyframes aurora-b {
+  from { transform: translate(0, 0) rotate(0); }
+  to   { transform: translate(-20%, -12%) rotate(-24deg); }
+}
+
+/* -- film grain: one shared SVG asset (tokens.css --grain-url).
+      Positioning is unconditional (the div must never join flex flow in
+      events/minimal modes); the visual + animation are motion-full-gated. -- */
+.grain-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.motion-full .grain-layer {
+  background-image: var(--grain-url);
+  animation: grain-shift var(--t-grain) steps(4) infinite;
+}
+@keyframes grain-shift {
+  0%   { transform: translate(0, 0); }
+  25%  { transform: translate(-3%, 2%); }
+  50%  { transform: translate(2%, -3%); }
+  75%  { transform: translate(-2%, -2%); }
+  100% { transform: translate(0, 0); }
+}
+
+/* -- void-level chrome: grain ONLY (no aurora) on the title bar; the layer
+      overflows 4% on shift, so the bar clips it -- */
+.titlebar { overflow: hidden; position: relative; }
+.titlebar .grain-layer { inset: -4% 0; }
+
+/* -- cursor-reactive glow: welcome screen (position driven by welcome.ts) -- */
+.welcome .cursor-glow {
+  position: absolute;
+  width: 300px;
+  height: 300px;
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+  opacity: 0;
+  pointer-events: none;
+}
+.motion-full .welcome .cursor-glow {
+  background: radial-gradient(circle, rgba(94, 162, 255, 0.13), transparent 60%);
+  transition: opacity var(--t-slow) var(--ease-swift);
+}
+.motion-full .welcome:hover .cursor-glow { opacity: 1; }
+
+/* -- shimmer on hover: one light pass per hover entry, never looping.
+      Cards: recent workspaces, profile cards, bot cards. -- */
+.motion-full .ws-card,
+.motion-full .mprov-card,
+.motion-full .bot-card {
+  position: relative;
+  overflow: hidden;
+}
+.motion-full .ws-card::before,
+.motion-full .mprov-card::before,
+.motion-full .bot-card::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(115deg, transparent 35%, rgba(238, 241, 248, 0.06) 50%, transparent 65%);
+  transform: translateX(-130%);
+  transition: transform 0s;
+  pointer-events: none;
+}
+.motion-full .ws-card:hover::before,
+.motion-full .mprov-card:hover::before,
+.motion-full .bot-card:hover::before {
+  transform: translateX(130%);
+  transition: transform var(--t-shimmer) var(--ease-swift);
+}
+
+/* -- agent panel empty state: single slow aurora behind the capability card -- */
+.motion-full .agent-blank:not(.disabled-state) {
+  position: relative;
+  overflow: hidden;
+}
+.motion-full .agent-blank:not(.disabled-state)::before {
+  content: "";
+  position: absolute;
+  width: 85%;
+  height: 70%;
+  left: 0;
+  top: 10%;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(85, 230, 193, 0.35), transparent 65%);
+  filter: blur(50px);
+  opacity: 0.25;
+  animation: aurora-a var(--t-aurora-a) var(--ease-swift) infinite alternate;
+  pointer-events: none;
+}
+
+/* -- large designed empty states: single dim aurora -- */
+.motion-full .search-empty,
+.motion-full .cc-empty {
+  position: relative;
+  overflow: hidden;
+}
+.motion-full .search-empty::before,
+.motion-full .cc-empty::before {
+  content: "";
+  position: absolute;
+  width: 90%;
+  height: 80%;
+  left: 5%;
+  top: 10%;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(94, 162, 255, 0.3), transparent 65%);
+  filter: blur(50px);
+  opacity: 0.2;
+  animation: aurora-b var(--t-aurora-b) var(--ease-swift) infinite alternate;
+  pointer-events: none;
+}
+
+/* ---------------------------------------------------------------- pause
+   Blur / battery: ambient freezes in place (verifiable in DevTools). */
+.ambient-paused .welcome::before,
+.ambient-paused .welcome::after,
+.ambient-paused .grain-layer,
+.ambient-paused .agent-blank:not(.disabled-state)::before,
+.ambient-paused .search-empty::before,
+.ambient-paused .cc-empty::before {
+  animation-play-state: paused;
+}
+
+/* ---------------------------------------------------------------- minimal
+   No movement anywhere: state changes stay legible via color/opacity snaps.
+   Animations collapse to a single instant frame; transitions snap ≤80ms.
+   Monaco + xterm internals are exempt from the property clamp (they manage
+   their own rendering; clamping their transition-property breaks cursor/
+   selection painting), but their animations still collapse. */
+.motion-minimal *,
+.motion-minimal *::before,
+.motion-minimal *::after {
+  animation-duration: 0.01ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 80ms !important;
+}
+.motion-minimal :not(.monaco-editor *):not(.xterm *) {
+  transition-property: opacity, color, background-color, border-color, box-shadow !important;
+}
+/* orb states become static color changes — the base .orb transition covers it */
+.motion-minimal .orb { animation: none !important; }
+.motion-minimal .orb::after { display: none; }
+.motion-minimal .seam.live::after { animation: none !important; opacity: 1; }

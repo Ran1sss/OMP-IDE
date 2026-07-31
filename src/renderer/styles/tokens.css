@@ -24,12 +24,33 @@
 
   --r-s: 6px; --r-m: 10px; --r-l: 14px;
   --ease-swift: cubic-bezier(0.22, 1, 0.36, 1);
-  --t-fast: 120ms; --t-med: 240ms; --t-slow: 480ms;
+  --t-fast: 150ms; --t-med: 240ms; --t-slow: 480ms;
+
+  /* Motion Upgrade A+D — every lab timing is a named token, no magic numbers.
+     Event layer (Kinetic Reactor) */
+  --t-orb-pulse: 550ms;   /* tool-running tight pulse */
+  --t-orb-breath: 2200ms; /* thinking breath + expanding ring */
+  --t-orb-shake: 1800ms;  /* error-state periodic shake cycle */
+  --t-seam: 3500ms;       /* energy seam drift while agent works */
+  --t-row-sweep: 500ms;   /* tree pulse light sweep, one pass */
+  --t-card-in: 500ms;     /* tool-card / toast entrance */
+  --t-card-stagger: 350ms;/* entrance stagger when cards arrive together */
+  --t-glow-sweep: 1100ms; /* one-time diagonal glow across a new card */
+  /* Ambient layer (Aurora) — deep-background surfaces only */
+  --t-aurora-a: 11s;
+  --t-aurora-b: 13s;
+  --t-grain: 1200ms;      /* film-grain step shift */
+  --t-shimmer: 1000ms;    /* hover shimmer, one pass */
+
+  /* one shared SVG-noise asset — every grain surface reuses this, no copies */
+  --grain-url: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2'/%3E%3CfeColorMatrix values='0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0.04 0'/%3E%3C/filter%3E%3Crect width='120' height='120' filter='url(%23n)'/%3E%3C/svg%3E");
 
   /* Derived alpha channels (kept here so no component invents its own) */
   --energy-15: rgba(85, 230, 193, 0.15);
   --energy-25: rgba(85, 230, 193, 0.25);
   --energy-40: rgba(85, 230, 193, 0.4);
+  --energy-60: rgba(85, 230, 193, 0.6);
+  --energy-85: rgba(85, 230, 193, 0.85);
   --power-15:  rgba(94, 162, 255, 0.15);
   --power-25:  rgba(94, 162, 255, 0.25);
   --power-40:  rgba(94, 162, 255, 0.4);

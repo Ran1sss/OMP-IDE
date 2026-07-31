@@ -215,6 +215,9 @@ export interface Settings {
   breadcrumbs: "auto" | "on" | "off";
   /** Ctrl+Tab: mru = hold-Ctrl switcher overlay in most-recently-used order (strip fallback at 2 tabs), strip = EVO-29 strip-order cycling */
   tabSwitcher: "mru" | "strip";
+  /** motion system: full = events + ambient atmosphere, events = Kinetic Reactor only, minimal = color/opacity snaps ≤80ms.
+   *  OS prefers-reduced-motion makes "full" act as "events" (ambient MUST pause under reduced motion — spec §2). */
+  motion: "full" | "events" | "minimal";
 }
 
 /** one past conversation on disk (read-only history browser) */
@@ -786,6 +789,9 @@ export interface IdeApi {
     openWorkspaceWindow(path: string): void;
     /** absolute OS path for a DataTransfer File (Electron webUtils); null when unavailable */
     pathForFile(file: File): string | null;
+    /** ambient-motion pause discipline: true while the machine runs on battery */
+    isOnBattery(): Promise<boolean>;
+    onBattery(cb: (onBattery: boolean) => void): () => void;
   };
   store: {
     getSettings(): Promise<Settings>;
@@ -902,4 +908,5 @@ export const DEFAULT_SETTINGS: Settings = {
   stallSeconds: 20,
   breadcrumbs: "on",
   tabSwitcher: "mru",
+  motion: "full",
 };

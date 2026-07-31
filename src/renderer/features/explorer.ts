@@ -234,11 +234,22 @@ function renderNode(node: TreeNode, depth: number): HTMLElement {
   const pulse = pendingPulse.get(normPath(node.path));
   if (pulse) {
     pendingPulse.delete(normPath(node.path));
-    const color =
-      pulse === "agent" ? "var(--energy-25)" : pulse === "user" ? "var(--power-25)" : "var(--flare-15)";
-    row.style.setProperty("--pulse-color", color);
-    row.classList.add("pulse");
-    row.addEventListener("animationend", () => row.classList.remove("pulse"), { once: true });
+    // hidden tree (view switched away): consume WITHOUT animating — display:none
+    // never fires animationend, so the class would stick and replay on show
+    if (treeEl.offsetParent) {
+      const color =
+        pulse === "agent" ? "var(--energy-25)" : pulse === "user" ? "var(--power-25)" : "var(--flare-15)";
+      row.style.setProperty("--pulse-color", color);
+      row.classList.add("pulse");
+      // two animations ride the class (bg pulse + light sweep); remove only
+      // when the longer body pulse ends, not on the sweep's earlier end event
+      const onEnd = (e: AnimationEvent) => {
+        if (e.animationName !== "row-pulse") return;
+        row.classList.remove("pulse");
+        row.removeEventListener("animationend", onEnd);
+      };
+      row.addEventListener("animationend", onEnd);
+    }
   }
 
   if (node.isDir) {
@@ -470,7 +481,13 @@ function scheduleRerender() {
 // ---------------------------------------------------------------- pulse attribution
 
 function noteAgentTouch(path: string) {
-  agentTouched.set(normPath(path), Date.now());
+  const n = normPath(path);
+  agentTouched.set(n, Date.now());
+  // the watcher's fs event usually beats the tool-end carrying the edit:
+  // retro-upgrade a pulse that was mis-attributed in that gap
+  if (pendingPulse.has(n) && pendingPulse.get(n) !== "agent") pendingPulse.set(n, "agent");
+  const row = findNode(n)?.rowEl;
+  if (row?.classList.contains("pulse")) row.style.setProperty("--pulse-color", "var(--energy-25)");
 }
 
 function attributionFor(path: string): "agent" | "user" | "external" {

@@ -144,6 +144,8 @@ const api: IdeApi = {
         return null;
       }
     },
+    isOnBattery: (): Promise<boolean> => ipcRenderer.invoke("win:isOnBattery"),
+    onBattery: (cb) => on<[boolean]>("win:battery", cb),
   },
   store: {
     getSettings: (): Promise<Settings> => ipcRenderer.invoke("store:getSettings"),

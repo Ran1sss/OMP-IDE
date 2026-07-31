@@ -4,6 +4,7 @@ import { el } from "../core/dom";
 import { state } from "../core/state";
 import { toast } from "../core/ui";
 import { refreshCrumbs } from "./editor";
+import { applyMotion } from "../core/motion";
 import type { Settings } from "../../shared/types";
 
 let settingsClose: (() => void) | null = null;
@@ -38,14 +39,22 @@ export function openSettingsDialog(): void {
 
   const switcherSelect = el("select", { class: "input" }) as HTMLSelectElement;
   for (const [value, label] of [
-    ["mru", "Most recently used — hold-Ctrl switcher"],
-    ["strip", "Strip order — plain cycling"],
+    ["mru", "Most recently used (hold Ctrl for switcher)"],
+    ["strip", "Tab-strip order (plain cycle)"],
   ] as const) {
-    const opt = el("option", { text: label }) as HTMLOptionElement;
-    opt.value = value;
-    switcherSelect.append(opt);
+    switcherSelect.append(el("option", { value, text: label }));
   }
   switcherSelect.value = state.settings.tabSwitcher;
+
+  const motionSelect = el("select", { class: "input" }) as HTMLSelectElement;
+  for (const [value, label] of [
+    ["full", "Full — events + ambient atmosphere"],
+    ["events", "Events — Kinetic Reactor only, no ambient"],
+    ["minimal", "Minimal — color snaps, no movement"],
+  ] as const) {
+    motionSelect.append(el("option", { value, text: label }));
+  }
+  motionSelect.value = state.settings.motion;
 
   const save = async () => {
     const stallRaw = parseInt(stallInput.value, 10);
@@ -59,9 +68,11 @@ export function openSettingsDialog(): void {
       stallSeconds: Number.isNaN(stallRaw) ? 20 : stallRaw === 0 ? 0 : Math.max(5, stallRaw),
       breadcrumbs: crumbRaw === "auto" || crumbRaw === "off" ? crumbRaw : "on",
       tabSwitcher: switcherSelect.value === "strip" ? "strip" : "mru",
+      motion: motionSelect.value === "events" || motionSelect.value === "minimal" ? motionSelect.value : "full",
     };
     state.settings = await window.ide.store.setSettings(patch);
     applyAccent(state.settings.accent);
+    applyMotion(state.settings.motion);
     refreshCrumbs();
     toast("Settings saved");
     close();
@@ -90,6 +101,7 @@ export function openSettingsDialog(): void {
       field("Agent stall warning (seconds)", stallInput, "Nudge card when the model streams nothing. 0 = off, minimum 5. Default 20."),
       field("Breadcrumbs", crumbSelect, "Auto hides the bar when only the file path would show (non-TS/JS files)."),
       field("Ctrl+Tab order", switcherSelect, "MRU shows a switcher while Ctrl is held (2-tab groups always plain-cycle)."),
+      field("Motion", motionSelect, "Ambient auroras pause on blur/battery; OS reduced-motion demotes Full to Events."),
     ),
     el(
       "div",
@@ -120,4 +132,6 @@ export function applyAccent(hex: string): void {
   root.style.setProperty("--energy-15", `rgba(${r}, ${g}, ${b}, 0.15)`);
   root.style.setProperty("--energy-25", `rgba(${r}, ${g}, ${b}, 0.25)`);
   root.style.setProperty("--energy-40", `rgba(${r}, ${g}, ${b}, 0.4)`);
+  root.style.setProperty("--energy-60", `rgba(${r}, ${g}, ${b}, 0.6)`);
+  root.style.setProperty("--energy-85", `rgba(${r}, ${g}, ${b}, 0.85)`);
 }

@@ -429,7 +429,8 @@
 }
 .agentpanel.collapsed { display: none; }
 
-/* energy seam — the 1px live boundary */
+/* energy seam — the 1px live boundary; flows at lab tempo only while the
+   agent actively works (.live rides thinking/tool states), else static hairline */
 .seam {
   width: 1px;
   background: var(--line);
@@ -440,12 +441,14 @@
   content: "";
   position: absolute;
   inset: 0;
+  width: 2px;
+  margin-left: -0.5px;
   background: linear-gradient(
     180deg,
     transparent 0%,
-    var(--energy-15) 30%,
-    var(--energy-40) 50%,
-    var(--energy-15) 70%,
+    var(--energy-25) 30%,
+    var(--energy-60) 50%,
+    var(--energy-25) 70%,
     transparent 100%
   );
   background-size: 100% 300%;
@@ -454,7 +457,8 @@
 }
 .seam.live::after {
   opacity: 1;
-  animation: seam-drift 8s linear infinite;
+  animation: seam-drift var(--t-seam) linear infinite;
+  box-shadow: 0 0 12px var(--energy-25);
 }
 @keyframes seam-drift {
   from { background-position: 0 300%; }

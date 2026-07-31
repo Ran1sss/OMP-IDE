@@ -55,7 +55,7 @@
   border: 1px solid var(--line-bright);
   border-radius: var(--r-m);
   box-shadow: var(--shadow-float);
-  animation: toast-in 140ms var(--ease-swift);
+  animation: toast-in var(--t-fast) var(--ease-swift);
 }
 .beacon-pop .bp-row {
   display: flex;
@@ -226,7 +226,7 @@
   font-size: 12px;
   border-radius: var(--r-s);
   color: var(--text-mid);
-  animation: toast-in 240ms var(--ease-swift);
+  animation: toast-in var(--t-med) var(--ease-swift);
 }
 .bot-card .paired-row:hover { background: var(--bg-2); }
 .bot-card .paired-row .mono { color: var(--gold); font-size: 11.5px; }

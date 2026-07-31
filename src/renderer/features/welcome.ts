@@ -47,9 +47,14 @@ export async function showWelcome(container: HTMLElement, onOpen: (path: string)
     },
   });
 
+  // ambient layer (motion.css, gated on body.motion-full): shared grain +
+  // cursor-reactive glow. The aurora pair rides .welcome::before/::after.
+  const glow = el("div", { class: "cursor-glow" });
   const screen = el(
     "div",
     { class: "welcome" },
+    el("div", { class: "grain-layer" }),
+    glow,
     el("div", { class: "wordmark" }, "OMP ", el("span", { class: "wm-ide", text: "IDE" })),
     el("div", { class: "tagline", text: "reactor online · agent standing by" }),
     el(
@@ -59,6 +64,13 @@ export async function showWelcome(container: HTMLElement, onOpen: (path: string)
       recents.length ? grid : null,
     ),
   );
+  // position via transform-friendly left/top (compositor moves the gradient;
+  // the element itself never relayouts — it's absolutely positioned)
+  screen.addEventListener("mousemove", (e) => {
+    const r = screen.getBoundingClientRect();
+    glow.style.left = `${e.clientX - r.left}px`;
+    glow.style.top = `${e.clientY - r.top}px`;
+  });
   container.append(screen);
   return screen;
 }

@@ -6,6 +6,7 @@ import "./styles/tokens.css";
 import "./styles/base.css";
 import "./styles/layout.css";
 import "./styles/panels.css";
+import "./styles/motion.css";
 import "@xterm/xterm/css/xterm.css";
 import "./styles/monaco-extras.css";
 
@@ -25,6 +26,7 @@ import { initAgentPanel, startAgent, focusAgentInput } from "./features/agent";
 import { openSessionHistory } from "./features/history";
 import { initOutline, setOutlineVisible } from "./features/outline";
 import { openSettingsDialog, applyAccent } from "./features/settings";
+import { initMotion, applyMotion } from "./core/motion";
 import { showWelcome } from "./features/welcome";
 import { initRemote, createBeacon } from "./features/remote";
 import { initModels, createModelChip, openModelsDialog, switchModelViaPicker, assignRoleViaPicker, setSessionThinkingViaPicker } from "./features/models";
@@ -49,6 +51,7 @@ maxBtn.append(svgIcon(I.maximize));
 const titlebar = el(
   "div",
   { class: "titlebar" },
+  el("div", { class: "grain-layer" }),
   el("div", { class: "app-mark" }, el("span", { class: "mark-core" }), el("span", { text: "OMP IDE" })),
   wsNameEl,
   el("span", { class: "titlebar-spacer" }),
@@ -471,6 +474,8 @@ window.addEventListener("beforeunload", (e) => {
 async function boot() {
   state.settings = await window.ide.store.getSettings();
   applyAccent(state.settings.accent);
+  initMotion();
+  applyMotion(state.settings.motion);
 
   initEditorArea(editorArea);
   initExplorer(explorerView);
