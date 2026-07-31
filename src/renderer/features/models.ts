@@ -19,6 +19,7 @@ import type {
   ThinkingLevel,
 } from "../../shared/types";
 import { MODEL_ROLES, THINKING_LEVELS } from "../../shared/types";
+import { openApiTester, deepTestProfile, runTestAll } from "./tester";
 
 const PROVIDER_GLYPHS: Record<ProviderTemplateId, string> = {
   anthropic: `<path d="M6.2 3h3.6L14 13h-2.4l-.9-2.3H5.3L4.4 13H2L6.2 3zm.1 5.8h3.4L8 4.5 6.3 8.8z"/>`,
@@ -743,11 +744,15 @@ function renderDialog(): void {
       checkBtn.disabled = false;
     });
   });
+  const testerBtn = el("button", { class: "btn mh-checkbal", text: "API Tester", title: "Test any base URL + key with a real completion (free-form)", onClick: () => openApiTester() });
+  const testAllBtn = el("button", { class: "btn mh-checkbal", text: "Test all", title: "Deep-test every enabled profile (one minimal completion each)" }) as HTMLButtonElement;
   dialogHead.append(
     el(
       "div",
       { style: { display: "flex", alignItems: "center", gap: "10px" } },
       el("h2", { text: "Models", style: { margin: "0", flex: "1" } }),
+      testerBtn,
+      testAllBtn,
       checkBtn,
     ),
   );
@@ -789,6 +794,11 @@ function renderDialog(): void {
     el("span", { class: "mh-swap-label", text: "m" }),
   );
   dialogBody.append(swapRow);
+
+  // "Test all" results host — rows land individually as verdicts arrive
+  const testAllHost = el("div", { class: "ta-host", style: { display: "none" } });
+  dialogBody.append(testAllHost);
+  testAllBtn.addEventListener("click", () => runTestAll(testAllHost));
 
   for (const p of state.providers) dialogBody.append(providerCard(p));
   dialogBody.append(addProviderCard());
@@ -951,6 +961,12 @@ function providerCard(p: ProviderInfo): HTMLElement {
 
   // actions
   const valBtn = el("button", { class: "btn", text: "Test" }) as HTMLButtonElement;
+  const deepBtn = el("button", {
+    class: "btn",
+    text: "Deep test",
+    title: "Real completion probe: status, latency, token usage, model echo",
+    onClick: () => deepTestProfile(p),
+  });
   const valMsg = el("span", { class: "pc-valmsg" });
   valBtn.addEventListener("click", () => {
     valBtn.disabled = true;
@@ -1027,7 +1043,7 @@ function providerCard(p: ProviderInfo): HTMLElement {
       })
     : null;
 
-  card.append(el("div", { class: "pc-actions" }, valBtn, keyBtn, addModelBtn, dupBtn, valMsg, el("span", { style: { flex: "1" } }), delBtn));
+  card.append(el("div", { class: "pc-actions" }, valBtn, deepBtn, keyBtn, addModelBtn, dupBtn, valMsg, el("span", { style: { flex: "1" } }), delBtn));
 
   // balance endpoint row: configure + verify in one place (spec §3 P0)
   const epInput = el("input", {

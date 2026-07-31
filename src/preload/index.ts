@@ -32,6 +32,9 @@ import type {
   ModelEvent,
   ValidateResult,
   TeamRunState,
+  TesterResult,
+  TesterTarget,
+  TesterProtocol,
 } from "../shared/types";
 
 function on<T extends unknown[]>(channel: string, cb: (...args: T) => void): () => void {
@@ -117,6 +120,12 @@ const api: IdeApi = {
     clear: () => ipcRenderer.invoke("team:clear"),
     restartRun: () => ipcRenderer.invoke("team:restartRun"),
     onState: (cb) => on<[TeamRunState | null]>("team:state", cb),
+  },
+  tester: {
+    run: (target: TesterTarget): Promise<TesterResult> => ipcRenderer.invoke("tester:run", target),
+    runAll: () => ipcRenderer.invoke("tester:runAll"),
+    modelHints: (): Promise<Record<TesterProtocol, string[]>> => ipcRenderer.invoke("tester:modelHints"),
+    onResult: (cb) => on<[TesterResult]>("tester:result", cb),
   },
   dialog: {
     openFolder: (): Promise<string | null> => ipcRenderer.invoke("dialog:openFolder"),

@@ -54,6 +54,8 @@ import {
 } from "./omp-config";
 import { probeBalance } from "./balance";
 import { SwapEngine, notifyRemote } from "./swap-engine";
+import { registerTesterHost, registerTesterHandlers } from "./api-tester";
+import type { TesterProtocol, TesterVerdict } from "../../shared/types";
 
 class ModelsManager {
   private bridge: AgentBridge = getAgentBridge();
@@ -225,6 +227,45 @@ class ModelsManager {
           return { ok: false, error: "Active model doesn't support thinking." };
         const r = this.setSessionThinking(level as ThinkingLevel, origin);
         return { ok: true, pending: r.pending };
+      },
+    });
+
+    // API tester ↔ Models integration: profile resolution, TEST events,
+    // health updates through the same machinery as autoswap.
+    registerTesterHost({
+      resolveProfile: (name) => {
+        const info = this.allInfos().find((p) => p.id === name);
+        if (!info) return null;
+        const builtin = loadModelsStore().builtins.find((b) => b.name === name);
+        const profile = this.findProfile(name);
+        const key = builtin ? (getProviderKey(name) ?? "") : profile ? this.validationKey(profile) : "";
+        if (!key) return null;
+        // template → wire protocol; custom profiles are OpenAI-compatible by construction
+        const protocol: TesterProtocol =
+          info.template === "anthropic" ? "anthropic" :
+          info.template === "google" ? "gemini" : "openai-chat";
+        // starred model first, then card order
+        const models = [...info.models].sort((a, b) => Number(b.favorite) - Number(a.favorite)).map((m) => m.id);
+        return { baseUrl: info.baseUrl, key, protocol, models };
+      },
+      enabledProfiles: () => this.allInfos().filter((p) => p.enabled && p.hasKey && p.origin !== "readonly").map((p) => p.id),
+      logTest: (detail) => {
+        this.log("TEST", detail, "tester");
+      },
+      applyHealth: (name, verdict: TesterVerdict, detail) => {
+        if (verdict === "auth") this.health.set(name, { state: "auth-error", detail: detail.slice(0, 200) });
+        else if (verdict === "quota") {
+          // same writer as autoswap: depleted + async wallet confirmation
+          this.depleted.set(name, detail.slice(0, 200));
+          this.health.set(name, { state: "depleted", detail: detail.slice(0, 200) });
+          void this.checkBalance(name);
+        } else if (verdict === "rate-limited") this.health.set(name, { state: "rate-limited", detail: detail.slice(0, 200) });
+        else if (verdict === "ok" && this.health.get(name)?.state !== "depleted") {
+          this.health.set(name, { state: "ok" });
+        }
+        // network/mismatch/unparseable do not flip health — they describe the
+        // probe, not the credential (mismatch IS surfaced on the verdict card)
+        this.pushState();
       },
     });
   }
@@ -1099,9 +1140,11 @@ export function registerModelsHandlers(ipc: IpcMain): void {
   ipc.handle("models:setRoleSwapOptOut", async (_e, role: ModelRole, optOut: boolean) => m.setRoleSwapOptOut(role, optOut));
   ipc.handle("models:setBalancePollMinutes", async (_e, minutes: number) => m.setBalancePollMinutes(minutes));
   ipc.handle("models:clearDepleted", async (_e, id: string) => m.clearDepleted(id));
+  registerTesterHandlers(ipc);
 }
 
 export function disposeModels(): void {
+  registerTesterHost(null);
   manager?.dispose();
   manager = null;
 }

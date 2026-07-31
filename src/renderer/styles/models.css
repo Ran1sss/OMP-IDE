@@ -505,3 +505,154 @@
   from { box-shadow: inset 0 0 0 1px var(--flare); }
   to { box-shadow: inset 0 0 0 1px var(--power-40); }
 }
+
+/* ================================================== api tester
+   Infrastructure family: neutral + --power. Verdict chips reuse the
+   established state colors (ok=power, quota/rate=flare, failures=crit);
+   teal stays agent-only. Numbers ARE the interface: mono tabular. */
+
+.tester-dialog { width: 620px; max-width: 92vw; max-height: 86vh; display: flex; flex-direction: column; }
+.tester-dialog h2 { margin-top: 0; }
+.tf-form { display: flex; flex-direction: column; gap: 8px; }
+.tf-protos { display: flex; gap: 6px; }
+.tf-proto {
+  background: var(--bg-1);
+  border: 1px solid var(--line);
+  border-radius: var(--r-s);
+  color: var(--text-mid);
+  font: 500 11px var(--font-ui);
+  padding: 4px 10px;
+  cursor: pointer;
+  transition: all var(--t-fast) var(--ease-swift);
+}
+.tf-proto:hover { border-color: var(--line-bright); }
+.tf-proto.on { color: var(--power); border-color: var(--power-40); background: var(--power-15); }
+.tf-model-row { display: flex; align-items: center; gap: 8px; }
+.tf-model-row .input { flex: 1; }
+.tf-stream { display: flex; align-items: center; gap: 6px; }
+.tfs-label { font-size: 11px; color: var(--text-low); }
+.tf-hints { display: flex; flex-wrap: wrap; gap: 4px; }
+.tf-hint {
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: var(--r-s);
+  color: var(--text-low);
+  font-size: 10px;
+  padding: 1px 7px;
+  cursor: pointer;
+}
+.tf-hint:hover { color: var(--power); border-color: var(--power-40); }
+
+.tf-result { min-height: 120px; margin-top: 10px; overflow-y: auto; flex: 1; }
+.tf-flight { display: flex; align-items: center; gap: 8px; padding: 24px 8px; font-size: 12px; }
+.tf-empty { text-align: center; padding: 22px 20px; color: var(--text-mid); font-size: 12px; line-height: 1.5; }
+.tfe-glyphs { font-size: 16px; letter-spacing: 0.4em; color: var(--power); margin-bottom: 8px; }
+.tfe-privacy { color: var(--text-low); font-size: 11px; }
+
+/* ---------- verdict card: reads like an instrument ---------- */
+.tester-card {
+  border: 1px solid var(--line);
+  border-radius: var(--r-m);
+  background: var(--bg-1);
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.tc-status { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.tc-verdict {
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  border: 1px solid var(--line);
+  border-radius: var(--r-s);
+  padding: 2px 8px;
+}
+.tc-verdict.sm { font-size: 9px; padding: 1px 6px; }
+.tc-verdict.v-ok { color: var(--power); border-color: var(--power-40); background: var(--power-15); }
+.tc-verdict.v-flare { color: var(--flare); border-color: var(--flare-40); background: var(--flare-15); }
+.tc-verdict.v-crit { color: var(--crit); border-color: var(--crit-40); background: var(--crit-15); }
+.tcs-http { font-size: 11px; color: var(--text-mid); }
+.tcs-target { font-size: 12px; color: var(--text-hi); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 45%; }
+.tcs-proto { font-size: 10px; color: var(--text-low); margin-left: auto; }
+.tc-detail {
+  font-size: 11px;
+  color: var(--crit);
+  background: var(--crit-15);
+  border-radius: var(--r-s);
+  padding: 6px 8px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.tc-latency { display: flex; gap: 22px; align-items: baseline; font-variant-numeric: tabular-nums; }
+.tcl-item { display: flex; flex-direction: column; gap: 1px; }
+.tcl-value { font-size: 22px; color: var(--text-hi); }
+.tcl-value.sm { font-size: 15px; color: var(--text-mid); }
+.tcl-label { font-size: 10px; color: var(--text-low); }
+.tcl-hint.h-fast { color: var(--power); }
+.tcl-hint.h-ok { color: var(--text-mid); }
+.tcl-hint.h-slow { color: var(--flare); }
+
+.tc-usage { font-size: 12px; color: var(--text-hi); font-variant-numeric: tabular-nums; }
+.tcu-label { color: var(--text-low); font-size: 11px; }
+
+.tc-echo {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 2px 10px;
+  font-size: 12px;
+  border-top: 1px solid var(--line);
+  padding-top: 8px;
+}
+.tce-label { font-size: 10px; color: var(--text-low); align-self: center; }
+.tc-echo.mismatch { color: var(--crit); }
+.tc-echo.mismatch .mono { color: var(--crit); }
+
+.tc-raw-head { font-size: 11px; color: var(--text-low); cursor: pointer; user-select: none; }
+.tc-raw-head:hover { color: var(--text-mid); }
+.tc-raw-body {
+  background: var(--bg-0);
+  border: 1px solid var(--line);
+  border-radius: var(--r-s);
+  padding: 8px 10px;
+  max-height: 240px;
+  overflow: auto;
+  font: 11px var(--font-mono);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.tcr-title { color: var(--text-low); margin: 6px 0 4px; }
+.tj { color: var(--text-mid); }
+.tj-key { color: var(--text-mid); }
+.tj-str { color: var(--text-hi); }
+.tj-num { color: var(--power); }
+
+/* ---------- history strip ---------- */
+.tf-history { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 8px; align-items: center; }
+.tfh-label { font-size: 10px; color: var(--text-low); margin-right: 2px; }
+.tfh-item {
+  background: var(--bg-1);
+  border: 1px solid var(--line);
+  border-radius: var(--r-s);
+  font-size: 10px;
+  padding: 2px 7px;
+  cursor: pointer;
+  color: var(--text-mid);
+}
+.tfh-item:hover { border-color: var(--line-bright); }
+.tfh-item.v-ok { color: var(--power); }
+.tfh-item.v-flare { color: var(--flare); }
+.tfh-item.v-crit { color: var(--crit); }
+
+/* ---------- test all rows ---------- */
+.ta-host { display: flex; flex-direction: column; gap: 4px; margin: 4px 0 8px; }
+.ta-summary { font-size: 11px; color: var(--text-mid); }
+.ta-row { display: flex; align-items: center; gap: 8px; font-size: 12px; padding: 3px 0; }
+.ta-name { color: var(--text-hi); min-width: 120px; }
+.ta-model { font-size: 11px; }
+
+/* ---------- link-outs ---------- */
+.tf-links { font-size: 11px; }
+.tf-link { color: var(--text-low); cursor: pointer; text-decoration: none; }
+.tf-link:hover { color: var(--power); text-decoration: underline; }

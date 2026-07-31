@@ -28,6 +28,7 @@ import { openSettingsDialog, applyAccent } from "./features/settings";
 import { showWelcome } from "./features/welcome";
 import { initRemote, createBeacon } from "./features/remote";
 import { initModels, createModelChip, openModelsDialog, switchModelViaPicker, assignRoleViaPicker, setSessionThinkingViaPicker } from "./features/models";
+import { openApiTester } from "./features/tester";
 import { createNotificationBell } from "./features/notifications";
 import "./styles/remote.css";
 import "./styles/models.css";
@@ -399,6 +400,7 @@ reg("agent.history", "Agent: Session History…", () => openSessionHistory());
 reg("model.switch", "Model: Switch…", () => switchModelViaPicker("palette"));
 reg("model.assignRole", "Model: Assign Role…", () => assignRoleViaPicker("palette"));
 reg("model.settings", "Model: Open Settings", () => openModelsDialog());
+reg("model.apiTester", "Model: API Tester…", () => openApiTester());
 reg("thinking.session", "Thinking: Set Level… (this session)", () => setSessionThinkingViaPicker("palette"));
 reg("thinking.roleDefault", "Thinking: Set Role Default…", () => openModelsDialog());
 reg("explorer.reveal", "Reveal Active File in Explorer", () => {

@@ -516,7 +516,7 @@ export interface ModelsUsage {
 
 export interface ModelEvent {
   time: number;
-  kind: "switch" | "validate" | "health" | "role" | "provider" | "THINK" | "SWAP" | "balance";
+  kind: "switch" | "validate" | "health" | "role" | "provider" | "THINK" | "SWAP" | "balance" | "TEST";
   detail: string;
   origin: string;
 }
@@ -526,6 +526,73 @@ export interface ValidateResult {
   /** e.g. "OK — 47 models" or "401 Unauthorized — key rejected by api.anthropic.com" */
   message: string;
   models: ModelEntry[];
+}
+
+// ---------------------------------------------------------------- api tester
+
+/** wire protocol family for the API tester probe */
+export type TesterProtocol = "anthropic" | "openai-chat" | "openai-responses" | "gemini";
+export const TESTER_PROTOCOLS: TesterProtocol[] = ["anthropic", "openai-chat", "openai-responses", "gemini"];
+
+export type TesterVerdict =
+  | "ok"
+  | "auth"
+  | "quota"
+  | "rate-limited"
+  /** HTTP error outside the auth/quota/rate families — provider message shown verbatim */
+  | "http-error"
+  | "network"
+  | "model-mismatch"
+  | "unparseable";
+
+export interface TesterTarget {
+  /** profile name when testing a profile; null = free-form */
+  profileId: string | null;
+  baseUrl: string;
+  /** free-form only; profile targets resolve the key in main */
+  apiKey?: string;
+  protocol: TesterProtocol;
+  model: string;
+  streaming: boolean;
+  /** probe timeout; default 30 s */
+  timeoutSeconds?: number;
+}
+
+export interface TesterResult {
+  verdict: TesterVerdict;
+  /** null on non-HTTP failures (the layer that failed is in `detail`) */
+  httpStatus: number | null;
+  /** provider's error message verbatim, or the failed layer for network errors */
+  detail: string;
+  /** ms; null when the phase never happened */
+  ttfbMs: number | null;
+  totalMs: number | null;
+  /** streaming probes only */
+  firstTokenMs: number | null;
+  chunkCount: number | null;
+  /** from the response's usage block ONLY; null = not reported */
+  usage: { input: number | null; output: number | null; reasoning: number | null } | null;
+  modelRequested: string;
+  /** model id the response claims; null when the response carries none */
+  modelReturned: string | null;
+  /** request preview with the key REDACTED (never the full key) */
+  rawRequest: string;
+  /** verbatim response body, pretty-printed when JSON (truncated) */
+  rawResponse: string;
+  /** echo of the target minus the key (history restore + save-as-profile) */
+  target: { profileId: string | null; baseUrl: string; protocol: TesterProtocol; model: string; streaming: boolean };
+  at: number;
+}
+
+export interface TesterApi {
+  /** run one probe; free-form keys live only in this call and the session history */
+  run(target: TesterTarget): Promise<TesterResult>;
+  /** deep-test every enabled profile (serialized per base URL+key); results stream via onResult */
+  runAll(): Promise<void>;
+  /** known-model suggestions per protocol (matrix hints) */
+  modelHints(): Promise<Record<TesterProtocol, string[]>>;
+  /** verdicts land here as they finish (both run and runAll) */
+  onResult(cb: (r: TesterResult) => void): () => void;
 }
 
 // ---------------------------------------------------------------- team mode
@@ -706,6 +773,7 @@ export interface IdeApi {
     onUiRequest(cb: (req: OmpUiRequest) => void): () => void;
   };
   team: TeamApi;
+  tester: TesterApi;
   dialog: {
     openFolder(): Promise<string | null>;
   };
