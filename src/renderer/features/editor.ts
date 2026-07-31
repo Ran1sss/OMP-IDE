@@ -9,7 +9,7 @@ import { el, clear, svgIcon } from "../core/dom";
 import { I } from "../core/icons";
 import { on, emit } from "../core/bus";
 import { state, baseName, relPath, languageForPath, imageMime, normPath, noteRecentFile } from "../core/state";
-import { toast, confirmDialog, contextMenu } from "../core/ui";
+import { toast, confirmDialog, choiceDialog, contextMenu, errorText } from "../core/ui";
 import { setMentionDragData } from "./mentions";
 
 // ---------------------------------------------------------------- monaco env
@@ -800,7 +800,7 @@ export async function openFile(
       g.tabs.push(tab);
       activateTab(g, key);
     } catch (err) {
-      toast(`Cannot open ${baseName(key)}: ${err instanceof Error ? err.message : err}`, { crit: true });
+      toast(`Cannot open ${baseName(key)}: ${errorText(err)}`, { crit: true });
     }
     return;
   }
@@ -828,7 +828,7 @@ export async function openFile(
     revealPosition(pos);
     noteRecentFile(key);
   } catch (err) {
-    toast(`Cannot open ${baseName(key)}: ${err instanceof Error ? err.message : err}`, { crit: true });
+    toast(`Cannot open ${baseName(key)}: ${errorText(err)}`, { crit: true });
   }
 }
 
@@ -875,13 +875,16 @@ export async function closeTab(key: string, opts: { force?: boolean; group?: Edi
 
   // Shared across splits: only the LAST view closing can drop unsaved work.
   if (tab.dirty && !opts.force && viewCount(tab) === 1) {
-    const ok = await confirmDialog({
+    const choice = await choiceDialog({
       title: "Unsaved changes",
-      message: `"${tab.title}" has unsaved changes. Close without saving?`,
-      confirmLabel: "Close Anyway",
-      danger: true,
+      message: `"${tab.title}" has unsaved changes.`,
+      choices: [
+        { label: "Close Anyway", value: "discard", danger: true },
+        { label: "Save and Close", value: "save" },
+      ],
     });
-    if (!ok) return false;
+    if (choice === null) return false;
+    if (choice === "save" && !(await saveTab(tab))) return false; // save failed: keep the tab
   }
 
   const idx = group.tabs.indexOf(tab);
@@ -1127,7 +1130,7 @@ export async function saveTab(tab: EditorTab): Promise<boolean> {
     void refreshGitGutter(tab);
     return true;
   } catch (err) {
-    toast(`Save failed: ${err instanceof Error ? err.message : err}`, { crit: true });
+    toast(`Save failed: ${errorText(err)}`, { crit: true });
     return false;
   }
 }

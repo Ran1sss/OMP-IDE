@@ -7,7 +7,7 @@ import { el, clear, svgIcon } from "../core/dom";
 import { I } from "../core/icons";
 import { on, emit } from "../core/bus";
 import { state, baseName, dirName, joinPath, normPath, languageForPath } from "../core/state";
-import { toast, confirmDialog, selectDialog, formDialog } from "../core/ui";
+import { toast, confirmDialog, selectDialog, formDialog, errorText } from "../core/ui";
 import { updateGitIndex } from "./explorer";
 import type { GitStatus, GitFileStatus, GitCommitInfo } from "../../shared/types";
 
@@ -75,7 +75,7 @@ async function discardFile(f: GitFileStatus) {
     emit("git-refresh", undefined);
     toast(`Discarded changes to ${baseName(f.path)}`);
   } catch (err) {
-    toast(`Discard failed: ${err instanceof Error ? err.message : err}`, { crit: true });
+    toast(`Discard failed: ${errorText(err)}`, { crit: true });
   }
 }
 
@@ -151,7 +151,7 @@ export async function switchBranch() {
     emit("git-refresh", undefined);
     toast(`Switched to ${pick}`);
   } catch (err) {
-    toast(`Checkout failed: ${err instanceof Error ? err.message : err}`, { crit: true });
+    toast(`Checkout failed: ${errorText(err)}`, { crit: true });
   }
 }
 

@@ -84,6 +84,15 @@ export function toast(message: string, opts: { crit?: boolean } = {}): void {
       }, 5000);
   liveToasts.set(message, { node, timer });
 }
+/**
+ * User-facing text for a caught error. Electron's ipcRenderer.invoke wraps
+ * main-process throws as "Error invoking remote method 'chan': Error: <msg>" —
+ * plumbing the user must never see. Strip it; keep the real message.
+ */
+export function errorText(err: unknown): string {
+  const raw = err instanceof Error ? err.message : String(err);
+  return raw.replace(/^Error invoking remote method '[^']*':\s*(?:Error:\s*)?/, "");
+}
 
 // ---------------------------------------------------------------- dialogs
 
@@ -127,6 +136,54 @@ export function confirmDialog(opts: ConfirmOptions): Promise<boolean> {
   });
   document.body.append(overlay);
   (opts.focusConfirm && !opts.danger ? confirmBtn : cancelBtn).focus(); // destructive default: Cancel; synchronous — rAF throttles when occluded
+  requestAnimationFrame(() => overlay.classList.add("visible"));
+  return promise;
+}
+export interface ChoiceDialogOptions {
+  title: string;
+  message: string;
+  /** rendered left-to-right after Cancel; the LAST one is the primary action */
+  choices: { label: string; value: string; danger?: boolean }[];
+}
+
+/**
+ * Confirm with more than one affirmative action (e.g. Save and Close / Close
+ * Anyway). Resolves the chosen value, or null on Cancel/Escape/backdrop.
+ * Focus defaults to Cancel — same destructive-default rule as confirmDialog.
+ */
+export function choiceDialog(opts: ChoiceDialogOptions): Promise<string | null> {
+  const { promise, resolve } = Promise.withResolvers<string | null>();
+  const overlay = el("div", { class: "overlay centered" });
+  const done = (v: string | null) => {
+    overlay.classList.remove("visible");
+    setTimeout(() => overlay.remove(), 170);
+    resolve(v);
+  };
+  const cancelBtn = el("button", { class: "btn", text: "Cancel", onClick: () => done(null) });
+  const actions = el("div", { class: "dialog-actions" }, cancelBtn);
+  opts.choices.forEach((c, i) => {
+    actions.append(el("button", {
+      class: c.danger ? "btn btn-danger" : i === opts.choices.length - 1 ? "btn btn-primary" : "btn",
+      text: c.label,
+      onClick: () => done(c.value),
+    }));
+  });
+  const dialog = el(
+    "div",
+    { class: "dialog" },
+    el("h2", { text: opts.title }),
+    el("p", { text: opts.message }),
+    actions,
+  );
+  overlay.append(dialog);
+  overlay.addEventListener("mousedown", (e) => {
+    if (e.target === overlay) done(null);
+  });
+  overlay.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") done(null);
+  });
+  document.body.append(overlay);
+  cancelBtn.focus();
   requestAnimationFrame(() => overlay.classList.add("visible"));
   return promise;
 }

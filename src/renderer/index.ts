@@ -323,6 +323,8 @@ on("editor-status", (s) => {
   // null line/column = non-text tab (image/preview/diff) or empty group — no fake cursor
   sbCursor.textContent = s.line !== null && s.column !== null ? `Ln ${s.line}, Col ${s.column}` : "";
   sbLang.textContent = s.language === "plaintext" ? "Plain Text" : s.language;
+  // encoding is a text-buffer fact; an image or empty group has none
+  sbEnc.style.display = s.line !== null ? "" : "none";
 });
 
 onBranchChange((branch) => {

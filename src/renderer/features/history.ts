@@ -8,7 +8,7 @@
 import { marked } from "marked";
 import { el, clear } from "../core/dom";
 import { state } from "../core/state";
-import { toast } from "../core/ui";
+import { toast, errorText } from "../core/ui";
 import type { OmpSessionMeta, OmpSessionEntry } from "../../shared/types";
 
 let historyClose: (() => void) | null = null;
@@ -155,7 +155,7 @@ export function openSessionHistory(): void {
       entries = await window.ide.omp.readSession(s.file);
     } catch (err) {
       clear(body);
-      body.append(el("div", { class: "hd-empty crit", text: `Can't read session: ${err instanceof Error ? err.message : err}` }));
+      body.append(el("div", { class: "hd-empty crit", text: `Can't read session: ${errorText(err)}` }));
       backBtn.style.display = "";
       return;
     }

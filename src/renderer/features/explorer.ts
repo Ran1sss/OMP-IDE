@@ -6,7 +6,7 @@ import { el, clear, svgIcon } from "../core/dom";
 import { I } from "../core/icons";
 import { on, emit } from "../core/bus";
 import { state, baseName, dirName, normPath, joinPath, SEP } from "../core/state";
-import { toast, confirmDialog, contextMenu, inputDialog } from "../core/ui";
+import { toast, confirmDialog, contextMenu, inputDialog, errorText } from "../core/ui";
 import { setMentionDragData } from "./mentions";
 import type { DirEntry, GitFileStatus } from "../../shared/types";
 
@@ -284,7 +284,7 @@ async function loadChildren(node: TreeNode) {
     }));
     node.loaded = true;
   } catch (err) {
-    toast(`Cannot read ${node.name}: ${err instanceof Error ? err.message : err}`, { crit: true });
+    toast(`Cannot read ${node.name}: ${errorText(err)}`, { crit: true });
   }
 }
 
@@ -331,7 +331,7 @@ function startRename(node: TreeNode) {
       await window.ide.fs.rename(node.path, newPath);
       // watcher events will refresh the tree
     } catch (err) {
-      toast(`Rename failed: ${err instanceof Error ? err.message : err}`, { crit: true });
+      toast(`Rename failed: ${errorText(err)}`, { crit: true });
       rerenderVisible(rootNode!);
     }
   };
@@ -349,7 +349,7 @@ async function moveInto(srcPath: string, destDir: string) {
   try {
     await window.ide.fs.move(src, dest);
   } catch (err) {
-    toast(`Move failed: ${err instanceof Error ? err.message : err}`, { crit: true });
+    toast(`Move failed: ${errorText(err)}`, { crit: true });
   }
 }
 
@@ -401,7 +401,7 @@ async function createIn(dir: string, kind: "file" | "folder") {
       rerenderVisible(rootNode!);
     }
   } catch (err) {
-    toast(`${err instanceof Error ? err.message : err}`, { crit: true });
+    toast(`${errorText(err)}`, { crit: true });
   }
 }
 
@@ -416,7 +416,7 @@ async function deleteNode(node: TreeNode) {
   try {
     await window.ide.fs.trash(node.path);
   } catch (err) {
-    toast(`Delete failed: ${err instanceof Error ? err.message : err}`, { crit: true });
+    toast(`Delete failed: ${errorText(err)}`, { crit: true });
   }
 }
 
@@ -435,7 +435,7 @@ async function deleteSelected(node: TreeNode) {
     try {
       await window.ide.fs.trash(p);
     } catch (err) {
-      toast(`Delete failed: ${err instanceof Error ? err.message : err}`, { crit: true });
+      toast(`Delete failed: ${errorText(err)}`, { crit: true });
     }
   }
 }
