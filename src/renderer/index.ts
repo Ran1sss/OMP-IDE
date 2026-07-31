@@ -14,7 +14,7 @@ import { I } from "./core/icons";
 import { on, emit } from "./core/bus";
 import { state, baseName, normPath } from "./core/state";
 import { registerCommand, installKeybindings } from "./core/commands";
-import { toast, confirmDialog, installDialogEscape } from "./core/ui";
+import { toast, choiceDialog, installDialogEscape } from "./core/ui";
 import { initEditorArea, saveActive, saveAll, closeActiveTab, splitEditor, toggleWordWrap, zoomFont, goToLine, findInFile, hasDirtyTabs, relayoutEditors, activeFilePath, cycleTab, openMarkdownPreview, focusGroup } from "./features/editor";
 import { initExplorer, loadWorkspaceTree, collapseAll } from "./features/explorer";
 import { initTerminal, toggleTerminal, createTerminal } from "./features/terminal";
@@ -439,21 +439,27 @@ window.ide.fs.onChanged((changes) => {
   invalidateFileCache();
 });
 
+let forceClose = false; // set once the user resolves the dirty-close dialog
 window.addEventListener("beforeunload", (e) => {
-  if (hasDirtyTabs()) {
+  if (!forceClose && hasDirtyTabs()) {
     // Electron: sync confirm is unavailable; block and ask async, then force close.
     e.preventDefault();
     e.returnValue = false;
-    void confirmDialog({
+    void choiceDialog({
       title: "Unsaved changes",
-      message: "You have unsaved changes. Close anyway?",
-      confirmLabel: "Close Anyway",
-      danger: true,
-    }).then((ok) => {
-      if (ok) {
-        window.onbeforeunload = null;
-        window.ide.win.close();
+      message: "You have unsaved changes.",
+      choices: [
+        { label: "Close Anyway", value: "discard", danger: true },
+        { label: "Save and Close", value: "save" },
+      ],
+    }).then(async (choice) => {
+      if (choice === null) return; // Cancel aborts the close
+      if (choice === "save") {
+        await saveAll();
+        if (hasDirtyTabs()) return; // a save failed (toasted); keep the window
       }
+      forceClose = true; // addEventListener handlers survive `onbeforeunload = null`
+      window.ide.win.close();
     });
   }
 });

@@ -82,6 +82,8 @@ interface DiffPayload {
   original: string;
   modified: string;
   language?: string;
+  /** live diffs (SCM) re-snapshot on save / git-state change; frozen ones (agent edits) never do */
+  live?: boolean;
 }
 
 interface EditorTab {
@@ -822,6 +824,7 @@ export async function openFile(
         tab.dirty = nowDirty;
         renderGroupsHolding(tab);
       }
+      schedulePreviewLiveRefresh(tab.path);
     });
     g.tabs.push(tab);
     activateTab(g, key);
@@ -1112,6 +1115,63 @@ async function refreshMarkdownPreview(path: string) {
     }
   }
   for (const g of holders) if (g.mountedKey === key) mountActive(g);
+}
+
+// F5: live markdown preview — debounced buffer→preview refresh while typing.
+// Save/watcher refresh paths stay as-is; this only covers the dirty-buffer window.
+const previewLiveTimers = new Map<string, number>();
+function schedulePreviewLiveRefresh(path: string) {
+  if (!/\.(md|markdown)$/i.test(path)) return;
+  const key = `mdprev:${normPath(path)}`;
+  if (!groups.some((g) => g.tabs.some((t) => t.key === key))) return; // no preview open
+  clearTimeout(previewLiveTimers.get(path));
+  previewLiveTimers.set(path, window.setTimeout(() => {
+    previewLiveTimers.delete(path);
+    void refreshMarkdownPreview(path);
+  }, 300));
+}
+
+// F4: re-snapshot open live diff tabs (HEAD vs freshest content) after a save or
+// git-state change. Mounted views update models in place — scroll survives.
+async function refreshDiffTab(tab: EditorTab) {
+  if (!state.root || tab.kind !== "diff" || !tab.diff?.live) return;
+  const head = (await window.ide.git.headContent(state.root, relPath(tab.path))) ?? "";
+  let current = "";
+  const src = findTab(tab.path);
+  if (src?.tab.model) {
+    current = src.tab.model.getValue();
+  } else {
+    try {
+      const res = await window.ide.fs.readFile(tab.path);
+      current = res.binary ? "(binary)" : res.content;
+    } catch { /* deleted since open: diff against empty */ }
+  }
+  if (head === tab.diff.original && current === tab.diff.modified) return; // unrelated change: no churn
+  tab.diff = { ...tab.diff, original: head, modified: current };
+  for (const g of groups) {
+    if (g.mountedKey !== tab.key || !g.diffEditor) continue;
+    const m = g.diffEditor.getModel();
+    m?.original.setValue(head);
+    m?.modified.setValue(current);
+  }
+}
+
+function refreshDiffTabs(path?: string) {
+  const p = path ? normPath(path) : null;
+  const seen = new Set<EditorTab>(); // shared tab objects appear in several groups
+  for (const g of groups) {
+    for (const t of g.tabs) {
+      if (t.kind !== "diff" || !t.diff?.live || (p !== null && t.path !== p) || seen.has(t)) continue;
+      seen.add(t);
+      void refreshDiffTab(t);
+    }
+  }
+}
+
+let diffRefreshTimer = 0;
+function scheduleDiffRefresh() {
+  clearTimeout(diffRefreshTimer);
+  diffRefreshTimer = window.setTimeout(() => refreshDiffTabs(), 250);
 }
 
 // ---------------------------------------------------------------- save
@@ -1411,6 +1471,7 @@ export function initEditorArea(container: HTMLElement) {
   on("git-refresh", () => {
     const t = activeTab();
     if (t) void refreshGitGutter(t);
+    scheduleDiffRefresh();
   });
   on("fs-changed", (changes) => {
     for (const c of changes) {
@@ -1422,7 +1483,10 @@ export function initEditorArea(container: HTMLElement) {
       }
     }
   });
-  on("user-saved", (path) => void refreshMarkdownPreview(path));
+  on("user-saved", (path) => {
+    void refreshMarkdownPreview(path);
+    refreshDiffTabs(path);
+  });
 
   window.addEventListener("resize", relayoutEditors);
   // relayout after css transitions on panels

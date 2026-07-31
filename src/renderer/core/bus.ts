@@ -5,7 +5,7 @@ export interface BusEvents {
   /** open a file in the editor area */
   "open-file": { path: string; line?: number; column?: number; selectLength?: number; focus?: boolean };
   /** open a read-only side-by-side diff */
-  "open-diff": { title: string; path: string; original: string; modified: string; language?: string };
+  "open-diff": { title: string; path: string; original: string; modified: string; language?: string; live?: boolean };
   /** batched watcher events, already debounced in main */
   "fs-changed": FsChange[];
   /** something touched git state; panels should refresh */

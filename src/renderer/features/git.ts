@@ -58,6 +58,7 @@ async function openFileDiff(f: GitFileStatus, staged: boolean) {
     original: head,
     modified: current,
     language: languageForPath(f.path),
+    live: true, // SCM diffs re-snapshot on save/git changes; agent-edit diffs stay frozen
   });
 }
 
