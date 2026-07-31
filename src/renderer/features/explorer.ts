@@ -312,7 +312,12 @@ function startRename(node: TreeNode) {
     value: node.name,
     onKeyDown: (e) => {
       if (e.key === "Enter") void commit();
-      if (e.key === "Escape") rerenderVisible(rootNode!);
+      if (e.key === "Escape") {
+        // latch BEFORE rerendering: the rerender detaches the input, which fires
+        // blur -> commit() -> a second rerender racing the first (F6 removeChild flake)
+        done = true;
+        rerenderVisible(rootNode!);
+      }
       e.stopPropagation();
     },
     onBlur: () => void commit(),

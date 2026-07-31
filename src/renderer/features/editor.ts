@@ -263,6 +263,20 @@ function renderTabs(g: EditorGroup) {
     g.tabsEl.append(node);
   }
   g.tabsEl.scrollLeft = scroll;
+  updateWindowTitle();
+}
+
+/**
+ * EVO-45: the OS-level window title mirrors the active tab and unsaved state
+ * ("● app.js — playground — OMP IDE"). Alt-Tab/taskbar disambiguation plus the
+ * standard editor unsaved-work signal. Funnels: renderTabs (dirty flips,
+ * open/close) + emitActiveTabChanged (focus-only group switches).
+ */
+function updateWindowTitle() {
+  if (!state.root) return; // welcome screen owns the title until a workspace opens
+  const t = activeTab();
+  document.title =
+    `${dirtyCount() > 0 ? "● " : ""}${t ? `${t.title} — ` : ""}${baseName(state.root)} — OMP IDE`;
 }
 
 function showTabMenu(g: EditorGroup, tab: EditorTab, x: number, y: number) {
@@ -335,6 +349,7 @@ function emitActiveTabChanged() {
     const sig = g ? `${g.id}:${g.active ?? ""}` : "";
     if (sig === lastActiveSig) return;
     lastActiveSig = sig;
+    updateWindowTitle(); // focus-only group switches don't re-render strips
     emit("active-tab-changed", undefined);
   });
 }
