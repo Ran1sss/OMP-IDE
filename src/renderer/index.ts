@@ -35,11 +35,13 @@ import { openApiTester } from "./features/tester";
 import { createNotificationBell } from "./features/notifications";
 import { createWorkspaceChip, refreshWorkspaceChip, openWorkspaceDropdown } from "./features/workspace-switcher";
 import { teamRun } from "./features/team";
+import { initGuide, startTour } from "./features/guide";
 import "./styles/remote.css";
 import "./styles/models.css";
 import "./styles/mentions.css";
 import "./styles/team.css";
 import "./styles/enhance.css";
+import "./styles/guide.css";
 import type { LayoutState, OmpStatus } from "../shared/types";
 
 type ViewId = "explorer" | "search" | "git" | "remote" | "outline";
@@ -471,6 +473,7 @@ function registerAllCommands(): void {
     });
   }, "Ctrl+K Ctrl+O");
   reg("workbench.switchWorkspace", t("cmd.switchWorkspace"), () => void openWorkspaceDropdown());
+  reg("help.tour", t("cmd.tour"), () => startTour());
   reg("workbench.quickOpen", t("cmd.quickOpen"), () => void openPalette("files"), "Ctrl+P");
   reg("workbench.commandPalette", t("cmd.commandPalette"), () => void openPalette("commands"), "Ctrl+Shift+P");
   reg("workbench.toggleTerminal", t("cmd.toggleTerminal"), () => toggleTerminal(), "Ctrl+`");
@@ -652,6 +655,8 @@ async function boot() {
   } else {
     welcomeEl = await showWelcome(app, (path, opts) => void openWorkspace(path, opts));
   }
+  // onboarding tour: auto-start once per profile (after the shell settles)
+  initGuide();
 }
 
 void boot();

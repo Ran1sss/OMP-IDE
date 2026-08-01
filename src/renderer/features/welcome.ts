@@ -9,6 +9,7 @@ import { I } from "../core/icons";
 import { normPath } from "../core/state";
 import { t, relTime } from "../core/i18n";
 import { on } from "../core/bus";
+import { startTour } from "./guide";
 import type { RecentWorkspace } from "../../shared/types";
 
 export async function showWelcome(
@@ -141,12 +142,18 @@ export async function showWelcome(
   });
 
   // working column (right): opaque bg-0 panel
+  const tourLink = el("button", {
+    class: "wk-tour",
+    text: t("wk.tourLink"),
+    onClick: () => startTour(),
+  });
   const work = el(
     "div",
     { class: "wk-work" },
     el("div", { class: "wk-title", text: t("wk.workspaces") }),
     recents.length ? list : el("div", { class: "dimmer", text: t("wk.noRecents") }),
     openBtn,
+    tourLink,
   );
 
   const screen = el("div", { class: "welcome wk-split" }, hero, work);
@@ -164,6 +171,7 @@ export async function showWelcome(
     const dim = work.querySelector(".dimmer");
     if (dim) dim.textContent = t("wk.noRecents");
     openBtn.textContent = t("wk.openFolder");
+    tourLink.textContent = t("wk.tourLink");
     hero.querySelector(".tagline")!.textContent = t("wk.tagline");
     for (const b of list.querySelectorAll<HTMLElement>(".wsc-x")) b.title = t("wk.removeRecent");
     for (const s of list.querySelectorAll(".wk-resume span:last-child")) s.textContent = t("wk.resumeSession");

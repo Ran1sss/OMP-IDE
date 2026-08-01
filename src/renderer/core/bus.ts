@@ -18,8 +18,8 @@ export interface BusEvents {
   "user-saved": string;
   /** the agent edited a file (from tool timeline) */
   "agent-edited": string;
-  /** switch the side panel view */
-  "view-switch": "explorer" | "search" | "git" | "agent";
+  /** switch the side panel view (or toggle the agent panel) */
+  "view-switch": "explorer" | "search" | "outline" | "git" | "remote" | "agent";
   /** panel geometry changed; editors/terminals must relayout */
   "relayout": void;
   /** focus + reveal a path in the explorer */

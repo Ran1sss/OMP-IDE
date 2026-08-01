@@ -6,6 +6,7 @@ import { state } from "../core/state";
 import { toast } from "../core/ui";
 import { refreshCrumbs } from "./editor";
 import { applyMotion } from "../core/motion";
+import { startTour } from "./guide";
 import { t, applyLang, resolveLang } from "../core/i18n";
 import type { Settings } from "../../shared/types";
 
@@ -140,6 +141,18 @@ export function openSettingsDialog(initial?: SettingsDraft): void {
       field(t("set.motion"), motionSelect, t("set.motionHint")),
       field(t("set.transparency"), glassSelect, t("set.transparencyHint")),
       field(t("set.language"), langSelect, ""),
+      field(
+        t("set.tour"),
+        el("button", {
+          class: "btn",
+          text: t("set.tourBtn"),
+          onClick: () => {
+            close();
+            startTour();
+          },
+        }),
+        t("set.tourHint"),
+      ),
     ),
     el(
       "div",

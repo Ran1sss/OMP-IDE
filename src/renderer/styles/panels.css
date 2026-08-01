@@ -778,6 +778,20 @@
 }
 .wk-resume:hover, .wk-resume:focus-visible { background: var(--energy-15); outline: none; }
 .wk-resume .wk-resume-ico { font-size: 13px; }
+.wk-tour {
+  margin-top: 10px;
+  align-self: center;
+  font-family: var(--font-ui);
+  font-size: 11.5px;
+  color: var(--text-low);
+  background: none;
+  border: none;
+  cursor: pointer;
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
+  transition: color var(--t-fast) var(--ease-swift);
+}
+.wk-tour:hover { color: var(--energy); }
 .todo-strip .todo-item .ti-dot {
   width: 6px; height: 6px;
   border-radius: 50%;
