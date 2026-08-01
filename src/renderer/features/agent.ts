@@ -12,7 +12,7 @@ import { toast, confirmDialog, inputDialog, selectDialog } from "../core/ui";
 import type { OmpEvent, OmpStatus, OmpTodoPhase, OmpFileEdit, OmpUiRequest, RemoteVia } from "../../shared/types";
 import { switchModelViaPicker, mountUsageStrip, mountModelWarning, openModelsDialog, setSessionThinkingViaPicker, createBoostToggle } from "./models";
 import { openSessionHistory } from "./history";
-import { createTeamToggle, teamConsumesPrompt, initTeamSurface, stripTeamMarkers } from "./team";
+import { createTeamToggle, teamConsumesPrompt, initTeamSurface, stripTeamMarkers, teamRun } from "./team";
 import {
   initMentionInput,
   serializePrompt,
@@ -98,6 +98,98 @@ const CARD_STAGGER_MS = 350;
 let lastCardAt = 0;
 let cardChain = 0;
 
+// -------- «СЕЙЧАС» zone (redesign §6): pinned above the composer -----------
+// Display-only mirror of what the agent does RIGHT NOW: live tool + ticking
+// elapsed, active todo, session diffstat. Collapses to one line on idle.
+let nowEl: HTMLElement;
+let nowLive: { toolCallId: string; name: string; target: string; startedAt: number } | null = null;
+let nowTimer: number | undefined;
+let sessionAdd = 0;
+let sessionDel = 0;
+const sessionFiles = new Set<string>();
+let lastResultLine = "";
+let activeTodo: { content: string; done: number; total: number } | null = null;
+
+function fmtNowElapsed(startedAt: number): string {
+  const s = Math.floor((Date.now() - startedAt) / 1000);
+  return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`;
+}
+
+function renderNow(): void {
+  if (!nowEl) return;
+  const busy = status.state === "thinking" || status.state === "tool";
+  const team = teamRun();
+  const teamActive = team && (team.phase === "execute" || team.phase === "verify")
+    ? team.agents.filter((a) => a.kind === "worker" && a.state === "working")
+    : [];
+
+  clear(nowEl);
+  nowEl.classList.toggle("collapsed", !busy && teamActive.length === 0);
+
+  if (!busy && teamActive.length === 0) {
+    // idle: one line — free + last result summary
+    nowEl.append(
+      el("div", { class: "now-idle" },
+        el("span", { class: "now-dot" }),
+        el("span", { text: `агент свободен${lastResultLine ? ` · ${lastResultLine}` : ""}` }),
+      ),
+    );
+    if (nowTimer) { clearInterval(nowTimer); nowTimer = undefined; }
+    return;
+  }
+
+  if (teamActive.length > 0) {
+    // Team mode: one row per ACTIVE worker (glanceable mirror of the board)
+    for (const w of teamActive) {
+      const slice = team!.slices.find((s) => s.id === w.slice);
+      nowEl.append(
+        el("div", { class: "now-row" },
+          el("span", { class: "now-sigil mono", text: w.glyph }),
+          el("span", { class: "mono now-name", text: w.name }),
+          el("span", { class: "now-target", text: slice ? `${slice.id} · ${slice.title}` : (w.slice ?? "") }),
+          el("span", { class: "mono now-elapsed", text: fmtNowElapsed(w.sinceMs) }),
+        ),
+      );
+    }
+  } else {
+    // solo: the live tool call (or thinking) with ticking elapsed
+    const head = el("div", { class: `now-row${nowLive ? " streaming" : ""}` },
+      el("span", { class: "now-dot live" }),
+      nowLive
+        ? el("span", { class: "mono now-name", text: nowLive.name })
+        : el("span", { class: "mono now-name", text: "thinking" }),
+      nowLive ? el("span", { class: "now-target", text: nowLive.target }) : null,
+      el("span", { class: "mono now-elapsed", text: fmtNowElapsed(nowLive?.startedAt ?? turnStartedAt) }),
+    );
+    head.addEventListener("click", () => {
+      // click-to-scroll to the live tool card
+      if (nowLive) toolCards.get(nowLive.toolCallId)?.card.scrollIntoView({ block: "center", behavior: "smooth" });
+    });
+    nowEl.append(head);
+  }
+
+  // todo line: active item + counts
+  if (activeTodo) {
+    nowEl.append(
+      el("div", { class: "now-sub" },
+        el("span", { class: "now-todo", text: `▶ ${activeTodo.content}` }),
+        el("span", { class: "mono dimmer", text: `${activeTodo.done}/${activeTodo.total}` }),
+      ),
+    );
+  }
+  // session diffstat line
+  if (sessionFiles.size > 0) {
+    nowEl.append(
+      el("div", { class: "now-sub mono dimmer" },
+        el("span", { text: `${sessionFiles.size} file${sessionFiles.size > 1 ? "s" : ""}` }),
+        el("span", { class: "now-add", text: `+${sessionAdd}` }),
+        el("span", { class: "now-del", text: `−${sessionDel}` }),
+      ),
+    );
+  }
+  if (!nowTimer) nowTimer = window.setInterval(renderNow, 1000);
+}
+
 const EXAMPLE_PROMPTS = [
   "Explain the structure of this project",
   "Find and fix the failing test",
@@ -134,6 +226,7 @@ function applyStatus(s: OmpStatus) {
       stallCard = null;
     }
   }
+  renderNow();
 
   if (s.state === "unavailable") renderUnavailable(s.detail);
   else if (s.state === "dead") renderDead(s.detail);
@@ -540,17 +633,42 @@ function handleEvent(e: OmpEvent) {
       if (nearBottom()) scrollBottom();
       break;
     }
-    case "tool-start":
+    case "tool-start": {
       noteTurnData();
       addToolCard(e.toolCallId, e.toolName, e.args, e.intent);
+      // NOW zone: this call is what the agent does right now
+      const target = summarizeArgs(e.toolName, e.args, e.intent);
+      nowLive = { toolCallId: e.toolCallId, name: e.toolName, target, startedAt: Date.now() };
+      renderNow();
       break;
-    case "tool-end":
+    }
+    case "tool-end": {
       finishToolCard(e.toolCallId, e.isError, e.resultText, e.fileEdit);
+      if (e.fileEdit) {
+        const { add, del } = diffStat(e.fileEdit);
+        sessionAdd += add;
+        sessionDel += del;
+        sessionFiles.add(normPath(e.fileEdit.path));
+      }
+      if (nowLive?.toolCallId === e.toolCallId) nowLive = null;
+      renderNow();
       break;
-    case "todos":
+    }
+    case "todos": {
       noteTurnData();
       renderTodos(e.phases);
+      // NOW zone todo mirror: active item + done/total counts
+      let done = 0, total = 0;
+      let active: string | null = null;
+      for (const p of e.phases) for (const t of p.tasks) {
+        total++;
+        if (t.status === "completed") done++;
+        if (t.status === "in_progress" && !active) active = t.content;
+      }
+      activeTodo = total > 0 ? { content: active ?? "…", done, total } : null;
+      renderNow();
       break;
+    }
     case "agent-end":
       closeThinkBlock();
       for (const buf of streamBuffers.values()) buf.el.classList.remove("streaming");
@@ -559,6 +677,13 @@ function handleEvent(e: OmpEvent) {
       if (e.aborted) {
         chatEl.append(el("div", { class: "turn-marker", text: "· turn interrupted ·" }));
         if (nearBottom()) scrollBottom();
+      }
+      // NOW zone: idle summary line = last agent text, one line
+      {
+        const last = [...chatEl.querySelectorAll(".chat-agent")].pop()?.textContent ?? "";
+        lastResultLine = e.aborted ? "прервано" : last.trim().split("\n")[0].slice(0, 80);
+        nowLive = null;
+        renderNow();
       }
       break;
   }
@@ -638,6 +763,14 @@ async function newSession() {
   await window.ide.omp.newSession();
   renderWelcomeState();
   renderTodos([]);
+  // NOW zone session counters reset with the session
+  sessionAdd = 0;
+  sessionDel = 0;
+  sessionFiles.clear();
+  lastResultLine = "";
+  activeTodo = null;
+  nowLive = null;
+  renderNow();
   toast("New agent session");
 }
 
@@ -747,7 +880,9 @@ export function initAgentPanel(container: HTMLElement) {
     openFileAction: (path) => emit("open-file", { path }),
   });
 
-  panelEl.append(head, chatEl, todoEl, composerEl);
+  nowEl = el("div", { class: "agent-now collapsed" });
+  panelEl.append(head, chatEl, todoEl, nowEl, composerEl);
+  renderNow();
   mountUsageStrip(panelEl);
   mountModelWarning(panelEl);
   initTeamSurface({ panel: panelEl, input: promptInput });
@@ -760,5 +895,12 @@ export function initAgentPanel(container: HTMLElement) {
 
 export function focusAgentInput() {
   promptInput?.focus();
+}
+
+/** Omnibar «Agent» row: insert the query into the composer WITHOUT sending. */
+export function setAgentDraft(text: string) {
+  if (!promptInput) return;
+  promptInput.value = text;
+  promptInput.dispatchEvent(new Event("input", { bubbles: true }));
 }
 

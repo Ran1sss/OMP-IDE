@@ -41,7 +41,7 @@ function createWindow(workspacePath?: string) {
     minWidth: 1280,
     minHeight: 760,
     frame: false,
-    backgroundColor: "#05060a",
+    backgroundColor: "#0a0817",
     show: false,
     alwaysOnTop: TEST_WINDOW,
     webPreferences: {

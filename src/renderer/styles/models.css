@@ -63,8 +63,8 @@
   min-width: 300px;
   max-width: 380px;
   padding: 8px;
-  background: rgba(16, 19, 28, 0.94);
-  backdrop-filter: blur(16px);
+  background: var(--glass-bg);
+  backdrop-filter: blur(var(--glass-blur));
   border: 1px solid var(--line-bright);
   border-radius: var(--r-m);
   box-shadow: var(--shadow-float);
@@ -143,49 +143,69 @@
 }
 .models-dialog .dialog-actions { flex-shrink: 0; }
 
-/* role rail — visual anchor; wraps instead of squeezing */
-.role-rail {
+/* ---------- «Кокпит ролей» (redesign §8) ---------- */
+.ck-tab { padding: 4px 10px; font-size: 11.5px; }
+.ck-tab.on { color: var(--power); border-color: var(--power-40); background: var(--power-15); }
+.ck-rail {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: 10px;
+  margin-bottom: 12px;
 }
-.role-slot {
+.ck-slot {
   flex: 1 1 180px;
   min-width: 0;
-  padding: 8px 10px;
+  min-height: 108px;
+  padding: 10px 12px;
   background: var(--bg-1);
   border: 1px solid var(--line);
   border-radius: var(--r-m);
   cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
   transition: border-color var(--t-fast) var(--ease-swift), background var(--t-fast) var(--ease-swift);
 }
-.role-slot:hover { border-color: var(--power-40); background: var(--bg-2); }
-.role-slot .rs-role {
+.ck-slot:hover, .ck-slot:focus-visible { border-color: var(--power-40); background: var(--bg-2); outline: none; }
+.ck-slot.empty { border-style: dashed; align-items: center; justify-content: center; }
+.ck-slot.drop-hot { border-color: var(--power); box-shadow: 0 0 0 1px var(--power-40); background: var(--power-15); }
+.ck-slot.shake { animation: ck-shake var(--t-med) var(--ease-swift) 1; }
+@keyframes ck-shake {
+  0%, 100% { transform: translateX(0); }
+  25% { transform: translateX(-4px); }
+  50% { transform: translateX(4px); }
+  75% { transform: translateX(-2px); }
+}
+.ck-slot .ck-role {
   font-family: var(--font-mono);
   font-size: 10px;
   font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
+  letter-spacing: 0.1em;
   color: var(--power);
 }
-/* provider abbreviates first; the model id itself NEVER ellipsizes */
-.role-slot .rs-prov {
-  font-size: 10px;
-  color: var(--text-low);
-  margin-top: 3px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+/* the model id NEVER ellipsizes: it wraps; the profile name abbreviates */
+.ck-slot .ck-model { font-size: 12.5px; color: var(--text-hi); word-break: break-all; font-weight: 600; }
+.ck-slot .ck-prov { font-size: 10.5px; color: var(--text-low); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ck-slot .ck-meta { display: flex; align-items: center; gap: 7px; margin-top: 2px; }
+.ck-slot .ck-bal { font-size: 10px; color: var(--text-mid); }
+.ck-slot .ck-hint { color: var(--text-low); font-size: 11.5px; font-style: italic; }
+.ck-favs { display: flex; flex-direction: column; gap: 6px; }
+.ck-filter { max-width: 260px; font-size: 11px; padding: 3px 8px; }
+.ck-chip-row { display: flex; flex-wrap: wrap; gap: 6px; }
+.ck-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  font-size: 11px;
+  background: var(--bg-1);
+  border: 1px solid var(--line);
+  border-radius: var(--r-s);
+  cursor: grab;
+  transition: border-color var(--t-fast) var(--ease-swift);
 }
-.role-slot .rs-model {
-  font-family: var(--font-mono);
-  font-size: 11.5px;
-  color: var(--text-hi);
-  margin-top: 1px;
-  word-break: break-all; /* wrap, never clip */
-}
-.role-slot .rs-model.unset { color: var(--text-low); font-style: italic; word-break: normal; }
-.role-slot.assign-target { border-color: var(--power); box-shadow: 0 0 0 1px var(--power-40); }
+.ck-chip:hover { border-color: var(--power-40); }
+.ck-chip:active { cursor: grabbing; }
 
 /* type-to-filter input pinned above model tables */
 .model-filter {
@@ -219,7 +239,7 @@
   border-radius: 7px;
   flex-shrink: 0;
 }
-.mprov-card .pc-health.ok { color: var(--power); background: var(--power-15); }
+.mprov-card .pc-health.ok { color: var(--ok-system); background: var(--ok-system-15); }
 .mprov-card .pc-health.unknown { color: var(--text-low); background: var(--bg-2); }
 .mprov-card .pc-health.auth-error, .mprov-card .pc-health.network-error, .mprov-card .pc-health.rate-limited { color: var(--crit); background: var(--crit-15); }
 .mprov-card .pc-detail { font-family: var(--font-mono); font-size: 10.5px; color: var(--crit); margin-top: 4px; user-select: text; }
@@ -250,7 +270,7 @@
   flex-shrink: 0;
   display: inline-block;
 }
-.pc-dot.ok { background: var(--power); }
+.pc-dot.ok { background: var(--ok-system); }
 .pc-dot.auth-error, .pc-dot.network-error, .pc-dot.rate-limited { background: var(--crit); }
 /* switcher group headers: profile context in UI font, sticky on the depth ladder */
 .mp-groups { max-height: 300px; overflow-y: auto; }
@@ -432,7 +452,7 @@
 /* ---------- reasoning block in chat (∴) ---------- */
 .think-block {
   align-self: stretch;
-  border-left: 2px solid rgba(85, 230, 193, 0.25); /* dimmed teal */
+  border-left: 2px solid var(--energy-25); /* dimmed cyan */
   padding-left: 10px;
   margin: 2px 0;
 }
@@ -445,7 +465,7 @@
   transition: color var(--t-fast) var(--ease-swift);
 }
 .think-block .think-head:hover { color: var(--text-hi); }
-.think-block.streaming .think-head { color: rgba(85, 230, 193, 0.6); }
+.think-block.streaming .think-head { color: var(--energy-60); }
 .think-block .think-body {
   font-family: var(--font-mono);
   font-size: 12px;
@@ -577,7 +597,7 @@
   padding: 2px 8px;
 }
 .tc-verdict.sm { font-size: 9px; padding: 1px 6px; }
-.tc-verdict.v-ok { color: var(--power); border-color: var(--power-40); background: var(--power-15); }
+.tc-verdict.v-ok { color: var(--ok-system); border-color: var(--ok-system-15); background: var(--ok-system-15); }
 .tc-verdict.v-flare { color: var(--flare); border-color: var(--flare-40); background: var(--flare-15); }
 .tc-verdict.v-crit { color: var(--crit); border-color: var(--crit-40); background: var(--crit-15); }
 .tcs-http { font-size: 11px; color: var(--text-mid); }
@@ -649,7 +669,7 @@
   color: var(--text-mid);
 }
 .tfh-item:hover { border-color: var(--line-bright); }
-.tfh-item.v-ok { color: var(--power); }
+.tfh-item.v-ok { color: var(--ok-system); }
 .tfh-item.v-flare { color: var(--flare); }
 .tfh-item.v-crit { color: var(--crit); }
 

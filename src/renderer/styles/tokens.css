@@ -1,30 +1,42 @@
 :root {
-  /* Depth ladder — backgrounds, darkest = deepest layer */
-  --void:        #05060a;  /* app background, title bar */
-  --bg-0:        #0a0c12;  /* panels */
-  --bg-1:        #10131c;  /* cards, inputs, editor gutter zone */
-  --bg-2:        #171b27;  /* hover surfaces, active tab */
-  --line:        #232837;  /* hairline borders */
-  --line-bright: #323950;  /* focused/active borders */
+  /* ============ VELVET NEBULA (omp-ide-nebula-prompt.md) ============ */
+  /* Depth ladder — indigo blacks, darkest = deepest layer */
+  --void:        #0a0817;  /* app background, title bar */
+  --bg-0:        #110d24;  /* panels */
+  --bg-1:        #181231;  /* cards, inputs, editor gutter zone */
+  --bg-2:        #211a41;  /* hover surfaces, active tab */
+  --line:        #2c2354;  /* hairline borders */
+  --line-bright: #3b3170;  /* focused/active borders */
 
   /* Text */
-  --text-hi:     #eef1f8;
-  --text-mid:    #9aa3b8;
-  --text-low:    #5c6478;
+  --text-hi:     #f0edff;
+  --text-mid:    #9d95c9;
+  --text-low:    #645d8e;
 
-  /* Energy palette — light = meaning */
-  --energy:      #55e6c1;  /* AGENT */
-  --power:       #5ea2ff;  /* USER/SYSTEM primary */
-  --flare:       #ff9e5e;  /* modified / dirty / warning */
-  --crit:        #ff5e7a;  /* errors, deletions, destructive confirms */
-  --gold:        #e8c574;  /* git branch, special states */
+  /* Actors & semantics — token NAMES survive the remap (whole codebase migrates by value) */
+  --energy:      #34e0f7;  /* AGENT (cyan) */
+  --power:       #e26bf5;  /* USER (magenta) */
+  --flare:       #fbbf24;  /* modified / dirty / warning */
+  --crit:        #fb4d6d;  /* errors, deletions, destructive confirms */
+  --gold:        #f0c674;  /* remote control (unchanged semantics) */
+  /* System facts (validation ok, health ok, tester ok) — NOT an actor color */
+  --ok-system:   #8bffb0;
+  --ok-system-15: rgba(139, 255, 176, 0.15);
+  /* Team "done" — dimmed cyan, distinct from working; done is not a user act */
+  --energy-dim:  #2aa7b8;
 
-  --font-ui:     "Manrope", system-ui, sans-serif;
+  --font-ui:     "Sora", "Manrope", system-ui, sans-serif;
   --font-mono:   "JetBrains Mono", "Cascadia Code", monospace;
 
-  --r-s: 6px; --r-m: 10px; --r-l: 14px;
+  --r-s: 8px; --r-m: 12px; --r-l: 16px;
   --ease-swift: cubic-bezier(0.22, 1, 0.36, 1);
   --t-fast: 150ms; --t-med: 240ms; --t-slow: 480ms;
+
+  /* Glass — exhaustive-list discipline lives in the components; values live here */
+  --glass-bg:    rgba(24, 18, 49, 0.72);
+  --glass-blur:  16px;
+  --glass-panel: rgba(17, 13, 36, 0.55);
+  --glass-panel-blur: 8px;
 
   /* Motion Upgrade A+D — every lab timing is a named token, no magic numbers.
      Event layer (Kinetic Reactor) */
@@ -36,7 +48,7 @@
   --t-card-in: 500ms;     /* tool-card / toast entrance */
   --t-card-stagger: 350ms;/* entrance stagger when cards arrive together */
   --t-glow-sweep: 1100ms; /* one-time diagonal glow across a new card */
-  /* Ambient layer (Aurora) — deep-background surfaces only */
+  /* Ambient layer (Nebula) — deep-background surfaces only */
   --t-aurora-a: 11s;
   --t-aurora-b: 13s;
   --t-grain: 1200ms;      /* film-grain step shift */
@@ -46,17 +58,21 @@
   --grain-url: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2'/%3E%3CfeColorMatrix values='0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0.04 0'/%3E%3C/filter%3E%3Crect width='120' height='120' filter='url(%23n)'/%3E%3C/svg%3E");
 
   /* Derived alpha channels (kept here so no component invents its own) */
-  --energy-15: rgba(85, 230, 193, 0.15);
-  --energy-25: rgba(85, 230, 193, 0.25);
-  --energy-40: rgba(85, 230, 193, 0.4);
-  --energy-60: rgba(85, 230, 193, 0.6);
-  --energy-85: rgba(85, 230, 193, 0.85);
-  --power-15:  rgba(94, 162, 255, 0.15);
-  --power-25:  rgba(94, 162, 255, 0.25);
-  --power-40:  rgba(94, 162, 255, 0.4);
-  --flare-15:  rgba(255, 158, 94, 0.15);
-  --flare-40:  rgba(255, 158, 94, 0.4);
-  --crit-15:   rgba(255, 94, 122, 0.15);
-  --crit-40:   rgba(255, 94, 122, 0.4);
+  --energy-15: rgba(52, 224, 247, 0.15);
+  --energy-25: rgba(52, 224, 247, 0.25);
+  --energy-40: rgba(52, 224, 247, 0.4);
+  --energy-60: rgba(52, 224, 247, 0.6);
+  --energy-85: rgba(52, 224, 247, 0.85);
+  --power-15:  rgba(226, 107, 245, 0.15);
+  --power-25:  rgba(226, 107, 245, 0.25);
+  --power-40:  rgba(226, 107, 245, 0.4);
+  --flare-15:  rgba(251, 191, 36, 0.15);
+  --flare-40:  rgba(251, 191, 36, 0.4);
+  --crit-15:   rgba(251, 77, 109, 0.15);
+  --crit-40:   rgba(251, 77, 109, 0.4);
   --shadow-float: 0 12px 40px rgba(0, 0, 0, 0.55), 0 2px 8px rgba(0, 0, 0, 0.4);
+
+  /* Nebula ambient pair (cyan + magenta — the two actors' light diffused) */
+  --nebula-a: rgba(52, 224, 247, 0.5);
+  --nebula-b: rgba(226, 107, 245, 0.45);
 }

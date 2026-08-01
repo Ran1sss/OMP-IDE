@@ -111,6 +111,15 @@ function allChoices(onlyFavorites = false): Choice[] {
   return out;
 }
 
+/** Omnibar «Models» section: every enabled qualified id; selecting dispatches
+ *  the SAME switch path as every other surface (switchAction → registry). */
+export function omnibarModelItems(): { selector: string; run: () => void }[] {
+  return allChoices().map((c) => ({
+    selector: c.selector,
+    run: () => void switchAction(c.selector, "omnibar"),
+  }));
+}
+
 /** model ids exposed by 2+ enabled profiles — the chip shows qualifiers for these */
 function ambiguousModelIds(): Set<string> {
   const seen = new Set<string>();
@@ -683,40 +692,116 @@ function roleModelNoThinking(role: ModelRole): boolean {
   return sel.endsWith(`/${state.active.id}`) && state.thinking.capability === "no-thinking";
 }
 
-function roleSlot(role: ModelRole): HTMLElement {
+
+/** cockpit = first screen; profiles/events are the second screen behind tabs */
+let dialogTab: "cockpit" | "profiles" | "events" = "cockpit";
+
+/** Large role slot: drop target + click-picker; both paths dispatch assignRoleAction. */
+function cockpitSlot(role: ModelRole): HTMLElement {
   const sel = state.roles[role].selector;
   const label = selectorLabel(sel);
-  const slot = el(
-    "div",
-    {
-      class: "role-slot",
-      title: "Click to assign",
-      onClick: () => void pickModel(`Assign ${role} model`).then((c) => {
-        if (c) void assignRoleAction(role, c.selector, "settings");
-      }),
-    },
-    el("div", { class: "rs-role", text: role }),
-  );
-  if (sel) {
-    // two-line layout: provider (may abbreviate) on top, model id below (never clipped)
-    if (label.provider) slot.append(el("div", { class: "rs-prov", text: label.provider }));
-    slot.append(el("div", { class: "rs-model", text: label.model }));
-  } else {
-    slot.append(el("div", { class: "rs-model unset", text: "click to assign" }));
-  }
+  const prov = sel ? providerOf(sel) : null;
   const noThink = roleModelNoThinking(role);
-  slot.append(
-    thinkDial(
-      state.thinking.roles[role],
-      {
-        disabled: noThink,
-        disabledTip: "not supported by this model",
-        overridden: role === "default" && state.thinking.sessionOverride !== null,
-      },
-      (level) => void window.ide.models.setRoleThinking(role, level, "role-rail"),
-    ),
-  );
+
+  const slot = el("div", {
+    class: `ck-slot${sel ? "" : " empty"}`,
+    title: sel ? `${role}: ${sel}` : "перетащи модель или кликни",
+    tabIndex: 0,
+    onClick: () => void pickModel(`Assign ${role} model`).then((c) => {
+      if (c) void assignRoleAction(role, c.selector, "cockpit");
+    }),
+    onKeyDown: (e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        void pickModel(`Assign ${role} model`).then((c) => {
+          if (c) void assignRoleAction(role, c.selector, "cockpit");
+        });
+      }
+    },
+    onDragOver: (e) => {
+      if (!e.dataTransfer?.types.includes("omp/model")) return;
+      e.preventDefault();
+      slot.classList.add("drop-hot");
+    },
+    onDragLeave: () => slot.classList.remove("drop-hot"),
+    onDrop: (e) => {
+      slot.classList.remove("drop-hot");
+      const raw = e.dataTransfer?.getData("omp/model");
+      if (!raw) return;
+      e.preventDefault();
+      const selector = raw;
+      const p = providerOf(selector);
+      // invalid drop: disabled or depleted profile → shake + reason, no assignment
+      if (!p || !p.enabled || p.health === "depleted") {
+        slot.classList.remove("shake");
+        void slot.offsetWidth;
+        slot.classList.add("shake");
+        toast(!p ? "Unknown profile" : !p.enabled ? `Profile ${p.id} is disabled` : `Profile ${p.id} is depleted`, { crit: true });
+        return;
+      }
+      void assignRoleAction(role, selector, "cockpit-drag");
+    },
+  });
+
+  slot.append(el("div", { class: "ck-role", text: role.toUpperCase() }));
+  if (sel) {
+    // model id NEVER ellipsizes: profile abbreviates first, slot wraps to 2 lines
+    slot.append(el("div", { class: "ck-model mono", text: label.model }));
+    if (label.provider) slot.append(el("div", { class: "ck-prov", text: label.provider }));
+    const meta = el("div", { class: "ck-meta" });
+    if (prov) {
+      meta.append(el("span", { class: `pc-dot ${prov.health}` }));
+      const bal = prov.balance;
+      if (bal && bal.value !== null) {
+        const age = Math.round((Date.now() - bal.checkedAt) / 60000);
+        meta.append(el("span", { class: "mono ck-bal", text: `${bal.value.toFixed(2)}${bal.currency ? ` ${bal.currency}` : ""} · ${age}m` }));
+      }
+    }
+    slot.append(meta);
+    slot.append(
+      thinkDial(
+        state.thinking.roles[role],
+        { disabled: noThink, disabledTip: "not supported by this model", overridden: role === "default" && state.thinking.sessionOverride !== null },
+        (level) => void window.ide.models.setRoleThinking(role, level, "cockpit"),
+      ),
+    );
+  } else {
+    slot.append(el("div", { class: "ck-hint", text: "перетащи модель" }));
+  }
   return slot;
+}
+
+/** Favorites strip: draggable chips + fuzzy filter; drag payload = qualified selector. */
+function favoritesStrip(): HTMLElement {
+  const strip = el("div", { class: "ck-favs" });
+  const chipHost = el("div", { class: "ck-chip-row" });
+  const filter = el("input", { class: "input mono ck-filter", placeholder: "фильтр: ranis fable…" }) as HTMLInputElement;
+  const renderChips = () => {
+    clear(chipHost);
+    const q = filter.value.trim();
+    let favs = allChoices(true);
+    if (!favs.length) favs = allChoices(); // no stars yet — show everything rather than nothing
+    for (const c of favs) {
+      if (q && !fuzzyMatchMulti(q, c.label)) continue;
+      const chip = el(
+        "span",
+        {
+          class: "ck-chip mono",
+          draggable: true,
+          title: `drag onto a role slot · ${c.selector}`,
+          onDragStart: (e) => e.dataTransfer?.setData("omp/model", c.selector),
+        },
+        el("span", { class: `pc-dot ${c.provider.health}` }),
+        el("span", { text: c.label }),
+      );
+      chipHost.append(chip);
+    }
+    if (!chipHost.children.length) chipHost.append(el("span", { class: "dimmer", text: "nothing matches" }));
+  };
+  filter.addEventListener("input", renderChips);
+  renderChips();
+  strip.append(filter, chipHost);
+  return strip;
 }
 
 function renderDialog(): void {
@@ -744,23 +829,45 @@ function renderDialog(): void {
       checkBtn.disabled = false;
     });
   });
-  const testerBtn = el("button", { class: "btn mh-checkbal", text: "API Tester", title: "Test any base URL + key with a real completion (free-form)", onClick: () => openApiTester() });
-  const testAllBtn = el("button", { class: "btn mh-checkbal", text: "Test all", title: "Deep-test every enabled profile (one minimal completion each)" }) as HTMLButtonElement;
+
+  // «Кокпит ролей»: tab row — cockpit first, existing surfaces re-homed behind tabs
+  const tabBtn = (id: typeof dialogTab, label: string) =>
+    el("button", {
+      class: `btn ck-tab${dialogTab === id ? " on" : ""}`,
+      text: label,
+      onClick: () => {
+        dialogTab = id;
+        renderDialog();
+      },
+    });
+  const testerBtn = el("button", { class: "btn ck-tab", text: "Тестер", title: "Test any base URL + key with a real completion (free-form)", onClick: () => openApiTester() });
   dialogHead.append(
     el(
       "div",
-      { style: { display: "flex", alignItems: "center", gap: "10px" } },
+      { style: { display: "flex", alignItems: "center", gap: "6px" } },
       el("h2", { text: "Models", style: { margin: "0", flex: "1" } }),
+      tabBtn("cockpit", "Кокпит"),
+      tabBtn("profiles", "Профили"),
       testerBtn,
-      testAllBtn,
+      tabBtn("events", "События"),
       checkBtn,
     ),
   );
-  const rail = el("div", { class: "role-rail" });
-  for (const role of MODEL_ROLES) rail.append(roleSlot(role));
-  dialogHead.append(rail);
 
-  // auto-swap + poll settings (spec §3: master toggle, per-role opt-out)
+  if (dialogTab === "cockpit") {
+    const rail = el("div", { class: "ck-rail" });
+    for (const role of MODEL_ROLES) rail.append(cockpitSlot(role));
+    dialogBody.append(rail, favoritesStrip());
+    return;
+  }
+
+  if (dialogTab === "events") {
+    void renderEventLog(dialogBody);
+    return;
+  }
+
+  // «Профили» — the existing provider cards + swap/poll settings + Test all
+  const testAllBtn = el("button", { class: "btn mh-checkbal", text: "Test all", title: "Deep-test every enabled profile (one minimal completion each)" }) as HTMLButtonElement;
   const swapRow = el("div", { class: "mh-swap-row" });
   const swapSw = el("div", {
     class: state.autoSwap.enabled ? "switch on" : "switch",
@@ -792,6 +899,7 @@ function renderDialog(): void {
     el("span", { class: "mh-swap-label", text: "poll" }),
     pollInput,
     el("span", { class: "mh-swap-label", text: "m" }),
+    testAllBtn,
   );
   dialogBody.append(swapRow);
 
@@ -802,7 +910,6 @@ function renderDialog(): void {
 
   for (const p of state.providers) dialogBody.append(providerCard(p));
   dialogBody.append(addProviderCard());
-  void renderEventLog(dialogBody);
 }
 
 function providerCard(p: ProviderInfo): HTMLElement {

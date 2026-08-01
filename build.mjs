@@ -74,6 +74,7 @@ function copyStatic() {
   const fontsOut = join(dist, "renderer/fonts");
   mkdirSync(fontsOut, { recursive: true });
   for (const [pkg, files] of [
+    ["@fontsource/sora", ["files/sora-latin-400-normal.woff2", "files/sora-latin-600-normal.woff2", "files/sora-latin-700-normal.woff2", "files/sora-latin-800-normal.woff2"]],
     ["@fontsource/manrope", ["files/manrope-latin-400-normal.woff2", "files/manrope-latin-500-normal.woff2", "files/manrope-latin-600-normal.woff2", "files/manrope-latin-700-normal.woff2", "files/manrope-latin-800-normal.woff2"]],
     ["@fontsource/jetbrains-mono", ["files/jetbrains-mono-latin-400-normal.woff2", "files/jetbrains-mono-latin-500-normal.woff2", "files/jetbrains-mono-latin-700-normal.woff2"]],
   ]) {

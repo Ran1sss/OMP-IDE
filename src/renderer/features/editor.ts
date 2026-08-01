@@ -11,6 +11,7 @@ import { on, emit } from "../core/bus";
 import { state, baseName, relPath, languageForPath, imageMime, normPath, noteRecentFile } from "../core/state";
 import { toast, confirmDialog, choiceDialog, contextMenu, errorText } from "../core/ui";
 import { setMentionDragData } from "./mentions";
+import { fuzzyMatchMulti } from "../core/fuzzy";
 
 // ---------------------------------------------------------------- monaco env
 
@@ -24,53 +25,55 @@ self.MonacoEnvironment = {
   },
 };
 
+// Velvet Nebula Monaco theme (nebula spec §5.3): keywords magenta, functions/
+// types cyan, strings spring-green, comments text-low; solid indigo background.
 monaco.editor.defineTheme("reactor", {
   base: "vs-dark",
   inherit: true,
   rules: [
-    { token: "comment", foreground: "5c6478", fontStyle: "italic" },
-    { token: "keyword", foreground: "5ea2ff" },
-    { token: "string", foreground: "55e6c1" },
-    { token: "number", foreground: "e8c574" },
-    { token: "regexp", foreground: "ff9e5e" },
-    { token: "type", foreground: "7fd0ff" },
-    { token: "function", foreground: "b7c5ff" },
-    { token: "variable", foreground: "eef1f8" },
-    { token: "constant", foreground: "e8c574" },
-    { token: "tag", foreground: "5ea2ff" },
-    { token: "attribute.name", foreground: "55e6c1" },
-    { token: "delimiter", foreground: "9aa3b8" },
+    { token: "comment", foreground: "645d8e", fontStyle: "italic" },
+    { token: "keyword", foreground: "e26bf5" },
+    { token: "string", foreground: "8bffb0" },
+    { token: "number", foreground: "f0c674" },
+    { token: "regexp", foreground: "fbbf24" },
+    { token: "type", foreground: "34e0f7" },
+    { token: "function", foreground: "6ee7ff" },
+    { token: "variable", foreground: "f0edff" },
+    { token: "constant", foreground: "f0c674" },
+    { token: "tag", foreground: "e26bf5" },
+    { token: "attribute.name", foreground: "34e0f7" },
+    { token: "delimiter", foreground: "9d95c9" },
   ],
   colors: {
-    "editor.background": "#0a0c12",
-    "editor.foreground": "#eef1f8",
-    "editorLineNumber.foreground": "#3a4157",
-    "editorLineNumber.activeForeground": "#9aa3b8",
-    "editorCursor.foreground": "#5ea2ff",
-    "editor.selectionBackground": "#5ea2ff3d",
-    "editor.inactiveSelectionBackground": "#5ea2ff20",
-    "editor.lineHighlightBackground": "#10131c",
-    "editorWhitespace.foreground": "#232837",
-    "editorIndentGuide.background1": "#171b27",
-    "editorIndentGuide.activeBackground1": "#323950",
-    "editorWidget.background": "#10131c",
-    "editorWidget.border": "#323950",
-    "editorSuggestWidget.background": "#10131c",
-    "editorSuggestWidget.border": "#323950",
-    "editorSuggestWidget.selectedBackground": "#5ea2ff26",
-    "input.background": "#171b27",
-    "input.border": "#232837",
-    "scrollbarSlider.background": "#23283766",
-    "scrollbarSlider.hoverBackground": "#32395088",
-    "scrollbarSlider.activeBackground": "#323950aa",
-    "minimap.background": "#0a0c12",
-    "diffEditor.insertedTextBackground": "#55e6c122",
-    "diffEditor.removedTextBackground": "#ff5e7a22",
-    "diffEditor.insertedLineBackground": "#55e6c114",
-    "diffEditor.removedLineBackground": "#ff5e7a14",
-    "editorGutter.addedBackground": "#55e6c1",
-    "editorGutter.modifiedBackground": "#ff9e5e",
-    "editorGutter.deletedBackground": "#ff5e7a",
+    "editor.background": "#0d0a1c",
+    "editor.foreground": "#f0edff",
+    "editorLineNumber.foreground": "#453d6e",
+    "editorLineNumber.activeForeground": "#9d95c9",
+    "editorCursor.foreground": "#e26bf5",
+    "editor.selectionBackground": "#e26bf53d",
+    "editor.inactiveSelectionBackground": "#e26bf520",
+    "editor.lineHighlightBackground": "#181231",
+    "editorWhitespace.foreground": "#2c2354",
+    "editorIndentGuide.background1": "#211a41",
+    "editorIndentGuide.activeBackground1": "#3b3170",
+    "editorWidget.background": "#181231",
+    "editorWidget.border": "#3b3170",
+    "editorSuggestWidget.background": "#181231",
+    "editorSuggestWidget.border": "#3b3170",
+    "editorSuggestWidget.selectedBackground": "#e26bf526",
+    "input.background": "#211a41",
+    "input.border": "#2c2354",
+    "scrollbarSlider.background": "#2c235466",
+    "scrollbarSlider.hoverBackground": "#3b317088",
+    "scrollbarSlider.activeBackground": "#3b3170aa",
+    "minimap.background": "#0d0a1c",
+    "diffEditor.insertedTextBackground": "#8bffb022",
+    "diffEditor.removedTextBackground": "#fb4d6d22",
+    "diffEditor.insertedLineBackground": "#8bffb014",
+    "diffEditor.removedLineBackground": "#fb4d6d14",
+    "editorGutter.addedBackground": "#8bffb0",
+    "editorGutter.modifiedBackground": "#fbbf24",
+    "editorGutter.deletedBackground": "#fb4d6d",
   },
 });
 
@@ -195,10 +198,11 @@ export function dirtyCount(): number {
 // ---------------------------------------------------------------- rendering
 
 function renderTabs(g: EditorGroup) {
-  // rebuilding empties the strip, which clamps scrollLeft to 0 — preserve it
-  const scroll = g.tabsEl.scrollLeft;
   clear(g.tabsEl);
-  for (const tab of g.tabs) {
+  // «Пилюли» overflow rule: the strip never scrolls. Order stays stable; tabs
+  // that don't fit collapse newest-hidden-first into a trailing +N pill. The
+  // ACTIVE tab is always kept visible (it swaps into the last visible slot).
+  const makeTabNode = (tab: EditorTab) => {
     const closeBtn = el("span", {
       class: "tab-close",
       onClick: (e) => {
@@ -260,10 +264,128 @@ function renderTabs(g: EditorGroup) {
       el("span", { text: tab.title }),
       closeBtn,
     );
-    g.tabsEl.append(node);
-  }
-  g.tabsEl.scrollLeft = scroll;
+    return node;
+  };
+
+  for (const tab of g.tabs) g.tabsEl.append(makeTabNode(tab));
+  // measure after mount: collapse overflow into the +N pill on the next frame
+  requestAnimationFrame(() => collapseTabOverflow(g, makeTabNode));
   updateWindowTitle();
+}
+
+/**
+ * Post-layout pass: if pills overflow the strip, hide newest-opened-first
+ * (rightmost, except the active tab) and append a `+N ▾` pill whose popover
+ * lists the hidden tabs with a fuzzy filter.
+ */
+function collapseTabOverflow(g: EditorGroup, makeTabNode: (t: EditorTab) => HTMLElement) {
+  const strip = g.tabsEl;
+  if (!strip.isConnected || strip.scrollWidth <= strip.clientWidth) return;
+  const nodes = [...strip.children] as HTMLElement[];
+  const hidden: EditorTab[] = [];
+  // reserve ~64px for the overflow pill itself
+  const budget = strip.clientWidth - 64;
+  let used = 0;
+  const visible: HTMLElement[] = [];
+  for (const n of nodes) {
+    used += n.offsetWidth + 6;
+    if (used <= budget) visible.push(n);
+    else {
+      const key = n.dataset.key;
+      const tab = g.tabs.find((t) => t.key === key);
+      if (tab) hidden.push(tab);
+      n.remove();
+    }
+  }
+  if (!hidden.length) return;
+  // active tab must stay visible: swap it into the last visible slot
+  const activeHiddenIdx = hidden.findIndex((t) => t.key === g.active);
+  if (activeHiddenIdx >= 0 && visible.length) {
+    const last = visible[visible.length - 1];
+    const lastTab = g.tabs.find((t) => t.key === last.dataset.key);
+    const activeTabObj = hidden[activeHiddenIdx];
+    if (lastTab) {
+      hidden[activeHiddenIdx] = lastTab;
+      last.replaceWith(makeTabNode(activeTabObj));
+    }
+  }
+  const pill = el("div", {
+    class: "tab-overflow",
+    title: `${hidden.length} hidden tab${hidden.length > 1 ? "s" : ""}`,
+    onClick: (e) => {
+      e.stopPropagation();
+      showTabOverflowPopover(g, hidden, pill);
+    },
+  }, el("span", { text: `+${hidden.length}` }), el("span", { text: "▾" }));
+  strip.append(pill);
+}
+
+/** Overflow popover: fuzzy-filterable hidden-tab list; Enter activates, × closes. */
+function showTabOverflowPopover(g: EditorGroup, hidden: EditorTab[], anchor: HTMLElement) {
+  document.querySelector(".tab-overflow-pop")?.remove();
+  const input = el("input", { class: "input top-filter", placeholder: "filter tabs…" }) as HTMLInputElement;
+  const list = el("div", { class: "top-list" });
+  const pop = el("div", { class: "tab-overflow-pop" }, input, list);
+  let items: { tab: EditorTab; row: HTMLElement }[] = [];
+  let sel = 0;
+
+  const renderList = () => {
+    clear(list);
+    const q = input.value.trim();
+    items = [];
+    for (const tab of hidden) {
+      if (q && !fuzzyMatchMulti(q, tab.title)) continue;
+      const x = el("span", {
+        class: "top-x",
+        title: "Close",
+        onClick: (e) => {
+          e.stopPropagation();
+          void closeTab(tab.key, { group: g }).then(() => pop.remove());
+        },
+      });
+      x.append(svgIcon(I.close));
+      const row = el(
+        "div",
+        {
+          class: "row",
+          onClick: () => {
+            pop.remove();
+            focusedGroup = g;
+            activateTab(g, tab.key);
+          },
+        },
+        tab.dirty ? el("span", { class: "tab-dirty" }) : null,
+        el("span", { text: tab.title }),
+        x,
+      );
+      items.push({ tab, row });
+      list.append(row);
+    }
+    sel = Math.min(sel, Math.max(0, items.length - 1));
+    items.forEach((it, i) => it.row.classList.toggle("selected", i === sel));
+  };
+  input.addEventListener("input", () => { sel = 0; renderList(); });
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowDown") { sel = Math.min(sel + 1, items.length - 1); renderList(); e.preventDefault(); }
+    else if (e.key === "ArrowUp") { sel = Math.max(sel - 1, 0); renderList(); e.preventDefault(); }
+    else if (e.key === "Enter" && items[sel]) { const k = items[sel].tab.key; pop.remove(); focusedGroup = g; activateTab(g, k); }
+    else if (e.key === "Escape") pop.remove();
+  });
+  renderList();
+
+  document.body.append(pop);
+  const r = anchor.getBoundingClientRect();
+  const pw = pop.offsetWidth;
+  pop.style.left = `${Math.max(8, Math.min(r.right - pw, window.innerWidth - pw - 8))}px`;
+  pop.style.top = `${r.bottom + 4}px`;
+  input.focus();
+  const dismiss = (e: MouseEvent) => {
+    if (!pop.contains(e.target as Node)) {
+      pop.remove();
+      window.removeEventListener("mousedown", dismiss, true);
+    }
+  };
+  window.addEventListener("mousedown", dismiss, true);
 }
 
 /**
@@ -1379,6 +1501,8 @@ export function relayoutEditors() {
   for (const g of groups) {
     g.editor?.layout();
     g.diffEditor?.layout();
+    // pill-tab overflow is width-dependent — recompute on panel/window resizes
+    renderTabs(g);
   }
 }
 

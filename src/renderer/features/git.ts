@@ -7,7 +7,7 @@ import { el, clear, svgIcon } from "../core/dom";
 import { I } from "../core/icons";
 import { on, emit } from "../core/bus";
 import { state, baseName, dirName, joinPath, normPath, languageForPath } from "../core/state";
-import { toast, confirmDialog, selectDialog, formDialog, errorText } from "../core/ui";
+import { toast, confirmDialog, selectDialog, formDialog, contextMenu, errorText } from "../core/ui";
 import { updateGitIndex } from "./explorer";
 import type { GitStatus, GitFileStatus, GitCommitInfo } from "../../shared/types";
 
@@ -16,9 +16,9 @@ let commitMsg: HTMLTextAreaElement;
 /** Survives panel re-renders (stage/unstage/watcher refresh recreate the textarea). */
 let pendingMsg = "";
 let status: GitStatus = { isRepo: false, branch: "", ahead: 0, behind: 0, files: [] };
-let branchListeners: ((branch: string) => void)[] = [];
+let branchListeners: ((branch: string, ahead: number, behind: number) => void)[] = [];
 
-export function onBranchChange(cb: (branch: string) => void) {
+export function onBranchChange(cb: (branch: string, ahead: number, behind: number) => void) {
   branchListeners.push(cb);
 }
 
@@ -30,7 +30,7 @@ export async function refreshGit(): Promise<void> {
   if (!state.root) return;
   status = await window.ide.git.status(state.root);
   updateGitIndex(status.isRepo ? status.files : []);
-  for (const cb of branchListeners) cb(status.isRepo ? status.branch : "");
+  for (const cb of branchListeners) cb(status.isRepo ? status.branch : "", status.ahead, status.behind);
   renderPanel();
 }
 
@@ -165,52 +165,173 @@ function codeClass(c: string): string {
   return "u";
 }
 
+/** Compact side-by-side line diff for the popover (LCS on lines, capped). */
+function miniDiff(head: string, current: string): HTMLElement {
+  const CAP = 400;
+  const a = head.split("\n").slice(0, CAP);
+  const b = current.split("\n").slice(0, CAP);
+  // LCS table (small inputs — capped above)
+  const n = a.length, m = b.length;
+  const dp: number[][] = Array.from({ length: n + 1 }, () => new Array<number>(m + 1).fill(0));
+  for (let i = n - 1; i >= 0; i--)
+    for (let j = m - 1; j >= 0; j--)
+      dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+  const left = el("div", { class: "md-col" });
+  const right = el("div", { class: "md-col" });
+  let i = 0, j = 0;
+  const line = (txt: string, cls: string) => el("div", { class: `md-line ${cls}`, text: txt || "\u00a0" });
+  while (i < n && j < m) {
+    if (a[i] === b[j]) {
+      left.append(line(a[i], ""));
+      right.append(line(b[j], ""));
+      i++; j++;
+    } else if (dp[i + 1][j] >= dp[i][j + 1]) {
+      left.append(line(a[i], "del"));
+      right.append(line("", "pad"));
+      i++;
+    } else {
+      left.append(line("", "pad"));
+      right.append(line(b[j], "add"));
+      j++;
+    }
+  }
+  while (i < n) { left.append(line(a[i], "del")); right.append(line("", "pad")); i++; }
+  while (j < m) { left.append(line("", "pad")); right.append(line(b[j], "add")); j++; }
+  const body = el("div", { class: "md-body" }, left, right);
+  // scroll lock: the two columns move as one
+  left.addEventListener("scroll", () => { right.scrollTop = left.scrollTop; });
+  return body;
+}
+
+/** Double-click: compact glass diff popover (read-only; Esc / click-outside closes). */
+async function openDiffPopover(f: GitFileStatus) {
+  if (!state.root) return;
+  document.querySelector(".scm-diff-pop")?.remove();
+  const abs = normPath(joinPath(state.root, f.path));
+  const head = (await window.ide.git.headContent(state.root, f.path)) ?? "";
+  let current = "";
+  try {
+    const res = await window.ide.fs.readFile(abs);
+    current = res.binary ? "(binary)" : res.content;
+  } catch { /* deleted file → empty right side */ }
+  const pop = el(
+    "div",
+    { class: "scm-diff-pop" },
+    el("div", { class: "md-head mono", text: f.path }),
+    miniDiff(head, current),
+  );
+  panelEl.style.position = "relative";
+  panelEl.append(pop);
+  const dismiss = (e: MouseEvent) => {
+    if (!pop.contains(e.target as Node)) close();
+  };
+  const onKey = (e: KeyboardEvent) => {
+    if (e.key === "Escape") close();
+  };
+  const close = () => {
+    pop.remove();
+    window.removeEventListener("mousedown", dismiss, true);
+    window.removeEventListener("keydown", onKey, true);
+  };
+  setTimeout(() => {
+    window.addEventListener("mousedown", dismiss, true);
+    window.addEventListener("keydown", onKey, true);
+  });
+}
+
+/** Click/drag move with the 240ms horizontal slide, then the real git op. */
+function moveFile(row: HTMLElement, f: GitFileStatus, toStaged: boolean) {
+  row.classList.add(toStaged ? "slide-right" : "slide-left");
+  const op = toStaged
+    ? window.ide.git.stage(state.root!, [f.path])
+    : window.ide.git.unstage(state.root!, [f.path]);
+  // fire the op when the slide ends so the row lands in the other column on refresh
+  setTimeout(() => void op.then(() => emit("git-refresh", undefined)), 240);
+}
+
 function fileRow(f: GitFileStatus, staged: boolean): HTMLElement {
   const code = staged ? f.index : f.worktree === " " ? f.index : f.worktree;
   const displayCode = code === "?" ? "U" : code;
   const rel = f.path;
   const dir = dirName(rel);
 
-  const stageBtn = el("button", {
-    class: "icon-btn",
-    title: staged ? "Unstage" : "Stage",
-    onClick: (e) => {
-      e.stopPropagation();
-      void (staged
-        ? window.ide.git.unstage(state.root!, [f.path])
-        : window.ide.git.stage(state.root!, [f.path])
-      ).then(() => emit("git-refresh", undefined));
-    },
-  });
-  stageBtn.append(svgIcon(staged ? I.unstage : I.stage));
-
-  const actions = el("span", { class: "gf-actions" });
-  if (!staged) {
-    const discardBtn = el("button", {
-      class: "icon-btn",
-      title: "Discard changes",
-      onClick: (e) => {
-        e.stopPropagation();
-        void discardFile(f);
-      },
-    });
-    discardBtn.append(svgIcon(I.undo));
-    actions.append(discardBtn);
-  }
-  actions.append(stageBtn);
-
-  return el(
+  const row = el(
     "div",
     {
       class: "git-file-row",
       title: f.path,
-      onClick: () => void openFileDiff(f, staged),
+      tabIndex: 0,
+      draggable: true,
+      // single click = move to the other column (user act)
+      onClick: () => moveFile(row, f, !staged),
+      onDblClick: (e) => {
+        e.preventDefault();
+        void openDiffPopover(f);
+      },
+      onKeyDown: (e) => {
+        if (e.key === "Enter") void openFileDiff(f, staged);      // full editor diff
+        else if (e.key === " ") { e.preventDefault(); moveFile(row, f, !staged); }
+      },
+      onContextMenu: (e) => {
+        e.preventDefault();
+        contextMenu(e.clientX, e.clientY, [
+          { label: "Open diff", action: () => void openFileDiff(f, staged) },
+          { label: staged ? "Unstage" : "Stage", action: () => moveFile(row, f, !staged) },
+          ...(!staged ? [{ label: "Discard changes", action: () => void discardFile(f) }] : []),
+        ]);
+      },
+      onDragStart: (e) => {
+        e.dataTransfer?.setData("omp/git-file", JSON.stringify({ path: f.path, staged }));
+      },
     },
     el("span", { class: `gf-code ${codeClass(displayCode)}`, text: displayCode }),
     el("span", { class: "gf-name", text: baseName(rel) }),
     dir !== rel ? el("span", { class: "gf-dir", text: dir }) : null,
-    actions,
   );
+  return row;
+}
+
+/** One kanban column (CHANGES or STAGED) with header, count, drop target. */
+function column(title: string, files: GitFileStatus[], staged: boolean, bulk: HTMLElement | null): HTMLElement {
+  const list = el("div", { class: "gc-list" });
+  if (!files.length) list.append(el("div", { class: "dimmer gc-empty", text: staged ? "drop files to stage" : "clean" }));
+  for (const f of files) list.append(fileRow(f, staged));
+  const col = el(
+    "div",
+    {
+      class: `git-col ${staged ? "gc-staged" : "gc-changes"}`,
+      onDragOver: (e) => {
+        if (!e.dataTransfer?.types.includes("omp/git-file")) return;
+        e.preventDefault();
+        col.classList.add("drop-hot");
+      },
+      onDragLeave: () => col.classList.remove("drop-hot"),
+      onDrop: (e) => {
+        col.classList.remove("drop-hot");
+        const raw = e.dataTransfer?.getData("omp/git-file");
+        if (!raw) return;
+        e.preventDefault();
+        try {
+          const { path, staged: from } = JSON.parse(raw) as { path: string; staged: boolean };
+          if (from === staged) return; // dropped on its own column
+          const op = staged
+            ? window.ide.git.stage(state.root!, [path])
+            : window.ide.git.unstage(state.root!, [path]);
+          void op.then(() => emit("git-refresh", undefined));
+        } catch {}
+      },
+    },
+    el(
+      "div",
+      { class: "gs-head" },
+      el("span", { text: title }),
+      el("span", { class: "gs-count", text: String(files.length) }),
+      el("span", { style: { flex: "1" } }),
+      bulk,
+    ),
+    list,
+  );
+  return col;
 }
 
 function renderPanel() {
@@ -246,6 +367,7 @@ function renderPanel() {
     placeholder: `Message (commit on ${status.branch})`,
     onInput: () => {
       pendingMsg = commitMsg.value;
+      renderCommitDisabled();
     },
     onKeyDown: (e) => {
       if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
@@ -256,44 +378,6 @@ function renderPanel() {
   }) as HTMLTextAreaElement;
   commitMsg.value = pendingMsg;
 
-  panelEl.append(
-    el(
-      "div",
-      { class: "commit-box" },
-      commitMsg,
-      el("button", { class: "btn btn-primary", text: "Commit", onClick: () => void doCommit() }),
-    ),
-  );
-
-  // staged
-  if (stagedFiles.length) {
-    const sec = el("div", { class: "git-section" });
-    const unstageAll = el("button", {
-      class: "icon-btn", title: "Unstage all",
-      onClick: () =>
-        void window.ide.git
-          .unstage(state.root!, stagedFiles.map((f) => f.path))
-          .then(() => emit("git-refresh", undefined)),
-    });
-    unstageAll.append(svgIcon(I.unstage));
-    sec.append(
-      el(
-        "div",
-        { class: "gs-head" },
-        el("span", { text: "Staged Changes" }),
-        el("span", { class: "gs-count", text: String(stagedFiles.length) }),
-        el("span", { style: { flex: "1" } }),
-        unstageAll,
-      ),
-    );
-    const list = el("div", { class: "git-list" });
-    for (const f of stagedFiles) list.append(fileRow(f, true));
-    sec.append(list);
-    panelEl.append(sec);
-  }
-
-  // unstaged
-  const sec = el("div", { class: "git-section", style: { flex: "1", display: "flex", flexDirection: "column", minHeight: "0" } });
   const stageAll = el("button", {
     class: "icon-btn", title: "Stage all",
     onClick: () =>
@@ -302,23 +386,36 @@ function renderPanel() {
         .then(() => emit("git-refresh", undefined)),
   });
   stageAll.append(svgIcon(I.stage));
-  sec.append(
-    el(
-      "div",
-      { class: "gs-head" },
-      el("span", { text: "Changes" }),
-      el("span", { class: "gs-count", text: String(unstagedFiles.length) }),
-      el("span", { style: { flex: "1" } }),
-      unstagedFiles.length ? stageAll : null,
-    ),
+  const unstageAll = el("button", {
+    class: "icon-btn", title: "Unstage all",
+    onClick: () =>
+      void window.ide.git
+        .unstage(state.root!, stagedFiles.map((f) => f.path))
+        .then(() => emit("git-refresh", undefined)),
+  });
+  unstageAll.append(svgIcon(I.unstage));
+
+  // «Поток слева-направо»: CHANGES → STAGED kanban; composer under STAGED.
+  const commitBtn = el("button", { class: "btn btn-primary", text: "Commit", onClick: () => void doCommit() }) as HTMLButtonElement;
+  const composer = el("div", { class: "commit-box" }, commitMsg, commitBtn);
+  const stagedCol = column("STAGED", stagedFiles, true, stagedFiles.length ? unstageAll : null);
+  stagedCol.append(composer);
+  const flow = el(
+    "div",
+    { class: "git-flow" },
+    column("CHANGES", unstagedFiles, false, unstagedFiles.length ? stageAll : null),
+    stagedCol,
   );
-  const list = el("div", { class: "git-list", style: { flex: "1", overflowY: "auto" } });
-  if (unstagedFiles.length === 0 && stagedFiles.length === 0) {
-    list.append(el("div", { class: "dimmer", text: "No changes", style: { padding: "8px 4px" } }));
-  }
-  for (const f of unstagedFiles) list.append(fileRow(f, false));
-  sec.append(list);
-  panelEl.append(sec);
+  panelEl.append(flow);
+
+  // commit gating: disabled while STAGED is empty or the message is blank
+  const renderCommitDisabled = () => {
+    commitBtn.disabled = stagedFiles.length === 0 || !commitMsg.value.trim();
+  };
+  renderCommitDisabled();
+
+  // narrow panel (<300px): columns stack vertically (CSS class hook)
+  flow.classList.toggle("stacked", panelEl.clientWidth < 300);
 
   // recent commits
   void renderLog();

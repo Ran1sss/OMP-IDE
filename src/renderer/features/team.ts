@@ -23,6 +23,11 @@ let armed = false;
 let run: TeamRunState | null = null;
 let defaultPlaceholder = "";
 
+/** Read-only view of the live run for glance surfaces (agent NOW zone). */
+export function teamRun(): TeamRunState | null {
+  return run;
+}
+
 /** feed length already rendered (incremental append) */
 let feedRendered = 0;
 let feedRunId = "";

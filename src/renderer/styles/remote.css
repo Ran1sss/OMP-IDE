@@ -4,9 +4,9 @@
    ============================================================ */
 
 :root {
-  --gold-15: rgba(232, 197, 116, 0.15);
-  --gold-25: rgba(232, 197, 116, 0.25);
-  --gold-40: rgba(232, 197, 116, 0.4);
+  --gold-15: rgba(240, 198, 116, 0.15);
+  --gold-25: rgba(240, 198, 116, 0.25);
+  --gold-40: rgba(240, 198, 116, 0.4);
 }
 
 /* base-design amendment: branch chip is neutral so gold stays unambiguous */
@@ -50,8 +50,8 @@
   z-index: 1100;
   min-width: 260px;
   padding: 10px;
-  background: rgba(16, 19, 28, 0.94);
-  backdrop-filter: blur(16px);
+  background: var(--glass-bg);
+  backdrop-filter: blur(var(--glass-blur));
   border: 1px solid var(--line-bright);
   border-radius: var(--r-m);
   box-shadow: var(--shadow-float);

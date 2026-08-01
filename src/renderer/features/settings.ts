@@ -56,11 +56,20 @@ export function openSettingsDialog(): void {
   }
   motionSelect.value = state.settings.motion;
 
+  const glassSelect = el("select", { class: "input" }) as HTMLSelectElement;
+  for (const [value, label] of [
+    ["off", "Glass — floating layers blur (default)"],
+    ["on", "Reduce transparency — opaque surfaces"],
+  ] as const) {
+    glassSelect.append(el("option", { value, text: label }));
+  }
+  glassSelect.value = state.settings.reduceTransparency ? "on" : "off";
+
   const save = async () => {
     const stallRaw = parseInt(stallInput.value, 10);
     const crumbRaw = crumbSelect.value;
     const patch: Partial<Settings> = {
-      accent: accentInput.value.trim() || "#55e6c1",
+      accent: accentInput.value.trim() || "#34e0f7",
       fontSize: Math.max(9, Math.min(28, parseInt(fontInput.value, 10) || 13)),
       terminalShell: shellInput.value.trim(),
       ompPath: ompInput.value.trim(),
@@ -69,10 +78,11 @@ export function openSettingsDialog(): void {
       breadcrumbs: crumbRaw === "auto" || crumbRaw === "off" ? crumbRaw : "on",
       tabSwitcher: switcherSelect.value === "strip" ? "strip" : "mru",
       motion: motionSelect.value === "events" || motionSelect.value === "minimal" ? motionSelect.value : "full",
+      reduceTransparency: glassSelect.value === "on",
     };
     state.settings = await window.ide.store.setSettings(patch);
     applyAccent(state.settings.accent);
-    applyMotion(state.settings.motion);
+    applyMotion(state.settings.motion, state.settings.reduceTransparency);
     refreshCrumbs();
     toast("Settings saved");
     close();
@@ -101,7 +111,8 @@ export function openSettingsDialog(): void {
       field("Agent stall warning (seconds)", stallInput, "Nudge card when the model streams nothing. 0 = off, minimum 5. Default 20."),
       field("Breadcrumbs", crumbSelect, "Auto hides the bar when only the file path would show (non-TS/JS files)."),
       field("Ctrl+Tab order", switcherSelect, "MRU shows a switcher while Ctrl is held (2-tab groups always plain-cycle)."),
-      field("Motion", motionSelect, "Ambient auroras pause on blur/battery; OS reduced-motion demotes Full to Events."),
+      field("Motion", motionSelect, "Ambient nebulae pause on blur/battery; OS reduced-motion demotes Full to Events."),
+      field("Transparency", glassSelect, "Reduce = every glass surface goes opaque. Auto-engages when Motion is Minimal."),
     ),
     el(
       "div",

@@ -31,6 +31,9 @@ function load(): StoreShape {
       recents: Array.isArray(parsed.recents) ? parsed.recents : [],
       layouts: parsed.layouts && typeof parsed.layouts === "object" ? parsed.layouts : {},
     };
+    // Nebula migration: the old REACTOR default accent reads as an explicit
+    // user choice in stored settings — remap it to the new cyan default once.
+    if (cache.settings.accent === "#55e6c1") cache.settings.accent = DEFAULT_SETTINGS.accent;
   } catch {
     cache = { settings: { ...DEFAULT_SETTINGS }, recents: [], layouts: {} };
   }

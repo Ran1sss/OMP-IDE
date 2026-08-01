@@ -115,8 +115,8 @@
 .team-card.st-working .tc-chip { color: var(--energy); border-color: var(--energy-40); }
 .team-card.st-failed { border-color: var(--crit-40); }
 .team-card.st-failed .tc-chip { color: var(--crit); border-color: var(--crit-40); }
-.team-card.st-done { opacity: 0.65; }
-.team-card.st-done .tc-chip { color: var(--energy); }
+.team-card.st-done { opacity: 0.8; border-color: rgba(42, 167, 184, 0.4); }
+.team-card.st-done .tc-chip { color: var(--energy-dim); }
 
 /* the single 240ms materialize — the app's standard entrance */
 .materialize { animation: team-materialize var(--t-med) var(--ease-swift); }
@@ -217,7 +217,7 @@
   transition: stroke var(--t-med) var(--ease-swift);
 }
 .dag-node.st-active rect { stroke: var(--energy); filter: drop-shadow(0 0 4px var(--energy-25)); }
-.dag-node.st-done rect { stroke: var(--energy-40); }
+.dag-node.st-done rect { stroke: var(--energy-dim); }
 .dag-node.st-failed rect { stroke: var(--crit); }
 .dag-node.st-replanned rect { stroke: var(--flare-40); stroke-dasharray: 4 3; }
 .dag-id { font: 700 10px var(--font-mono); fill: var(--energy); }
@@ -243,7 +243,7 @@
 }
 .tb-slice:hover { border-color: var(--line-bright); }
 .tb-slice.st-active { color: var(--energy); border-color: var(--energy-40); }
-.tb-slice.st-done { color: var(--energy); opacity: 0.7; }
+.tb-slice.st-done { color: var(--energy-dim); }
 .tb-slice.st-failed { color: var(--crit); border-color: var(--crit-40); }
 .tb-slice.st-replanned { color: var(--flare); border-color: var(--flare-40); }
 
@@ -264,7 +264,8 @@
   color: var(--text-hi);
 }
 .sd-head .tc-chip.st-failed { color: var(--crit); border-color: var(--crit-40); }
-.sd-head .tc-chip.st-done, .sd-head .tc-chip.st-active { color: var(--energy); border-color: var(--energy-40); }
+.sd-head .tc-chip.st-active { color: var(--energy); border-color: var(--energy-40); }
+.sd-head .tc-chip.st-done { color: var(--energy-dim); border-color: rgba(42, 167, 184, 0.4); }
 .sd-body { padding: 8px 10px; font-size: 12px; line-height: 1.5; white-space: pre-wrap; }
 
 .needs-call {

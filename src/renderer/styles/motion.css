@@ -9,7 +9,7 @@
    Layer rules (spec §2, supersession):
    - Ambient animation ONLY on: welcome screen, agent-panel empty state,
      void-level chrome (grain only), large designed empty states.
-   - Ambient = teal + blue at low opacity. Gold/crit never ambient.
+   - Ambient = the nebula pair (cyan + magenta). Gold/crit never ambient.
    - Compositor properties only: transform / opacity / filter.
    ========================================================================= */
 
@@ -18,7 +18,7 @@
    entirely (gone, not dimmed), "minimal" never had it. */
 
 /* -- aurora pair: welcome screen (full treatment) -- */
-.motion-full .welcome::before {
+.motion-full .wk-hero::before {
   content: "";
   position: absolute;
   width: 65%;
@@ -26,13 +26,13 @@
   left: -10%;
   top: -40%;
   border-radius: 50%;
-  background: radial-gradient(circle, rgba(85, 230, 193, 0.55), transparent 65%);
+  background: radial-gradient(circle, var(--nebula-a), transparent 65%);
   filter: blur(50px);
   opacity: 0.32;
   animation: aurora-a var(--t-aurora-a) var(--ease-swift) infinite alternate;
   pointer-events: none;
 }
-.motion-full .welcome::after {
+.motion-full .wk-hero::after {
   content: "";
   position: absolute;
   width: 65%;
@@ -40,7 +40,7 @@
   right: -10%;
   bottom: -45%;
   border-radius: 50%;
-  background: radial-gradient(circle, rgba(94, 162, 255, 0.5), transparent 65%);
+  background: radial-gradient(circle, var(--nebula-b), transparent 65%);
   filter: blur(50px);
   opacity: 0.3;
   animation: aurora-b var(--t-aurora-b) var(--ease-swift) infinite alternate;
@@ -81,7 +81,7 @@
 .titlebar .grain-layer { inset: -4% 0; }
 
 /* -- cursor-reactive glow: welcome screen (position driven by welcome.ts) -- */
-.welcome .cursor-glow {
+.wk-hero .cursor-glow {
   position: absolute;
   width: 300px;
   height: 300px;
@@ -90,11 +90,11 @@
   opacity: 0;
   pointer-events: none;
 }
-.motion-full .welcome .cursor-glow {
-  background: radial-gradient(circle, rgba(94, 162, 255, 0.13), transparent 60%);
+.motion-full .wk-hero .cursor-glow {
+  background: radial-gradient(circle, rgba(226, 107, 245, 0.13), transparent 60%);
   transition: opacity var(--t-slow) var(--ease-swift);
 }
-.motion-full .welcome:hover .cursor-glow { opacity: 1; }
+.motion-full .wk-hero:hover .cursor-glow { opacity: 1; }
 
 /* -- shimmer on hover: one light pass per hover entry, never looping.
       Cards: recent workspaces, profile cards, bot cards. -- */
@@ -135,7 +135,7 @@
   left: 0;
   top: 10%;
   border-radius: 50%;
-  background: radial-gradient(circle, rgba(85, 230, 193, 0.35), transparent 65%);
+  background: radial-gradient(circle, var(--nebula-a), transparent 65%);
   filter: blur(50px);
   opacity: 0.25;
   animation: aurora-a var(--t-aurora-a) var(--ease-swift) infinite alternate;
@@ -157,7 +157,7 @@
   left: 5%;
   top: 10%;
   border-radius: 50%;
-  background: radial-gradient(circle, rgba(94, 162, 255, 0.3), transparent 65%);
+  background: radial-gradient(circle, var(--nebula-b), transparent 65%);
   filter: blur(50px);
   opacity: 0.2;
   animation: aurora-b var(--t-aurora-b) var(--ease-swift) infinite alternate;
@@ -166,8 +166,8 @@
 
 /* ---------------------------------------------------------------- pause
    Blur / battery: ambient freezes in place (verifiable in DevTools). */
-.ambient-paused .welcome::before,
-.ambient-paused .welcome::after,
+.ambient-paused .wk-hero::before,
+.ambient-paused .wk-hero::after,
 .ambient-paused .grain-layer,
 .ambient-paused .agent-blank:not(.disabled-state)::before,
 .ambient-paused .search-empty::before,
@@ -195,3 +195,25 @@
 .motion-minimal .orb { animation: none !important; }
 .motion-minimal .orb::after { display: none; }
 .motion-minimal .seam.live::after { animation: none !important; opacity: 1; }
+
+/* ---------------------------------------------------------------- glass fallback
+   .reduce-transparency (user toggle, or auto under motion-minimal): every
+   glass surface renders its opaque equivalent — zero backdrop-filter. */
+.reduce-transparency .dialog,
+.reduce-transparency .toast,
+.reduce-transparency .ctx-menu,
+.reduce-transparency .palette,
+.reduce-transparency .model-pop,
+.reduce-transparency .notif-pop,
+.reduce-transparency .beacon-pop,
+.reduce-transparency .tester-dialog,
+.reduce-transparency .ws-card {
+  background: var(--bg-1) !important;
+  backdrop-filter: none !important;
+}
+.reduce-transparency .sidepanel,
+.reduce-transparency .agentpanel {
+  background: var(--bg-0) !important;
+  backdrop-filter: none !important;
+}
+.reduce-transparency .overlay { backdrop-filter: none !important; }

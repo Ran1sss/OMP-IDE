@@ -218,6 +218,8 @@ export interface Settings {
   /** motion system: full = events + ambient atmosphere, events = Kinetic Reactor only, minimal = color/opacity snaps ≤80ms.
    *  OS prefers-reduced-motion makes "full" act as "events" (ambient MUST pause under reduced motion — spec §2). */
   motion: "full" | "events" | "minimal";
+  /** nebula glass fallback: true = every glass surface renders opaque (auto-on when motion === "minimal") */
+  reduceTransparency: boolean;
 }
 
 /** one past conversation on disk (read-only history browser) */
@@ -901,7 +903,8 @@ export interface OmpUiRequest {
 }
 
 export const DEFAULT_SETTINGS: Settings = {
-  accent: "#55e6c1",
+  accent: "#34e0f7",
+  reduceTransparency: false,
   fontSize: 13,
   terminalShell: "",
   ompPath: "",

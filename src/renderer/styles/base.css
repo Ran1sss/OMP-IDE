@@ -4,6 +4,30 @@
    ============================================================ */
 
 @font-face {
+  font-family: "Sora";
+  src: url("./fonts/sora-latin-400-normal.woff2") format("woff2");
+  font-weight: 400;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Sora";
+  src: url("./fonts/sora-latin-600-normal.woff2") format("woff2");
+  font-weight: 600;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Sora";
+  src: url("./fonts/sora-latin-700-normal.woff2") format("woff2");
+  font-weight: 700;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Sora";
+  src: url("./fonts/sora-latin-800-normal.woff2") format("woff2");
+  font-weight: 800;
+  font-display: swap;
+}
+@font-face {
   font-family: "Manrope";
   src: url("./fonts/manrope-latin-400-normal.woff2") format("woff2");
   font-weight: 400;
@@ -239,19 +263,20 @@ textarea.input { resize: none; line-height: 1.5; }
   display: flex;
   align-items: center;
   gap: 6px;
-  height: 24px;
+  height: 26px;
   padding: 0 8px;
   font-size: 12.5px;
   color: var(--text-mid);
   cursor: pointer;
   white-space: nowrap;
   overflow: hidden;
-  border-radius: 4px;
+  border-radius: var(--r-s);
   transition: background var(--t-fast) var(--ease-swift), color var(--t-fast) var(--ease-swift);
 }
 .row:hover { background: var(--bg-2); color: var(--text-hi); }
+/* nebula gradient allowance: list selection carries the cyan→magenta 90° fade */
 .row.selected {
-  background: var(--power-15);
+  background: linear-gradient(90deg, rgba(52, 224, 247, 0.14), rgba(226, 107, 245, 0.07));
   color: var(--text-hi);
 }
 .row.active { color: var(--text-hi); }
@@ -290,7 +315,7 @@ textarea.input { resize: none; line-height: 1.5; }
   display: flex;
   align-items: flex-start;
   justify-content: center;
-  background: rgba(5, 6, 10, 0.55);
+  background: rgba(10, 8, 23, 0.55);
   backdrop-filter: blur(6px);
   opacity: 0;
   transition: opacity var(--t-fast) var(--ease-swift);
@@ -310,8 +335,8 @@ textarea.input { resize: none; line-height: 1.5; }
 .dialog {
   min-width: 380px;
   max-width: 520px;
-  background: rgba(16, 19, 28, 0.92);
-  backdrop-filter: blur(18px);
+  background: var(--glass-bg);
+  backdrop-filter: blur(var(--glass-blur));
   border: 1px solid var(--line-bright);
   border-radius: var(--r-l);
   box-shadow: var(--shadow-float);
@@ -354,8 +379,8 @@ textarea.input { resize: none; line-height: 1.5; }
   min-width: 260px;
   max-width: 380px;
   padding: 10px 14px;
-  background: rgba(16, 19, 28, 0.88);
-  backdrop-filter: blur(14px);
+  background: var(--glass-bg);
+  backdrop-filter: blur(var(--glass-blur));
   border: 1px solid var(--line-bright);
   border-radius: var(--r-m);
   box-shadow: var(--shadow-float);
@@ -407,8 +432,8 @@ textarea.input { resize: none; line-height: 1.5; }
   z-index: 1100;
   min-width: 190px;
   padding: 5px;
-  background: rgba(16, 19, 28, 0.94);
-  backdrop-filter: blur(16px);
+  background: var(--glass-bg);
+  backdrop-filter: blur(var(--glass-blur));
   border: 1px solid var(--line-bright);
   border-radius: var(--r-m);
   box-shadow: var(--shadow-float);

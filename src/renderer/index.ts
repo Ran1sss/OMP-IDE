@@ -135,8 +135,10 @@ const workbench = el(
   agentpanel,
 );
 
-// status bar
-const sbBranch = el("span", { class: "sb-item sb-branch", title: "Switch branch", onClick: () => void switchBranch() });
+// status bar — «Острова»: three glass islands on a void base (redesign §10).
+// Left = git (click → SCM), center = file context (click → go-to-line),
+// right = model chip + agent orb + beacon + bell (existing popovers).
+const sbBranch = el("span", { class: "sb-item sb-branch", title: "Source control", onClick: () => switchView("git") });
 const sbCursor = el("span", { class: "sb-item mono static", text: "Ln 1, Col 1" });
 const sbLang = el("span", { class: "sb-item static", text: "" });
 const sbEnc = el("span", { class: "sb-item static", text: "UTF-8" });
@@ -146,18 +148,23 @@ const sbAgent = el("span", { class: "sb-item sb-agent", title: "Agent status", o
 const sbBell = createNotificationBell();
 const sbBeacon = createBeacon(() => switchView("remote"));
 const sbModelChip = createModelChip();
+const sbIslandGit = el("div", { class: "sb-island sbi-git" }, sbBranch);
+const sbIslandFile = el(
+  "div",
+  { class: "sb-island sbi-file", title: "Go to line", onClick: () => goToLine() },
+  sbCursor,
+  sbLang,
+  sbEnc,
+);
+const sbIslandSys = el("div", { class: "sb-island sbi-sys" }, sbModelChip, sbBeacon, sbAgent, sbBell);
 const statusbar = el(
   "div",
   { class: "statusbar" },
-  sbBranch,
+  sbIslandGit,
   el("span", { class: "sb-spacer" }),
-  sbCursor,
-  sbEnc,
-  sbLang,
-  sbModelChip,
-  sbBeacon,
-  sbAgent,
-  sbBell,
+  sbIslandFile,
+  el("span", { class: "sb-spacer" }),
+  sbIslandSys,
 );
 
 app.append(titlebar, workbench, statusbar);
@@ -331,15 +338,28 @@ on("editor-status", (s) => {
   sbEnc.style.display = s.line !== null ? "" : "none";
 });
 
-onBranchChange((branch) => {
+onBranchChange((branch, ahead, behind) => {
   clear(sbBranch);
   if (branch) {
     sbBranch.append(svgIcon(I.branch), el("span", { text: branch }));
-    sbBranch.style.display = "";
+    // ahead/behind counts ride the git island (↑ = unpushed, ↓ = unpulled)
+    if (ahead > 0 || behind > 0) {
+      const parts = [ahead > 0 ? `↑${ahead}` : "", behind > 0 ? `↓${behind}` : ""].filter(Boolean).join(" ");
+      sbBranch.append(el("span", { class: "sb-sync mono", text: parts }));
+    }
+    sbIslandGit.style.display = "";
   } else {
-    sbBranch.style.display = "none";
+    sbIslandGit.style.display = "none";
   }
 });
+
+// narrow-window island degradation: <1100px drops encoding, <950px drops language + truncates
+function statusbarNarrow() {
+  statusbar.classList.toggle("narrow-1", window.innerWidth < 1100);
+  statusbar.classList.toggle("narrow-2", window.innerWidth < 950);
+}
+window.addEventListener("resize", statusbarNarrow);
+statusbarNarrow();
 
 on("agent-status", (s: OmpStatus) => {
   sbAgentOrb.className = `orb ${s.state}`;
@@ -421,7 +441,7 @@ installDialogEscape();
 
 let welcomeEl: HTMLElement | null = null;
 
-async function openWorkspace(path: string) {
+async function openWorkspace(path: string, opts?: { resumeHistory?: boolean }) {
   state.root = normPath(path);
   await window.ide.store.addRecent(state.root);
   wsNameEl.textContent = "";
@@ -437,6 +457,8 @@ async function openWorkspace(path: string) {
   invalidateFileCache();
   await refreshGit();
   await startAgent();
+  // welcome «продолжить сессию агента»: open straight into the history browser
+  if (opts?.resumeHistory) openSessionHistory();
 }
 
 window.ide.fs.onChanged((changes) => {
@@ -475,7 +497,7 @@ async function boot() {
   state.settings = await window.ide.store.getSettings();
   applyAccent(state.settings.accent);
   initMotion();
-  applyMotion(state.settings.motion);
+  applyMotion(state.settings.motion, state.settings.reduceTransparency);
 
   initEditorArea(editorArea);
   initExplorer(explorerView);
@@ -494,7 +516,7 @@ async function boot() {
   if (ws) {
     await openWorkspace(ws);
   } else {
-    welcomeEl = await showWelcome(app, (path) => void openWorkspace(path));
+    welcomeEl = await showWelcome(app, (path, opts) => void openWorkspace(path, opts));
   }
 }
 

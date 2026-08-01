@@ -27,6 +27,8 @@ function effective(): "full" | "events" | "minimal" {
   return userMotion;
 }
 
+let userReduceGlass = false;
+
 function reflect(): void {
   const mode = effective();
   const b = document.body.classList;
@@ -35,11 +37,14 @@ function reflect(): void {
   b.toggle("motion-minimal", mode === "minimal");
   // pause discipline only matters while ambient is running at all
   b.toggle("ambient-paused", mode === "full" && (!document.hasFocus() || onBattery));
+  // nebula glass fallback: user toggle OR auto-on under minimal motion (spec §3)
+  b.toggle("reduce-transparency", userReduceGlass || mode === "minimal");
 }
 
-/** Apply the stored setting (startup + every settings save). */
-export function applyMotion(setting: "full" | "events" | "minimal"): void {
+/** Apply the stored settings (startup + every settings save). */
+export function applyMotion(setting: "full" | "events" | "minimal", reduceTransparency = userReduceGlass): void {
   userMotion = setting;
+  userReduceGlass = reduceTransparency;
   reflect();
 }
 

@@ -28,13 +28,14 @@
   flex-shrink: 0;
   padding-right: 2px;
 }
+/* redesign §1: M = flare, untracked/added = ok-system, deleted = crit */
 .tree .row .git-badge.m { color: var(--flare); }
-.tree .row .git-badge.a { color: var(--energy); }
+.tree .row .git-badge.a { color: var(--ok-system); }
 .tree .row .git-badge.d { color: var(--crit); }
-.tree .row .git-badge.u { color: var(--power); }
+.tree .row .git-badge.u { color: var(--ok-system); }
 .tree .row.git-dirty > .label { color: var(--flare); }
-.tree .row.git-new > .label { color: var(--energy); }
-.tree .row .label { overflow: hidden; text-overflow: ellipsis; }
+.tree .row.git-new > .label { color: var(--ok-system); }
+.tree .row .label { overflow: hidden; text-overflow: ellipsis; font-family: var(--font-mono); font-size: 13px; }
 .tree .row input.rename-input {
   flex: 1;
   min-width: 0;
@@ -212,8 +213,138 @@
   padding: 0 8px 8px;
   gap: 8px;
 }
-.git-panel .commit-box { display: flex; flex-direction: column; gap: 6px; }
-.git-section { min-height: 0; }
+.git-panel .commit-box { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; flex-shrink: 0; }
+
+/* «Поток слева-направо» — CHANGES → STAGED kanban (redesign §4) */
+.git-flow {
+  display: flex;
+  gap: 8px;
+  flex: 1;
+  min-height: 0;
+}
+.git-flow .git-col {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--r-s);
+  padding: 4px 6px 6px;
+  transition: border-color var(--t-fast) var(--ease-swift);
+}
+.git-flow .git-col.drop-hot { border-color: var(--power-40); background: var(--power-15); }
+.git-flow .gc-list { flex: 1; overflow-y: auto; min-height: 0; }
+.git-flow .gc-empty { padding: 10px 4px; font-size: 11px; }
+/* narrow panel: stack vertically, CHANGES above STAGED */
+.git-flow.stacked { flex-direction: column; }
+/* the 240ms horizontal slide when a row changes columns (user act) */
+.git-file-row.slide-right { animation: gf-slide-r var(--t-med) var(--ease-swift) forwards; }
+.git-file-row.slide-left { animation: gf-slide-l var(--t-med) var(--ease-swift) forwards; }
+@keyframes gf-slide-r { to { transform: translateX(60%); opacity: 0; } }
+@keyframes gf-slide-l { to { transform: translateX(-60%); opacity: 0; } }
+
+/* compact diff popover (glass, ≤60% panel height, read-only) */
+.scm-diff-pop {
+  position: absolute;
+  left: 6px; right: 6px; top: 40px;
+  max-height: 60%;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  background: var(--glass-bg);
+  backdrop-filter: blur(var(--glass-blur));
+  border: 1px solid var(--line-bright);
+  border-radius: var(--r-m);
+  box-shadow: var(--shadow-float);
+  overflow: hidden;
+  animation: toast-in var(--t-fast) var(--ease-swift);
+}
+.reduce-transparency .scm-diff-pop { background: var(--bg-1); backdrop-filter: none; }
+.scm-diff-pop .md-head {
+  padding: 6px 10px;
+  font-size: 11px;
+  color: var(--text-mid);
+  border-bottom: 1px solid var(--line);
+  flex-shrink: 0;
+}
+.scm-diff-pop .md-body {
+  display: flex;
+  min-height: 0;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  line-height: 1.5;
+}
+.scm-diff-pop .md-col { flex: 1; min-width: 0; overflow: auto; padding: 4px 0; }
+.scm-diff-pop .md-col:first-child { border-right: 1px solid var(--line); }
+.scm-diff-pop .md-line { padding: 0 8px; white-space: pre; color: var(--text-mid); }
+.scm-diff-pop .md-line.add { background: rgba(139, 255, 176, 0.1); color: var(--ok-system); }
+.scm-diff-pop .md-line.del { background: var(--crit-15); color: var(--crit); }
+.scm-diff-pop .md-line.pad { opacity: 0.25; }
+
+/* ---------- «СЕЙЧАС» zone — pinned live-state card above the composer ---------- */
+.agent-now {
+  flex-shrink: 0;
+  margin: 0 10px 6px;
+  padding: 7px 10px;
+  background: var(--bg-1);
+  border: 1px solid var(--line);
+  border-radius: var(--r-s);
+  font-size: 11.5px;
+  color: var(--text-mid);
+  position: relative;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  transition: border-color var(--t-med) var(--ease-swift);
+}
+/* thin animated seam on the left edge while a tool streams */
+.agent-now .now-row.streaming::before,
+.agent-now:not(.collapsed)::before {
+  content: "";
+  position: absolute;
+  left: 0; top: 0; bottom: 0;
+  width: 2px;
+  background: linear-gradient(180deg, transparent, var(--energy), transparent);
+  background-size: 100% 300%;
+  animation: seam-drift var(--t-seam) linear infinite;
+}
+.agent-now.collapsed::before { display: none; }
+.agent-now .now-idle { display: flex; align-items: center; gap: 7px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.agent-now .now-dot {
+  width: 7px; height: 7px;
+  border-radius: 50%;
+  background: var(--text-low);
+  flex-shrink: 0;
+}
+.agent-now .now-dot.live { background: var(--energy); box-shadow: 0 0 8px var(--energy-40); }
+.agent-now .now-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  min-width: 0;
+}
+.agent-now .now-sigil {
+  width: 18px; height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  color: var(--energy);
+  background: var(--energy-15);
+  border: 1px solid var(--energy-25);
+  font-size: 10px;
+  flex-shrink: 0;
+}
+.agent-now .now-name { color: var(--text-hi); font-weight: 600; font-size: 12px; flex-shrink: 0; }
+.agent-now .now-target { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+.agent-now .now-elapsed { margin-left: auto; color: var(--energy); font-size: 11px; flex-shrink: 0; font-variant-numeric: tabular-nums; }
+.agent-now .now-sub { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.agent-now .now-todo { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-mid); }
+.agent-now .now-add { color: var(--ok-system); }
+.agent-now .now-del { color: var(--crit); }
 .git-section .gs-head {
   display: flex;
   align-items: center;
@@ -287,12 +418,73 @@
 .git-log-row .gl-subj { color: var(--text-mid); overflow: hidden; text-overflow: ellipsis; }
 .git-log-row .gl-when { margin-left: auto; color: var(--text-low); font-size: 10.5px; flex-shrink: 0; }
 
-/* ---------- fuzzy opener & command palette ---------- */
+/* ---------- «Омнибар» — wide glass bar docked under the title bar ---------- */
+.ob-overlay {
+  /* plain 40% dim, NO backdrop blur — the bar itself is the glass */
+  background: rgba(10, 8, 23, 0.4);
+  backdrop-filter: none;
+  align-items: flex-start;
+  justify-content: center;
+}
+.omnibar {
+  width: 70vw;
+  margin-top: 44px;
+  background: var(--glass-bg);
+  backdrop-filter: blur(var(--glass-blur));
+  border: 1px solid var(--line-bright);
+  border-radius: var(--r-m);
+  box-shadow: var(--shadow-float);
+  overflow: hidden;
+  transform: translateY(-12px);
+  opacity: 0;
+  transition: transform 200ms var(--ease-swift), opacity 200ms var(--ease-swift);
+}
+.reduce-transparency .omnibar { background: var(--bg-1); backdrop-filter: none; }
+.overlay.visible .omnibar { transform: translateY(0); opacity: 1; }
+.omnibar .pal-input {
+  width: 100%;
+  padding: 13px 16px;
+  font-family: var(--font-ui);
+  font-size: 14px;
+  color: var(--text-hi);
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid var(--line);
+  outline: none;
+}
+.omnibar .pal-input::placeholder { color: var(--text-low); }
+.omnibar .pal-list { max-height: 44vh; overflow-y: auto; padding: 6px; }
+.omnibar .ob-section {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  color: var(--text-low);
+  padding: 8px 10px 3px;
+  user-select: none;
+}
+.omnibar .pal-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 10px;
+  font-size: 13px;
+  color: var(--text-mid);
+  border-radius: var(--r-s);
+  cursor: pointer;
+}
+.omnibar .pal-row:hover { background: var(--bg-2); color: var(--text-hi); }
+.omnibar .pal-row.selected { background: var(--power-15); color: var(--text-hi); }
+.omnibar .pal-row .pal-hl { color: var(--power); font-weight: 700; }
+.omnibar .pal-row .pal-key { margin-left: auto; flex-shrink: 0; }
+.omnibar .pal-none { padding: 20px; text-align: center; color: var(--text-low); font-size: 12.5px; }
+
+/* ---------- centered picker (model/thinking/role pickers reuse this) ---------- */
 .palette {
   width: 560px;
   margin-top: 80px;
-  background: rgba(16, 19, 28, 0.85);
-  backdrop-filter: blur(20px);
+  background: var(--glass-bg);
+  backdrop-filter: blur(var(--glass-blur));
   border: 1px solid var(--line-bright);
   border-radius: var(--r-l);
   box-shadow: var(--shadow-float);
@@ -300,6 +492,7 @@
   transform: scale(0.98);
   transition: transform var(--t-fast) var(--ease-swift);
 }
+.reduce-transparency .palette { background: var(--bg-1); backdrop-filter: none; }
 .overlay.visible .palette { transform: scale(1); }
 .palette .pal-input {
   width: 100%;
@@ -508,6 +701,81 @@
   font-size: 12px;
   color: var(--text-mid);
 }
+
+/* ---------- welcome — «Сплит герой/дело» (redesign §9) ---------- */
+.welcome {
+  position: absolute;
+  inset: 36px 0 30px 0; /* keep title bar and status bar reachable */
+  z-index: 50;
+  background: var(--void);
+  overflow: hidden;
+}
+.welcome.wk-split { display: flex; }
+.wk-hero {
+  flex: 1;
+  min-width: 0;
+  position: relative;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  background: var(--void);
+}
+.wk-work {
+  width: 380px;
+  max-width: 44vw;
+  flex-shrink: 0;
+  background: var(--bg-0);
+  border-left: 1px solid var(--line);
+  padding: 28px 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  overflow-y: auto;
+}
+.wk-work .wk-title {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-low);
+}
+.wk-recents { display: flex; flex-direction: column; gap: 4px; }
+.wk-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  background: var(--bg-1);
+  border: 1px solid var(--line);
+  border-radius: var(--r-s);
+  cursor: pointer;
+  transition: border-color var(--t-fast) var(--ease-swift), background var(--t-fast) var(--ease-swift);
+}
+.wk-row:hover, .wk-row.selected { border-color: var(--line-bright); background: var(--bg-2); }
+.wk-row:focus-visible { outline: none; border-color: var(--power); }
+.wk-row .wk-main { flex: 1; min-width: 0; }
+.wk-row .wsc-name { font-size: 13px; font-weight: 600; color: var(--text-hi); }
+.wk-row .wsc-path { font-size: 10px; color: var(--text-low); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wk-row .wk-age { font-size: 10.5px; color: var(--text-low); flex-shrink: 0; }
+.wk-row .wsc-x { opacity: 0; flex-shrink: 0; transition: opacity var(--t-fast) var(--ease-swift); }
+.wk-row:hover .wsc-x, .wk-row.selected .wsc-x { opacity: 1; }
+.wk-resume {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: -2px 0 2px 10px;
+  padding: 3px 10px;
+  font-size: 11.5px;
+  color: var(--energy);
+  cursor: pointer;
+  border-radius: var(--r-s);
+  transition: background var(--t-fast) var(--ease-swift);
+}
+.wk-resume:hover, .wk-resume:focus-visible { background: var(--energy-15); outline: none; }
+.wk-resume .wk-resume-ico { font-size: 13px; }
 .todo-strip .todo-item .ti-dot {
   width: 6px; height: 6px;
   border-radius: 50%;
@@ -619,21 +887,7 @@
   background: var(--bg-2);
 }
 
-/* ---------- welcome screen ---------- */
-.welcome {
-  position: absolute;
-  inset: 36px 0 24px 0; /* keep title bar and status bar reachable */
-  z-index: 50;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 36px;
-  background: var(--void);
-  overflow: hidden;
-}
-/* welcome ambient (aurora pair + grain + cursor glow) lives in motion.css —
-   gated on body.motion-full so "events"/"minimal" carry zero ambient motion */
+/* wordmark + tagline live inside .wk-hero now (split welcome §9) */
 .welcome .wordmark {
   position: relative;
   z-index: 1;
@@ -647,20 +901,11 @@
 .welcome .tagline {
   position: relative;
   z-index: 1;
-  margin-top: -26px;
   font-size: 12.5px;
   letter-spacing: 0.2em;
   text-transform: uppercase;
   color: var(--text-low);
   text-align: center;
-}
-.welcome .welcome-actions {
-  position: relative;
-  z-index: 1;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 20px;
 }
 .welcome .recent-grid {
   display: flex;
@@ -673,8 +918,8 @@
   position: relative;
   width: 220px;
   padding: 14px 16px;
-  background: rgba(16, 19, 28, 0.7);
-  backdrop-filter: blur(10px);
+  background: var(--glass-bg);
+  backdrop-filter: blur(var(--glass-blur));
   border: 1px solid var(--line);
   border-radius: var(--r-m);
   cursor: pointer;
@@ -828,8 +1073,8 @@
   min-width: 280px;
   max-width: 400px;
   padding: 8px;
-  background: rgba(16, 19, 28, 0.94);
-  backdrop-filter: blur(16px);
+  background: var(--glass-bg);
+  backdrop-filter: blur(var(--glass-blur));
   border: 1px solid var(--line-bright);
   border-radius: var(--r-m);
   box-shadow: var(--shadow-float);
