@@ -105,6 +105,19 @@ html, body {
 }
 ::-webkit-scrollbar-thumb:hover { background-color: var(--line-bright); background-clip: content-box; }
 ::-webkit-scrollbar-corner { background: transparent; }
+/* Stable gutter on EVERY vertical scroll container: the thumb appearing or
+   disappearing must never change content width — a content height near the
+   container boundary would otherwise reflow-loop (scrollbar flicker fix).
+   Horizontal scrollers (.md pre, .team-dag-wrap) are exempt: gutter is an
+   inline-axis concept and those overflow by nature. */
+.dialog, .ec-body, .tab-overflow-pop .top-list, .md-preview, .tab-switcher .ts-list,
+.models-dialog .md-scroll, .mp-groups, .mprov-card .pc-models, .think-block .think-body,
+.tf-result, .tc-raw-body, .tree, .search-results, .outline-list, .git-flow .gc-list,
+.scm-diff-pop .md-col, .git-list, .omnibar .pal-list, .palette .pal-list, .agent-chat,
+.tool-card .tc-body, .todo-strip, .wk-work, .history-dialog .hd-scroll, .notif-list,
+.control-center, .lv-rows, .team-surface, .team-feed, .crew-tl {
+  scrollbar-gutter: stable;
+}
 
 /* ---------- focus ---------- */
 :focus { outline: none; }

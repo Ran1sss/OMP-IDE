@@ -118,11 +118,20 @@
 .team-card.st-done { opacity: 0.8; border-color: rgba(42, 167, 184, 0.4); }
 .team-card.st-done .tc-chip { color: var(--energy-dim); }
 
-/* the single 240ms materialize — the app's standard entrance */
+/* the single 240ms materialize — the app's standard entrance.
+   Offsets are NEGATIVE (enter from above, exit upward): bottom overflow of a
+   transformed last-child would extend the container's scrollHeight and flick
+   its scrollbar (scrollbar flicker fix §3). */
 .materialize { animation: team-materialize var(--t-med) var(--ease-swift); }
 @keyframes team-materialize {
-  from { opacity: 0; transform: translateY(6px) scale(0.98); }
+  from { opacity: 0; transform: translateY(-6px) scale(0.98); }
   to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+/* the 240ms exit — same curve reversed («no content → no island», status bar §10) */
+.dematerialize { animation: team-dematerialize var(--t-med) var(--ease-swift) forwards; }
+@keyframes team-dematerialize {
+  from { opacity: 1; transform: translateY(0) scale(1); }
+  to   { opacity: 0; transform: translateY(-6px) scale(0.98); }
 }
 
 /* ---------- deliberation feed ---------- */

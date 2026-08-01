@@ -332,7 +332,7 @@ export function selectDialog(title: string, options: string[]): Promise<string |
     setTimeout(() => overlay.remove(), 170);
     resolve(v);
   };
-  const list = el("div", { class: "pal-list", style: { maxHeight: "300px", overflowY: "auto" } });
+  const list = el("div", { class: "pal-list", style: { maxHeight: "300px", overflowY: "auto", scrollbarGutter: "stable" } });
   for (const opt of options) {
     list.append(
       el("div", {

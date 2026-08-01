@@ -125,9 +125,9 @@
 /* -- agent panel empty state: single slow aurora behind the capability card -- */
 .motion-full .agent-blank:not(.disabled-state) {
   position: relative;
-  /* x clips the drifting aurora; y stays scrollable so short panels never
-     slice the hero content (audit clause e) */
-  overflow: hidden auto;
+  /* `clip` both axes: the drifting aurora and grain shift must not create
+     scrollable overflow — the chat container owns scrolling (flicker fix) */
+  overflow: clip;
 }
 .motion-full .agent-blank:not(.disabled-state)::before {
   content: "";

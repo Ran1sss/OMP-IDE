@@ -608,8 +608,10 @@
   animation: glow-sweep var(--t-glow-sweep) var(--ease-swift) var(--card-delay, 0ms) forwards;
   pointer-events: none;
 }
+/* entrance slides DOWN from above: top overflow never extends scrollHeight,
+   so a last-child entrance can't blip the chat scrollbar (flicker fix §3) */
 @keyframes card-in {
-  from { opacity: 0; transform: translateY(14px); }
+  from { opacity: 0; transform: translateY(-14px); }
   to   { opacity: 1; transform: translateY(0); }
 }
 @keyframes glow-sweep {
@@ -837,15 +839,18 @@
   user-select: none;
 }
 
-/* agent disabled / empty states */
+/* agent disabled / empty states.
+   The blank NEVER scrolls itself: `clip` contains the ambient layers (grain,
+   aurora) whose transforms would otherwise extend scrollHeight and oscillate
+   the outer scrollbar. Short panels scroll via .agent-chat (stable gutter). */
 .agent-blank {
   flex: 1;
+  position: relative;
   display: flex;
   flex-direction: column;
   align-items: center;
-  /* `safe center`: on short panels the hero scrolls instead of clipping its top/bottom (audit e) */
   justify-content: safe center;
-  overflow-y: auto;
+  overflow: clip;
   gap: 14px;
   padding: 24px;
   text-align: center;
