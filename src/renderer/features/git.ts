@@ -8,6 +8,7 @@ import { I } from "../core/icons";
 import { on, emit } from "../core/bus";
 import { state, baseName, dirName, joinPath, normPath, languageForPath } from "../core/state";
 import { toast, confirmDialog, selectDialog, formDialog, contextMenu, errorText } from "../core/ui";
+import { t } from "../core/i18n";
 import { updateGitIndex } from "./explorer";
 import type { GitStatus, GitFileStatus, GitCommitInfo } from "../../shared/types";
 
@@ -396,7 +397,7 @@ function renderPanel() {
   unstageAll.append(svgIcon(I.unstage));
 
   // «Поток слева-направо»: CHANGES → STAGED kanban; composer under STAGED.
-  const commitBtn = el("button", { class: "btn btn-primary", text: "Commit", onClick: () => void doCommit() }) as HTMLButtonElement;
+  const commitBtn = el("button", { class: "btn btn-primary", text: t("git.commit"), onClick: () => void doCommit() }) as HTMLButtonElement;
   const composer = el("div", { class: "commit-box" }, commitMsg, commitBtn);
   const stagedCol = column("STAGED", stagedFiles, true, stagedFiles.length ? unstageAll : null);
   stagedCol.append(composer);
@@ -454,6 +455,8 @@ export function initGitPanel(container: HTMLElement) {
   panelEl = container;
   panelEl.classList.add("git-panel");
   on("git-refresh", () => scheduleRefresh());
+  // language switch: the panel re-renders its fixed strings on next paint
+  on("lang-changed", () => scheduleRefresh());
   on("fs-changed", () => scheduleRefresh());
 }
 

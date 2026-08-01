@@ -5,6 +5,7 @@ import { state } from "../core/state";
 import { toast } from "../core/ui";
 import { refreshCrumbs } from "./editor";
 import { applyMotion } from "../core/motion";
+import { t, applyLang, resolveLang } from "../core/i18n";
 import type { Settings } from "../../shared/types";
 
 let settingsClose: (() => void) | null = null;
@@ -65,6 +66,17 @@ export function openSettingsDialog(): void {
   }
   glassSelect.value = state.settings.reduceTransparency ? "on" : "off";
 
+  // UI language (remote-fix 4): global, default = OS locale
+  const langSelect = el("select", { class: "input" }) as HTMLSelectElement;
+  for (const [value, label] of [
+    ["auto", t("set.langAuto")],
+    ["ru", "Русский"],
+    ["en", "English"],
+  ] as const) {
+    langSelect.append(el("option", { value, text: label }));
+  }
+  langSelect.value = state.settings.uiLang ?? "auto";
+
   const save = async () => {
     const stallRaw = parseInt(stallInput.value, 10);
     const crumbRaw = crumbSelect.value;
@@ -79,10 +91,12 @@ export function openSettingsDialog(): void {
       tabSwitcher: switcherSelect.value === "strip" ? "strip" : "mru",
       motion: motionSelect.value === "events" || motionSelect.value === "minimal" ? motionSelect.value : "full",
       reduceTransparency: glassSelect.value === "on",
+      uiLang: langSelect.value === "ru" || langSelect.value === "en" ? langSelect.value : "auto",
     };
     state.settings = await window.ide.store.setSettings(patch);
     applyAccent(state.settings.accent);
     applyMotion(state.settings.motion, state.settings.reduceTransparency);
+    applyLang(resolveLang(state.settings.uiLang));
     refreshCrumbs();
     toast("Settings saved");
     close();
@@ -113,6 +127,7 @@ export function openSettingsDialog(): void {
       field("Ctrl+Tab order", switcherSelect, "MRU shows a switcher while Ctrl is held (2-tab groups always plain-cycle)."),
       field("Motion", motionSelect, "Ambient nebulae pause on blur/battery; OS reduced-motion demotes Full to Events."),
       field("Transparency", glassSelect, "Reduce = every glass surface goes opaque. Auto-engages when Motion is Minimal."),
+      field(t("set.language"), langSelect, ""),
     ),
     el(
       "div",

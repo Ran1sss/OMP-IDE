@@ -15,6 +15,8 @@ export interface InboundMessage {
   firstName: string;
   chatId: number;
   text: string;
+  /** Telegram from.language_code — per-recipient fixed-string locale */
+  languageCode?: string;
 }
 
 export interface InboundCallback {
@@ -23,6 +25,8 @@ export interface InboundCallback {
   firstName: string;
   chatId: number;
   data: string;
+  /** Telegram from.language_code — per-recipient fixed-string locale */
+  languageCode?: string;
   /** answers the spinner on the client */
   ack(text?: string): void;
 }
@@ -229,6 +233,7 @@ export class BotRuntime {
       firstName: from.first_name,
       chatId: chat.id,
       text,
+      languageCode: from.language_code,
     };
     if (!this.delegate.isAuthorized(this.id, from.id)) {
       const pair = text.match(/^\/start\s+(\d{6})\s*$/);
@@ -258,6 +263,7 @@ export class BotRuntime {
       firstName: from.first_name,
       chatId,
       data,
+      languageCode: from.language_code,
       ack: (text) => void ctx.answerCallbackQuery(text ? { text } : undefined).catch(() => {}),
     });
   }

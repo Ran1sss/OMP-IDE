@@ -30,6 +30,8 @@ export interface BusEvents {
   "active-tab-changed": void;
   /** the team run state changed (any push) — glance surfaces re-read teamRun() */
   "team-state": void;
+  /** UI language switched — subscribers re-apply their fixed strings */
+  "lang-changed": void;
 }
 
 type Handler<T> = (payload: T) => void;

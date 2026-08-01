@@ -335,6 +335,10 @@ textarea.input { resize: none; line-height: 1.5; }
 .dialog {
   min-width: 380px;
   max-width: 520px;
+  /* layout-sweep law: a dialog NEVER exceeds the window — tall content
+     scrolls inside the dialog (settings at 1280×760 was clipping both ends) */
+  max-height: calc(100vh - 56px);
+  overflow-y: auto;
   background: var(--glass-bg);
   backdrop-filter: blur(var(--glass-blur));
   border: 1px solid var(--line-bright);

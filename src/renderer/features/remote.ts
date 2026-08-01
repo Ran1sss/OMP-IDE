@@ -6,12 +6,18 @@
 import { el, clear, svgIcon } from "../core/dom";
 import { I } from "../core/icons";
 import { toast, confirmDialog } from "../core/ui";
+import { on } from "../core/bus";
+import { t, applyLang, resolveLang } from "../core/i18n";
 import {
   initChatWatch,
   watchChatsSection,
   proposalsSection,
   cooldownControl,
   pendingProposals,
+  pendingProposalsFor,
+  botRequestsSection,
+  toggleBotRequests,
+  requestsOpen,
 } from "./chatwatch";
 import type {
   RemoteState,
@@ -110,7 +116,7 @@ function botCard(bot: RemoteBotInfo): HTMLElement {
     ),
     el("span", { class: "bc-spacer" }),
     dot,
-    switchEl(bot.enabled, (next) => void window.ide.remote.setBotEnabled(bot.id, next), bot.enabled ? "Disable bot (stops polling)" : "Enable bot"),
+    switchEl(bot.enabled, (next) => void window.ide.remote.setBotEnabled(bot.id, next), bot.enabled ? t("rc.disableBot") : t("rc.enableBot")),
   );
   card.append(head);
 
@@ -118,9 +124,9 @@ function botCard(bot: RemoteBotInfo): HTMLElement {
     el(
       "div",
       { class: "bc-meta" },
-      el("span", {}, "state: ", el("span", { class: "mono", text: bot.state })),
-      el("span", {}, "msgs: ", el("span", { class: "mono", text: String(bot.sessionMessages) })),
-      el("span", {}, "last: ", el("span", { class: "mono", text: bot.lastActivity ? timeShort(bot.lastActivity) : "—" })),
+      el("span", {}, `${t("rc.state")}: `, el("span", { class: "mono", text: bot.state })),
+      el("span", {}, `${t("rc.msgs")}: `, el("span", { class: "mono", text: String(bot.sessionMessages) })),
+      el("span", {}, `${t("rc.last")}: `, el("span", { class: "mono", text: bot.lastActivity ? timeShort(bot.lastActivity) : "—" })),
     ),
   );
   if (bot.detail && (bot.state === "auth-error" || bot.state === "degraded")) {
@@ -136,12 +142,12 @@ function botCard(bot: RemoteBotInfo): HTMLElement {
     for (const u of bot.paired) {
       const revoke = el("button", {
         class: "icon-btn pr-x",
-        title: `Revoke @${u.username}`,
+        title: t("rc.revokeUser", u.username),
         onClick: () => {
           void confirmDialog({
-            title: "Revoke access",
-            message: `Remove @${u.username} from @${bot.username}? They will be silently ignored afterwards.`,
-            confirmLabel: "Revoke",
+            title: t("rc.revokeTitle"),
+            message: t("rc.revokeMsg", u.username, bot.username),
+            confirmLabel: t("rc.revoke"),
             danger: true,
           }).then((ok) => {
             if (ok) void window.ide.remote.revokeUser(bot.id, u.telegramId);
@@ -164,17 +170,27 @@ function botCard(bot: RemoteBotInfo): HTMLElement {
 
   const pairBtn = el("button", {
     class: "btn",
-    text: "Pair user…",
+    text: t("rc.pairUser"),
     onClick: () => void beginPairing(bot),
   });
+  // «Запросы» (remote-fix 3): permanent home for this bot's proposals, gold
+  // count badge while any are pending
+  const reqCount = pendingProposalsFor(bot.id).length;
+  const reqBtn = el("button", {
+    class: `btn bc-requests-btn${requestsOpen(bot.id) ? " open" : ""}`,
+    onClick: () => toggleBotRequests(bot.id),
+  },
+    el("span", { text: t("rc.requests") }),
+    reqCount > 0 ? el("span", { class: "bc-req-badge mono", text: String(reqCount) }) : null,
+  );
   const delBtn = el("button", {
-    class: "btn btn-danger",
-    text: "Delete",
+    class: "btn btn-danger bc-del",
+    text: t("rc.delete"),
     onClick: () => {
       void confirmDialog({
-        title: "Delete bot",
-        message: `Remove @${bot.username}? Its token is wiped from secure storage and its Telegram commands are cleaned up.`,
-        confirmLabel: "Delete",
+        title: t("rc.deleteTitle"),
+        message: t("rc.deleteMsg", bot.username),
+        confirmLabel: t("rc.delete"),
         danger: true,
       }).then((ok) => {
         if (ok) void window.ide.remote.removeBot(bot.id);
@@ -183,23 +199,25 @@ function botCard(bot: RemoteBotInfo): HTMLElement {
   });
   const chats = watchChatsSection(bot);
   if (chats) card.append(chats);
-  card.append(el("div", { class: "bc-actions" }, pairBtn, el("span", { style: { flex: "1" } }), delBtn));
+  card.append(el("div", { class: "bc-actions" }, pairBtn, reqBtn, delBtn));
+  const requests = botRequestsSection(bot);
+  if (requests) card.append(requests);
   return card;
 }
 
 // ---------------------------------------------------------------- add bot
 
 function addBotCard(): HTMLElement {
-  const input = el("input", { class: "input mono", placeholder: "123456789:AA…  (bot token)" }) as HTMLInputElement;
+  const input = el("input", { class: "input mono", placeholder: t("rc.tokenPlaceholder") }) as HTMLInputElement;
   input.type = "password";
   const errEl = el("div", { class: "ab-error", style: { display: "none" } });
-  const addBtn = el("button", { class: "btn btn-primary", text: "Add" }) as HTMLButtonElement;
+  const addBtn = el("button", { class: "btn btn-primary", text: t("rc.add") }) as HTMLButtonElement;
 
   addBtn.addEventListener("click", () => {
     const token = input.value.trim();
     if (!token) return;
     addBtn.disabled = true;
-    addBtn.textContent = "Checking…";
+    addBtn.textContent = t("rc.checking");
     errEl.style.display = "none";
     // Two-step registration (spec §3.1): probe getMe first, show the bot's
     // identity, and register only after the operator confirms it.
@@ -212,16 +230,16 @@ function addBotCard(): HTMLElement {
           return null;
         }
         return confirmDialog({
-          title: "Register bot",
-          message: `Register "${probe.name}" (@${probe.username})? Its token will be stored encrypted in the OS keychain.`,
-          confirmLabel: "Register",
+          title: t("rc.registerTitle"),
+          message: t("rc.registerMsg", probe.name, probe.username),
+          confirmLabel: t("rc.register"),
         }).then((ok) => (ok ? window.ide.remote.addBot(token) : null));
       })
       .then((res) => {
         if (res) {
           if (res.ok) {
             input.value = "";
-            toast(`Registered @${res.bot.username} — enable it and pair a user`);
+            toast(t("rc.registered", res.bot.username));
           } else {
             errEl.textContent = res.error;
             errEl.style.display = "";
@@ -230,7 +248,7 @@ function addBotCard(): HTMLElement {
       })
       .finally(() => {
         addBtn.disabled = false;
-        addBtn.textContent = "Add";
+        addBtn.textContent = t("rc.add");
       });
   });
   input.addEventListener("keydown", (e) => {
@@ -240,8 +258,8 @@ function addBotCard(): HTMLElement {
   return el(
     "div",
     { class: "addbot-card" },
-    el("div", { class: "panel-header", text: "Add Bot" }),
-    el("div", { class: "ab-note", text: "Create a bot with @BotFather in Telegram, then paste its token. The token is stored encrypted (OS keychain); each remote user brings their own bot." }),
+    el("div", { class: "panel-header", text: t("rc.addBot") }),
+    el("div", { class: "ab-note", text: t("rc.addBotNote") }),
     el("div", { class: "ab-row" }, input, addBtn),
     errEl,
   );
@@ -307,10 +325,10 @@ function showPairingDialog(bot: RemoteBotInfo, pairing: RemotePairing): void {
   const codeEl = el("div", {
     class: "pairing-code",
     text: pairing.code,
-    title: "Click to copy code",
+    title: t("rc.clickCopy"),
     onClick: () => {
       void navigator.clipboard.writeText(pairing.code);
-      toast("Code copied");
+      toast(t("rc.codeCopied"));
     },
   });
   const startChip = () =>
@@ -320,19 +338,19 @@ function showPairingDialog(bot: RemoteBotInfo, pairing: RemotePairing): void {
       title: "Click to copy",
       onClick: () => {
         void navigator.clipboard.writeText(`/start ${pairing.code}`);
-        toast("Command copied");
+        toast(t("rc.cmdCopied"));
       },
     });
   const hintEl = el("div", { class: "pairing-hint" });
-  hintEl.append("Send ", startChip(), ` to @${bot.username} — expires in 5:00`);
+  hintEl.append(t("rc.pairHintPrefix"), startChip(), t("rc.pairHintSuffix", bot.username, "5:00"));
 
   const link = `t.me/${bot.username}`;
   const copyBtn = el("button", {
     class: "icon-btn",
-    title: "Copy link",
+    title: t("rc.copyLink"),
     onClick: () => {
       void navigator.clipboard.writeText(`https://${link}`);
-      toast("Link copied");
+      toast(t("rc.linkCopied"));
     },
   });
   copyBtn.append(svgIcon(I.file));
@@ -349,7 +367,7 @@ function showPairingDialog(bot: RemoteBotInfo, pairing: RemotePairing): void {
   const dialog = el(
     "div",
     { class: "dialog", style: { minWidth: "360px" } },
-    el("h2", { text: `Pair a user with @${bot.username}` }),
+    el("h2", { text: t("rc.pairWith", bot.username) }),
     el(
       "div",
       { class: "pairing-body" },
@@ -367,7 +385,7 @@ function showPairingDialog(bot: RemoteBotInfo, pairing: RemotePairing): void {
         copyBtn,
       ),
     ),
-    el("div", { class: "dialog-actions" }, el("button", { class: "btn", text: "Close", onClick: close })),
+    el("div", { class: "dialog-actions" }, el("button", { class: "btn", text: t("rc.dlgClose"), onClick: close })),
   );
   overlay.append(dialog);
   overlay.addEventListener("mousedown", (e) => {
@@ -386,7 +404,7 @@ function showPairingDialog(bot: RemoteBotInfo, pairing: RemotePairing): void {
     const m = Math.floor(left / 60000);
     const s = Math.floor((left % 60000) / 1000);
     clear(hintEl);
-    hintEl.append("Send ", startChip(), ` to @${bot.username} — expires in ${m}:${String(s).padStart(2, "0")}`);
+    hintEl.append(t("rc.pairHintPrefix"), startChip(), t("rc.pairHintSuffix", bot.username, `${m}:${String(s).padStart(2, "0")}`));
   }, 1000);
 
   pairingUi = { botId: bot.id, codeEl, ringFg, hintEl, timer, close };
@@ -419,7 +437,7 @@ function feedRow(ev: RemoteActivityEvent): HTMLElement {
     "div",
     { class: ev.kind === "blocked-unauthorized" ? "feed-row blocked" : "feed-row" },
     el("span", { class: "fr-time", text: timeShort(ev.time) }),
-    el("span", { class: "fr-kind", text: ev.kind === "blocked-unauthorized" ? "blocked" : ev.kind }),
+    el("span", { class: "fr-kind", text: ev.kind === "blocked-unauthorized" ? t("rc.blocked") : ev.kind }),
     el("span", { class: "fr-sender", text: ev.sender }),
     el("span", { class: "fr-detail", text: ev.detail }),
     el("span", { class: "fr-bot", text: ev.botUsername ? `@${ev.botUsername}` : "" }),
@@ -430,7 +448,7 @@ function renderFeed(): void {
   if (!feedEl) return;
   clear(feedEl);
   if (!activity.length) {
-    feedEl.append(el("div", { class: "cc-empty", text: "No remote activity yet." }));
+    feedEl.append(el("div", { class: "cc-empty", text: t("rc.noActivity") }));
     return;
   }
   for (const ev of [...activity].reverse()) feedEl.append(feedRow(ev));
@@ -438,16 +456,35 @@ function renderFeed(): void {
 
 // ---------------------------------------------------------------- main render
 
+/** compact RU/EN picker (fix 4) — global setting, applies live */
+function langSelector(): HTMLElement {
+  const sel = el("select", { class: "cc-lang", title: t("set.language") }) as HTMLSelectElement;
+  const opts: [string, string][] = [["auto", t("set.langAuto")], ["ru", "Русский"], ["en", "English"]];
+  for (const [v, label] of opts) {
+    const o = el("option", { text: label }) as HTMLOptionElement;
+    o.value = v;
+    sel.append(o);
+  }
+  void window.ide.store.getSettings().then((s) => {
+    sel.value = s.uiLang ?? "auto";
+  });
+  sel.addEventListener("change", () => {
+    void window.ide.store.setSettings({ uiLang: sel.value as "auto" | "ru" | "en" }).then((s) => {
+      applyLang(resolveLang(s.uiLang));
+    });
+  });
+  return sel;
+}
+
 function renderControlCenter(): void {
   if (!ccRoot) return;
   clear(ccRoot);
 
   const digestInput = el("input", {
-    class: "input mono",
+    class: "input mono cc-num",
     type: "number",
     value: String(Math.round(state.digestIntervalMs / 1000)),
-    title: "Digest interval, seconds",
-    style: { width: "58px" },
+    title: t("rc.digestTitle"),
     onChange: (e) => {
       const v = parseInt((e.target as HTMLInputElement).value, 10);
       if (v >= 1 && v <= 30) void window.ide.remote.setDigestInterval(v * 1000);
@@ -458,16 +495,18 @@ function renderControlCenter(): void {
     el(
       "div",
       { class: "cc-global" },
-      switchEl(state.globalEnabled, (next) => void window.ide.remote.setGlobalEnabled(next), "Master remote toggle"),
+      switchEl(state.globalEnabled, (next) => void window.ide.remote.setGlobalEnabled(next), t("rc.master")),
       el("div", { style: { flex: "1 1 130px" } },
-        el("div", { style: { fontWeight: "700", fontSize: "12.5px" }, text: "Remote control" }),
-        el("div", { class: "cc-note", text: "Works only while OMP IDE is running on this machine." }),
+        el("div", { style: { fontWeight: "700", fontSize: "12.5px" }, text: t("rc.remoteControl") }),
+        el("div", { class: "cc-note", text: t("rc.worksOnly") }),
       ),
+      // compact language selector (fix 4) — the Remote header area surface
+      langSelector(),
       // digest+cooldown wrap below the title as ONE unit at narrow widths
       el("span", { class: "cc-dials" },
-        el("span", { class: "cc-note", text: "digest" }),
+        el("span", { class: "cc-note", text: t("rc.digestLbl") }),
         digestInput,
-        el("span", { class: "cc-note", text: "s" }),
+        el("span", { class: "cc-note", text: t("rc.secSuffix") }),
         ...cooldownControl(),
       ),
     ),
@@ -476,12 +515,12 @@ function renderControlCenter(): void {
   // telegram proxy (api.telegram.org is blocked for many RF users)
   const proxyInput = el("input", {
     class: "input mono",
-    placeholder: "socks5://127.0.0.1:1080  (proxy for Telegram, empty = direct)",
+    placeholder: t("rc.proxyPlaceholder"),
     value: state.proxyUrl,
     title: "Proxy for all Telegram traffic: http(s):// or socks(4/5)://, with optional user:pass@. Applies immediately — bots restart on save.",
   }) as HTMLInputElement;
-  const proxyApply = el("button", { class: "btn", text: "Apply" }) as HTMLButtonElement;
-  const proxyTest = el("button", { class: "btn", text: "Test", title: "Probe api.telegram.org through this proxy without applying it" }) as HTMLButtonElement;
+  const proxyApply = el("button", { class: "btn", text: t("rc.apply") }) as HTMLButtonElement;
+  const proxyTest = el("button", { class: "btn", text: t("rc.proxyTest"), title: t("rc.proxyTestTitle") }) as HTMLButtonElement;
   const applyProxy = () => {
     const url = proxyInput.value.trim();
     if (url === state.proxyUrl) return;
@@ -508,7 +547,7 @@ function renderControlCenter(): void {
     el(
       "div",
       { class: "cc-proxy" },
-      el("span", { class: "cc-note", text: "proxy" }),
+      el("span", { class: "cc-note", text: t("rc.proxy") }),
       proxyInput,
       proxyApply,
       proxyTest,
@@ -521,7 +560,7 @@ function renderControlCenter(): void {
   for (const bot of state.bots) ccRoot.append(botCard(bot));
   ccRoot.append(addBotCard());
 
-  ccRoot.append(el("div", { class: "panel-header", text: "Activity", style: { padding: "6px 2px 2px" } }));
+  ccRoot.append(el("div", { class: "panel-header", text: t("rc.activity"), style: { padding: "6px 2px 2px" } }));
   feedEl = el("div", { class: "cc-feed" });
   ccRoot.append(feedEl);
   renderFeed();
@@ -660,4 +699,6 @@ export function initRemote(container: HTMLElement): void {
     renderControlCenter();
     updateBeaconBadge();
   });
+  // language switch re-renders the whole view live (fix 4)
+  on("lang-changed", () => renderControlCenter());
 }

@@ -119,7 +119,7 @@
 .sidepanel {
   display: flex;
   flex-direction: column;
-  width: 300px;
+  width: 360px;
   min-width: 0;
   /* nebula glass panel (§3 fixed list); .reduce-transparency falls back to bg-0 */
   background: var(--glass-panel);
@@ -513,7 +513,7 @@
 
 /* resize handles */
 .resize-h {
-  width: 5px;
+  width: 6px;
   margin: 0 -2px;
   cursor: col-resize;
   z-index: 20;

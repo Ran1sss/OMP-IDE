@@ -15,6 +15,7 @@ import { I } from "./core/icons";
 import { on, emit } from "./core/bus";
 import { state, baseName, normPath } from "./core/state";
 import { registerCommand, installKeybindings } from "./core/commands";
+import { t, applyLang, resolveLang } from "./core/i18n";
 import { toast, choiceDialog, installDialogEscape } from "./core/ui";
 import { initEditorArea, saveActive, saveAll, closeActiveTab, splitEditor, toggleWordWrap, zoomFont, goToLine, findInFile, hasDirtyTabs, relayoutEditors, activeFilePath, cycleTab, openMarkdownPreview, focusGroup } from "./features/editor";
 import { initExplorer, loadWorkspaceTree, collapseAll } from "./features/explorer";
@@ -76,6 +77,23 @@ function actButton(id: string, icon: string, title: string, extraClass = ""): HT
   return b;
 }
 const settingsBtn = el("button", { class: "act-btn", title: "Settings", onClick: () => openSettingsDialog() });
+// chrome strings re-applied live on language switch (fix 4)
+function applyChromeLang(): void {
+  settingsBtn.title = t("chrome.settings");
+  const titles: Record<string, string> = {
+    explorer: t("view.explorer"),
+    search: t("view.search"),
+    outline: t("view.outline"),
+    git: t("view.git"),
+    remote: t("view.remote"),
+  };
+  for (const [vid, btn] of viewButtons) if (titles[vid]) btn.title = titles[vid];
+  sideHandle.title = t("chrome.panelResize");
+  sbBranch.title = t("chrome.sourceControl");
+  sbAgent.title = t("chrome.agentStatus");
+  sbIslandFile.title = t("chrome.goToLine");
+  if (activeView && activeView !== "agent") sideTitle.textContent = titles[activeView] ?? "";
+}
 settingsBtn.append(svgIcon(I.settings));
 const activitybar = el(
   "div",
@@ -119,7 +137,7 @@ const seam = el("div", { class: "seam" });
 const agentpanel = el("div", { class: "agentpanel" });
 
 // resize handles
-const sideHandle = el("div", { class: "resize-h" });
+const sideHandle = el("div", { class: "resize-h side-handle" });
 const agentHandle = el("div", { class: "resize-h" });
 const termHandle = el("div", { class: "resize-v" });
 centerCol.insertBefore(termHandle, termRegion);
@@ -220,14 +238,14 @@ function switchView(id: ViewId | "agent") {
   gitView.style.display = id === "git" ? "flex" : "none";
   remoteView.style.display = id === "remote" ? "flex" : "none";
   sideTitle.textContent =
-    id === "explorer" ? "Explorer" : id === "search" ? "Search" :
-    id === "outline" ? "Outline" :
-    id === "git" ? "Source Control" : "Remote Control";
+    id === "explorer" ? t("view.explorer") : id === "search" ? t("view.search") :
+    id === "outline" ? t("view.outline") :
+    id === "git" ? t("view.git") : t("view.remote");
   clear(sideActions);
   if (id === "explorer") {
-    const collapseBtn = el("button", { class: "icon-btn", title: "Collapse folders", onClick: () => collapseAll() });
+    const collapseBtn = el("button", { class: "icon-btn", title: t("chrome.collapseFolders"), onClick: () => collapseAll() });
     collapseBtn.append(svgIcon(I.collapse));
-    const refreshBtn = el("button", { class: "icon-btn", title: "Refresh", onClick: () => void loadWorkspaceTree() });
+    const refreshBtn = el("button", { class: "icon-btn", title: t("chrome.refresh"), onClick: () => void loadWorkspaceTree() });
     refreshBtn.append(svgIcon(I.refresh));
     sideActions.append(collapseBtn, refreshBtn);
   }
@@ -270,10 +288,18 @@ function installResize(handle: HTMLElement, opts: { horizontal: boolean; apply: 
 installResize(sideHandle, {
   horizontal: true,
   apply: (d) => {
-    const w = Math.max(200, Math.min(480, sidepanel.offsetWidth + d));
+    // spec (remote-panel fix 1): min 280, max 560; live reflow during drag
+    const w = Math.max(280, Math.min(560, sidepanel.offsetWidth + d));
     sidepanel.style.width = `${w}px`;
   },
   done: saveLayoutSoon,
+});
+// double-click the handle resets the panel to its default width (360 px)
+sideHandle.addEventListener("dblclick", () => {
+  sidepanel.style.width = "360px";
+  relayoutEditors();
+  emit("relayout", undefined);
+  saveLayoutSoon();
 });
 installResize(agentHandle, {
   horizontal: true,
@@ -314,7 +340,7 @@ async function restoreLayout() {
   if (!state.root) return;
   const l = await window.ide.store.getLayout(state.root);
   if (!l) return;
-  sidepanel.style.width = `${Math.max(200, Math.min(480, l.sideWidth))}px`;
+  sidepanel.style.width = `${Math.max(280, Math.min(560, l.sideWidth))}px`;
   agentpanel.style.width = `${Math.max(280, Math.min(560, l.agentWidth))}px`;
   termRegion.style.height = `${Math.max(100, l.termHeight)}px`;
   agentpanel.classList.toggle("collapsed", l.agentCollapsed);
@@ -499,6 +525,10 @@ async function boot() {
   applyAccent(state.settings.accent);
   initMotion();
   applyMotion(state.settings.motion, state.settings.reduceTransparency);
+  // language: OS-locale default, global setting overrides (fix 4)
+  applyLang(resolveLang(state.settings.uiLang));
+  applyChromeLang();
+  on("lang-changed", () => applyChromeLang());
 
   initEditorArea(editorArea);
   initExplorer(explorerView);

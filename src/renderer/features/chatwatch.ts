@@ -7,6 +7,7 @@
 import { el, clear, svgIcon } from "../core/dom";
 import { I } from "../core/icons";
 import { toast, confirmDialog } from "../core/ui";
+import { t } from "../core/i18n";
 import type {
   RemoteBotInfo,
   RemoteChatInfo,
@@ -44,6 +45,23 @@ export function pendingProposals(): RemoteProposal[] {
   return watch.proposals.filter((p) => p.status === "pending" || p.status === "no-approver");
 }
 
+/** pending proposals for ONE bot — powers the «Запросы» badge */
+export function pendingProposalsFor(botId: string): RemoteProposal[] {
+  return pendingProposals().filter((p) => p.botId === botId);
+}
+
+/** bots whose «Запросы» section is expanded (session-scoped UI state) */
+const openRequests = new Set<string>();
+
+export function requestsOpen(botId: string): boolean {
+  return openRequests.has(botId);
+}
+
+export function toggleBotRequests(botId: string): void {
+  if (!openRequests.delete(botId)) openRequests.add(botId);
+  onChange?.();
+}
+
 // ---------------------------------------------------------------- helpers
 
 function hhmm(t: number): string {
@@ -64,20 +82,19 @@ function listenerBlockReason(chat: RemoteChatInfo): string | null {
 
 export function cooldownControl(): HTMLElement[] {
   const input = el("input", {
-    class: "input mono",
+    class: "input mono cc-num",
     type: "number",
     value: String(watch.cooldownMinutes),
-    title: "Listener cooldown after a proposal, minutes",
-    style: { width: "58px" },
+    title: t("rc.cooldownTitle"),
     onChange: (e) => {
       const v = parseInt((e.target as HTMLInputElement).value, 10);
       if (v >= 1 && v <= 120) void window.ide.remote.setCooldownMinutes(v);
     },
   });
   return [
-    el("span", { class: "cc-note", text: "cooldown" }),
+    el("span", { class: "cc-note", text: t("rc.cooldownLbl") }),
     input,
-    el("span", { class: "cc-note", text: "m" }),
+    el("span", { class: "cc-note", text: t("rc.minSuffix") }),
   ];
 }
 
@@ -88,7 +105,7 @@ export function watchChatsSection(bot: RemoteBotInfo): HTMLElement | null {
   if (!chats.length) return null;
 
   const wrap = el("div", { class: "wc-list" });
-  wrap.append(el("div", { class: "wc-header", text: "Group chats" }));
+  wrap.append(el("div", { class: "wc-header", text: t("rc.groupChats") }));
 
   // approver picker: only meaningful with several paired users
   if (bot.paired.length > 1) {
@@ -103,7 +120,7 @@ export function watchChatsSection(bot: RemoteBotInfo): HTMLElement | null {
     sel.addEventListener("change", () => {
       void window.ide.remote.setApprover(bot.id, parseInt(sel.value, 10));
     });
-    wrap.append(el("div", { class: "wc-approver" }, el("span", { class: "cc-note", text: "approver" }), sel));
+    wrap.append(el("div", { class: "wc-approver" }, el("span", { class: "cc-note", text: t("rc.approver") }), sel));
   }
 
   for (const chat of chats) wrap.append(chatCard(bot, chat));
@@ -135,7 +152,7 @@ function chatCard(bot: RemoteBotInfo, chat: RemoteChatInfo): HTMLElement {
     title: chat.coverage === "limited" ? chat.coverageHint : "Bot receives all group messages",
   });
 
-  const watchSwitch = switchLike(chat.watched, !chat.left, chat.left ? "Bot left this chat" : chat.watched ? "Stop watching (logging stops; log kept)" : "Watch this chat (starts logging)", (next) => {
+  const watchSwitch = switchLike(chat.watched, !chat.left, chat.left ? t("rc.botLeft") : chat.watched ? t("rc.watchOff") : t("rc.watchOn"), (next) => {
     void window.ide.remote.setChatWatched(chat.botId, chat.chatId, next);
   });
 
@@ -191,12 +208,12 @@ function chatCard(bot: RemoteBotInfo, chat: RemoteChatInfo): HTMLElement {
   const listenerRow = el(
     "div",
     { class: "wc-listener-row" },
-    el("span", { class: "wc-listener-label", text: "listener" }),
-    el("span", { class: "cc-note", text: "· smol oneshot per batch" }),
+    // one line: label (tooltip carries the mechanism) + optional states + toggle
+    el("span", { class: "wc-listener-label", title: t("rc.listenerTip"), text: t("rc.listener") }),
     watch.oneshotUnavailable ? el("span", { class: "wc-oneshot-off", text: watch.oneshotUnavailable }) : null,
     el("span", { style: { flex: "1" } }),
     chat.cooldownUntil && chat.cooldownUntil > Date.now()
-      ? el("span", { class: "wc-cooling", text: `cooling · ${Math.max(1, Math.ceil((chat.cooldownUntil - Date.now()) / 60_000))}m` })
+      ? el("span", { class: "wc-cooling", text: t("rc.cooling", Math.max(1, Math.ceil((chat.cooldownUntil - Date.now()) / 60_000))) })
       : null,
     listenerSwitch,
   );
@@ -205,28 +222,33 @@ function chatCard(bot: RemoteBotInfo, chat: RemoteChatInfo): HTMLElement {
   if (chat.evalError) card.append(el("div", { class: "wc-eval-err", text: `evaluation failing: ${chat.evalError.slice(0, 140)}` }));
 
   // meta + log path + viewer
-  const viewBtn = el("button", { class: "btn wc-viewlog", text: "View log", onClick: () => void showLogViewer(chat) });
+  const viewBtn = el("button", { class: "btn wc-viewlog", text: t("rc.viewLog"), onClick: () => void showLogViewer(chat) });
   card.append(
     el(
       "div",
       { class: "wc-meta" },
       el("span", {}, "msgs: ", el("span", { class: "mono", text: String(chat.messageCount) })),
       el("span", {}, "evals: ", el("span", { class: "mono", text: String(chat.evalCount) })),
-      el("span", {}, "last eval: ", el("span", { class: "mono", text: chat.lastEvalAt ? hhmm(chat.lastEvalAt) : "—" })),
+      el("span", {}, "last: ", el("span", { class: "mono", text: chat.lastEvalAt ? hhmm(chat.lastEvalAt) : "—" })),
       el("span", { style: { flex: "1" } }),
       viewBtn,
     ),
   );
+  // log path: ONE line, MIDDLE ellipsis (head shrinks with ellipsis, tail is
+  // kept whole), full path in tooltip, click-to-copy
+  const cut = Math.max(0, chat.logPath.length - 24);
   card.append(
     el("div", {
       class: "wc-logpath mono",
-      text: chat.logPath,
-      title: "Click to copy log path",
+      title: `${chat.logPath}\n${t("rc.copyLogPath")}`,
       onClick: () => {
         void navigator.clipboard.writeText(chat.logPath);
-        toast("Log path copied");
+        toast(t("rc.logPathCopied"));
       },
-    }),
+    },
+      el("span", { class: "lp-head", text: chat.logPath.slice(0, cut) }),
+      el("span", { class: "lp-tail", text: chat.logPath.slice(cut) }),
+    ),
   );
   return card;
 }
@@ -262,44 +284,72 @@ export function proposalsSection(): HTMLElement | null {
   const pending = pendingProposals();
   if (!pending.length) return null;
   const wrap = el("div", { class: "pp-list" });
-  wrap.append(el("div", { class: "panel-header", text: `Proposals (${pending.length})`, style: { padding: "6px 2px 2px" } }));
+  wrap.append(el("div", { class: "panel-header", text: `${t("rc.proposals")} (${pending.length})`, style: { padding: "6px 2px 2px" } }));
   for (const p of pending) wrap.append(proposalCard(p));
   return wrap;
 }
 
+/**
+ * «Запросы» view (remote-fix 3): inline expanding section under the bot
+ * card's action row — the permanent home for this bot's proposals.
+ */
+export function botRequestsSection(bot: RemoteBotInfo): HTMLElement | null {
+  if (!openRequests.has(bot.id)) return null;
+  const wrap = el("div", { class: "bc-requests materialize" });
+  const relevant = watch.proposals.filter(
+    (p) => p.botId === bot.id && (p.status === "pending" || p.status === "no-approver" || p.status === "expired"),
+  );
+  if (!relevant.length) {
+    wrap.append(el("div", { class: "cc-empty", text: t("rc.noRequests") }));
+    return wrap;
+  }
+  for (const p of relevant) wrap.append(proposalCard(p));
+  return wrap;
+}
+
 function proposalCard(p: RemoteProposal): HTMLElement {
-  const doBtn = el("button", { class: "btn btn-primary", text: "Do it" }) as HTMLButtonElement;
-  const skipBtn = el("button", { class: "btn pp-skip", text: "Skip" }) as HTMLButtonElement;
+  const expired = p.status === "expired";
+  const doBtn = el("button", { class: "btn btn-primary", text: t("rc.accept") }) as HTMLButtonElement;
+  const skipBtn = el("button", { class: "btn pp-skip", text: t("rc.skip") }) as HTMLButtonElement;
+  const actions = el("div", { class: "pp-actions" }, doBtn, skipBtn);
+  const card = el(
+    "div",
+    { class: expired ? "pp-card expired" : "pp-card" },
+    // header: sender + chat + time ONLY — the message renders once, below
+    el(
+      "div",
+      { class: "pp-byline" },
+      el("span", { class: "pp-author", text: `@${p.author}` }),
+      el("span", { class: "pp-chat", text: `· ${p.chatTitle}` }),
+      p.status === "no-approver" ? el("span", { class: "pp-noapprover", text: t("rc.noApprover") }) : null,
+      expired ? el("span", { class: "pp-expired", text: t("rc.expired") }) : null,
+      el("span", { style: { flex: "1" } }),
+      el("span", { class: "pp-time", text: hhmm(p.createdAt) }),
+    ),
+    el("div", { class: "pp-quote mono", text: p.quote }),
+    // the listener's imperative read — only when it adds information
+    p.source === "listener" && p.headline.trim() && p.headline.trim() !== p.quote.trim()
+      ? el("div", { class: "pp-headline", text: p.headline })
+      : null,
+  );
+  if (!expired) card.append(actions);
+
   const decide = (approve: boolean) => {
     doBtn.disabled = skipBtn.disabled = true;
     void window.ide.remote.decideProposal(p.id, approve).then((res) => {
-      // losing surface: someone on Telegram got there first
-      if (!res.ok && res.decidedBy) toast(`Already decided by ${res.decidedBy}`);
-      else if (!res.ok) {
-        toast("Proposal is no longer pending");
+      // losing surface (first-decision-wins): show who got there first
+      if (!res.ok && res.decidedBy) {
+        actions.replaceWith(el("div", { class: "pp-decided dim", text: t("rc.decidedBy", res.decidedBy) }));
+        toast(t("rc.alreadyDecided", res.decidedBy));
+      } else if (!res.ok) {
+        toast(t("rc.noLongerPending"));
         doBtn.disabled = skipBtn.disabled = false;
       }
     });
   };
   doBtn.addEventListener("click", () => decide(true));
   skipBtn.addEventListener("click", () => decide(false));
-
-  return el(
-    "div",
-    { class: "pp-card" },
-    el("div", { class: "pp-headline", text: p.headline }),
-    el("div", { class: "pp-quote mono", text: p.quote }),
-    el(
-      "div",
-      { class: "pp-byline" },
-      el("span", { text: `@${p.author}` }),
-      el("span", { class: "pp-chat", text: `· ${p.chatTitle}` }),
-      p.status === "no-approver" ? el("span", { class: "pp-noapprover", text: "no approver — pair a user" }) : null,
-      el("span", { style: { flex: "1" } }),
-      el("span", { class: "pp-time", text: hhmm(p.createdAt) }),
-    ),
-    el("div", { class: "pp-actions" }, doBtn, skipBtn),
-  );
+  return card;
 }
 
 // ---------------------------------------------------------------- log viewer

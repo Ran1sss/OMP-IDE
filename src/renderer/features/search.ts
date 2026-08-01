@@ -8,6 +8,7 @@ import { I } from "../core/icons";
 import { on, emit } from "../core/bus";
 import { state, baseName, relPath, dirName } from "../core/state";
 import { toast, confirmDialog } from "../core/ui";
+import { t } from "../core/i18n";
 import type { SearchMatch, ReplaceEdit } from "../../shared/types";
 
 let panelEl: HTMLElement;
@@ -51,7 +52,7 @@ function renderEmptyHint() {
       "div",
       { class: "search-empty" },
       svgIcon(I.search),
-      el("div", { text: "Type to search across the workspace" }),
+      el("div", { text: t("search.hint") }),
       el(
         "div",
         { class: "hint-row", style: { display: "flex", gap: "6px", alignItems: "center" } },
@@ -87,7 +88,7 @@ function renderSummary(done: boolean, hitLimit: boolean, error?: string) {
   }
   const files = matchesByFile.size;
   if (totalMatches === 0 && done) {
-    summaryEl.append(el("span", { text: "No results" }));
+    summaryEl.append(el("span", { text: t("search.noResults") }));
     return;
   }
   summaryEl.append(
@@ -240,8 +241,8 @@ export function initSearchPanel(container: HTMLElement) {
   panelEl = container;
   panelEl.classList.add("search-panel");
 
-  const regexBtn = el("button", { class: "chip-toggle", text: ".*", title: "Use regular expression" });
-  const caseBtn = el("button", { class: "chip-toggle", text: "Aa", title: "Match case" });
+  const regexBtn = el("button", { class: "chip-toggle", text: ".*", title: t("search.regex") });
+  const caseBtn = el("button", { class: "chip-toggle", text: "Aa", title: t("search.matchCase") });
   regexBtn.addEventListener("click", () => {
     regexOn = !regexOn;
     regexBtn.classList.toggle("on", regexOn);
@@ -255,17 +256,17 @@ export function initSearchPanel(container: HTMLElement) {
 
   queryInput = el("input", {
     class: "input mono",
-    placeholder: "Search",
+    placeholder: t("search.placeholder"),
     onInput: () => runSearch(),
     onKeyDown: (e) => {
       if (e.key === "Enter") void startSearch();
     },
   }) as HTMLInputElement;
 
-  const replaceBtn = el("button", { class: "btn", text: "Replace All", onClick: () => void applyReplace() });
+  const replaceBtn = el("button", { class: "btn", text: t("search.replaceAll"), onClick: () => void applyReplace() });
   replaceInput = el("input", {
     class: "input mono",
-    placeholder: "Replace",
+    placeholder: t("search.replace"),
     onInput: () => renderResults(),
   }) as HTMLInputElement;
 
@@ -291,6 +292,15 @@ export function initSearchPanel(container: HTMLElement) {
     resultsEl,
   );
   renderEmptyHint();
+  // live language switch: fixed strings of the stable inputs/buttons (fix 4)
+  on("lang-changed", () => {
+    queryInput.placeholder = t("search.placeholder");
+    replaceInput.placeholder = t("search.replace");
+    replaceBtn.textContent = t("search.replaceAll");
+    regexBtn.title = t("search.regex");
+    caseBtn.title = t("search.matchCase");
+    if (!matchesByFile.size) renderEmptyHint();
+  });
 
   window.ide.search.onBatch((b) => {
     if (b.id !== `s${currentSearch}`) return;

@@ -104,6 +104,10 @@
   padding: 0 10px 16px;
   gap: 10px;
 }
+/* scroll container law: cards NEVER compress to fit — the view scrolls.
+   (flex children default to shrink:1, which squeezed bot cards and clipped
+   their action rows once the view grew taller than the panel) */
+.control-center > * { flex-shrink: 0; }
 
 .cc-global {
   display: flex;
@@ -232,27 +236,55 @@
 .bot-card .paired-row .mono { color: var(--gold); font-size: 11.5px; }
 .bot-card .paired-row .pr-x { margin-left: auto; }
 
+/* action row (remote-fix 2): evenly spaced, no ghost slots; wraps cleanly
+   below ~340px with Delete keeping crit styling and staying last */
 .bot-card .bc-actions {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 6px;
-  margin-top: 10px;
-  padding-top: 8px;
-  border-top: 1px solid var(--line);
+  padding-top: 2px;
 }
+.bot-card .bc-actions .bc-del { margin-left: auto; }
+/* «Запросы» with gold pending badge (remote-fix 3) */
+.bc-requests-btn { display: inline-flex; align-items: center; gap: 6px; }
+.bc-requests-btn.open { border-color: var(--gold-40); color: var(--gold); }
+.bc-req-badge {
+  min-width: 15px;
+  height: 15px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: var(--gold);
+  color: var(--bg-0);
+  font-size: 9.5px;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.bc-requests { display: flex; flex-direction: column; gap: 6px; padding-top: 6px; }
 
 /* add-bot card */
 .addbot-card {
   background: var(--bg-1);
   border: 1px dashed var(--line-bright);
   border-radius: var(--r-m);
-  padding: 12px;
+  padding: 10px 12px;
   display: flex;
   flex-direction: column;
   gap: 8px;
+  container-type: inline-size;
+  container-name: addbot;
 }
 .addbot-card .ab-note { font-size: 11px; color: var(--text-low); }
+/* token input owns the row; [Add] drops to its own right-aligned row < 400px */
 .addbot-card .ab-row { display: flex; gap: 6px; }
+.addbot-card .ab-row .input { flex: 1; min-width: 0; }
+@container addbot (max-width: 400px) {
+  .addbot-card .ab-row { flex-wrap: wrap; }
+  .addbot-card .ab-row .input { flex-basis: 100%; }
+  .addbot-card .ab-row .btn { margin-left: auto; }
+}
 .addbot-card .ab-error {
   font-family: var(--font-mono);
   font-size: 11px;
@@ -415,8 +447,8 @@
 .wc-ear.evaluating { color: var(--gold); animation: beacon-breathe var(--t-slow) var(--ease-swift) infinite alternate; }
 .wc-ear.failing { color: var(--crit); animation: none; }
 
-.wc-listener-row { display: flex; align-items: center; gap: 6px; }
-.wc-listener-label { font-size: 11px; color: var(--text-mid); }
+.wc-listener-row { display: flex; align-items: center; gap: 6px; flex-wrap: nowrap; min-width: 0; }
+.wc-listener-label { font-size: 11px; color: var(--text-mid); cursor: help; text-decoration: underline dotted var(--line-bright); text-underline-offset: 3px; }
 .wc-oneshot-off { font-size: 10.5px; color: var(--text-low); font-style: italic; }
 .wc-cooling { font-size: 10px; color: var(--gold); opacity: 0.75; }
 .wc-smol-warn { font-size: 10.5px; color: var(--gold); }
@@ -426,15 +458,17 @@
 
 .wc-meta { display: flex; align-items: center; gap: 10px; font-size: 10.5px; color: var(--text-low); }
 .wc-meta .mono { color: var(--text-mid); }
-.wc-viewlog { padding: 1px 8px; font-size: 10.5px; }
+.wc-viewlog { padding: 1px 8px; font-size: 10.5px; white-space: nowrap; flex-shrink: 0; }
+/* log path: MIDDLE ellipsis — head shrinks with ellipsis, tail stays whole */
 .wc-logpath {
   font-size: 9.5px;
   color: var(--text-low);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  display: flex;
+  min-width: 0;
   cursor: pointer;
 }
+.wc-logpath .lp-head { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 0 1 auto; min-width: 0; }
+.wc-logpath .lp-tail { white-space: nowrap; flex-shrink: 0; }
 .wc-logpath:hover { color: var(--gold); }
 
 /* ---------- proposal cards ---------- */
@@ -468,7 +502,12 @@
 .pp-byline .pp-chat { color: var(--text-low); }
 .pp-noapprover { color: var(--gold); font-style: italic; }
 .pp-time { font-family: var(--font-mono); font-size: 10px; color: var(--text-low); }
-.pp-actions { display: flex; gap: 6px; }
+.pp-actions { display: flex; gap: 6px; flex-wrap: nowrap; }
+.pp-actions .btn { white-space: nowrap; }
+.pp-card.expired { opacity: 0.55; border-color: var(--line); }
+.pp-expired { color: var(--text-low); font-style: italic; font-size: 10px; }
+.pp-decided { font-size: 11px; }
+.pp-author { font-weight: 600; color: var(--text-hi); }
 /* skipping is routine — quiet ghost, no red */
 .pp-skip { background: transparent; border-color: transparent; color: var(--text-mid); }
 .pp-skip:hover { border-color: var(--line-bright); color: var(--text-hi); }
@@ -546,3 +585,19 @@
 
 .wc-remove { flex-shrink: 0; opacity: 0.55; }
 .wc-remove:hover { opacity: 1; color: var(--crit); }
+
+/* ---------- numeric dials + language picker (remote-fix 2/4) ---------- */
+/* ≥32px touch targets for numeric inputs at all widths */
+.cc-num { width: 58px; min-height: 32px; }
+.cc-lang {
+  min-height: 26px;
+  font-size: 11px;
+  background: var(--bg-1);
+  color: var(--text-mid);
+  border: 1px solid var(--line);
+  border-radius: var(--r-s);
+  padding: 2px 6px;
+  max-width: 110px;
+}
+/* the whole view never scrolls horizontally (remote-fix 2 law) */
+.control-center { overflow-x: hidden; }

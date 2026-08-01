@@ -32,6 +32,7 @@ import {
 } from "./watch-store";
 import { appendChatLog, readChatLogPage, chatLogPath, deleteChatLog } from "./chat-log";
 import { evaluateTranscript, oneshotAvailable, smolSelector } from "./oneshot";
+import { tg, tgLangFor, type TgLang } from "./tg-i18n";
 import { reportOneshotError } from "../models/manager";
 import { escapeMd } from "./format";
 import type { BotRuntime, GroupMessage } from "./bot-runtime";
@@ -342,19 +343,27 @@ export class WatchManager {
     this.deliverDm(proposal, approver.chatId);
   }
 
-  private approverFor(botId: string): { chatId: number; username: string } | null {
+  private approverFor(botId: string): { chatId: number; username: string; lang: TgLang } | null {
     const bot = loadStore().bots.find((b) => b.id === botId);
     if (!bot || !bot.paired.length) return null;
     const designated = loadWatchStore().approvers[botId];
     const user = bot.paired.find((u) => u.telegramId === designated) ?? bot.paired[0];
-    return { chatId: user.chatId, username: user.username };
+    return { chatId: user.chatId, username: user.username, lang: tgLangFor(user.languageCode) };
+  }
+
+  /** locale of the paired user behind a DM chat id (fixed strings only) */
+  private langForDm(botId: string, dmChatId: number): TgLang {
+    const bot = loadStore().bots.find((b) => b.id === botId);
+    const user = bot?.paired.find((u) => u.chatId === dmChatId);
+    return tgLangFor(user?.languageCode);
   }
 
   /** Telegram skeleton (spec §4): ▸ proposal · #chat / → headline / @author: «quote» */
   private deliverDm(p: StoredProposal, dmChatId: number): void {
     const rt = this.host.runtime(p.botId);
     if (!rt) return;
-    const kb = new InlineKeyboard().text("Do it", `pp:${p.id}:do`).text("Skip", `pp:${p.id}:skip`);
+    const L = tg(this.langForDm(p.botId, dmChatId));
+    const kb = new InlineKeyboard().text(L.doIt, `pp:${p.id}:do`).text(L.skip, `pp:${p.id}:skip`);
     const text = escapeMd(`▸ proposal · #${p.chatTitle}\n→ ${p.headline}\n@${p.author}: «${p.quote}»`);
     void rt.sendMd(dmChatId, text, kb).then((messageId) => {
       if (messageId === null) return;
@@ -382,10 +391,11 @@ export class WatchManager {
     const rt = this.host.runtime(p.botId);
     // losing surface: rewrite the DM so stale buttons vanish
     if (rt && p.dmChatId !== undefined && p.dmMessageId !== undefined) {
+      const L = tg(this.langForDm(p.botId, p.dmChatId));
       rt.editMd(
         p.dmChatId,
         p.dmMessageId,
-        escapeMd(`▸ proposal · #${p.chatTitle}\n→ ${p.headline}\n${approve ? "✓ approved" : "· skipped"} by ${by}`),
+        escapeMd(`▸ proposal · #${p.chatTitle}\n→ ${p.headline}\n${approve ? L.approvedBy(by) : L.skippedBy(by)}`),
       );
     }
 
@@ -399,8 +409,9 @@ export class WatchManager {
       });
       this.host.log(p.botId, by, `approved: ${p.headline.slice(0, 100)}`);
       // exactly one group message, ever: the acknowledgment
-      if (ok && rt) rt.sendMd(p.chatId, escapeMd("✓ взял в работу"));
-      if (!ok && rt && approver) rt.sendMd(approver.chatId, escapeMd("Agent is not running in OMP IDE — task not started."));
+      const ackLang = approver?.lang ?? "en";
+      if (ok && rt) rt.sendMd(p.chatId, escapeMd(tg(ackLang).onIt));
+      if (!ok && rt && approver) rt.sendMd(approver.chatId, escapeMd(tg(approver.lang).agentNotRunning));
     } else {
       this.host.log(p.botId, by, `skipped: ${p.headline.slice(0, 100)}`);
     }

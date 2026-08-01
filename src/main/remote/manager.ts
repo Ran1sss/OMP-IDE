@@ -41,6 +41,7 @@ import {
   teamDigestData,
 } from "../omp-team/team-service";
 import { SessionTracker } from "./session-tracker";
+import { tg, tgLangFor } from "./tg-i18n";
 import {
   escapeMd,
   mdToTelegram,
@@ -63,6 +64,8 @@ interface ChatTarget {
   bot: StoredBot;
   chatId: number;
   username: string;
+  /** recipient's Telegram language_code — localizes fixed strings per chat */
+  languageCode?: string;
 }
 
 interface DigestSlot {
@@ -120,14 +123,18 @@ class RemoteManager implements BotDelegate {
     // bullets (message economy §4); the full technical plan lives behind
     // [Open in IDE]. First decision wins with the IDE button.
     registerTeamGateNotifier((packet) => {
-      const kb = new InlineKeyboard()
-        .text("Approve", `team:${packet.runId}`)
-        .text("Open in IDE", "team:open");
       const lines = [
         `📋 ${sanitizeOutbound(packet.goal).split("\n")[0].slice(0, 180)}`,
         ...packet.slices.map((s) => `• ${s.title.slice(0, 90)}`),
       ];
-      for (const t of this.targets()) t.runtime.sendMd(t.chatId, escapeMd(lines.join("\n")), kb);
+      // button labels localize per recipient (fix 4)
+      for (const t of this.targets()) {
+        const L = tg(tgLangFor(t.languageCode));
+        const kb = new InlineKeyboard()
+          .text(L.approve, `team:${packet.runId}`)
+          .text(L.openInIde, "team:open");
+        t.runtime.sendMd(t.chatId, escapeMd(lines.join("\n")), kb);
+      }
     });
     // Team run completion: THE one final answer — report text (already prose,
     // sanitized) + one inline diffstat line + elapsed. Never a separate meta
@@ -437,6 +444,7 @@ class RemoteManager implements BotDelegate {
         firstName: msg.firstName,
         chatId: msg.chatId,
         pairedAt: Date.now(),
+        ...(msg.languageCode ? { languageCode: msg.languageCode } : {}),
       });
       saveStore();
     }
@@ -445,7 +453,7 @@ class RemoteManager implements BotDelegate {
     const rt = this.runtimes.get(botId);
     rt?.sendMd(
       msg.chatId,
-      escapeMd(`Paired. You now control the OMP agent through @${bot.username}. Send a task as a plain message, or /help.`),
+      escapeMd(tg(tgLangFor(msg.languageCode)).paired(bot.username)),
     );
     this.pushState();
     return true;
@@ -476,6 +484,12 @@ class RemoteManager implements BotDelegate {
     this.relayPulse(botId);
     const bot = loadStore().bots.find((b) => b.id === botId);
     if (!bot) return;
+    // keep the stored locale fresh — the user may switch Telegram language
+    const paired = bot.paired.find((u) => u.telegramId === msg.userId);
+    if (paired && msg.languageCode && paired.languageCode !== msg.languageCode) {
+      paired.languageCode = msg.languageCode;
+      saveStore();
+    }
     const rt = this.runtimes.get(botId);
     if (!rt) return;
 
@@ -659,28 +673,10 @@ class RemoteManager implements BotDelegate {
   private async handleCommand(cmd: string, rt: BotRuntime, bot: StoredBot, msg: InboundMessage): Promise<void> {
     switch (cmd) {
       case "/start":
-        rt.sendMd(msg.chatId, escapeMd("Already paired. Send a task as a plain message, or /help."));
+        rt.sendMd(msg.chatId, escapeMd(tg(tgLangFor(msg.languageCode)).alreadyPaired));
         return;
       case "/help":
-        rt.sendMd(
-          msg.chatId,
-          escapeMd(
-            [
-              "Send any plain message — it becomes a task (or steering while the agent runs, or an answer when it asks).",
-              "",
-              "/status — agent state, todo progress, workspace",
-              "/todo — live todo list",
-              "/stop — interrupt the agent (confirm)",
-              "/new — fresh agent session (confirm)",
-              "/diff — diffstat; buttons return per-file patches",
-              "/files — files touched this session",
-              "/who — connected remote users",
-              "/think — show thinking level; /think high sets it for this session",
-              "",
-              "Remote works only while OMP IDE runs on the desktop.",
-            ].join("\n"),
-          ),
-        );
+        rt.sendMd(msg.chatId, escapeMd(tg(tgLangFor(msg.languageCode)).help));
         return;
       case "/status": {
         const st = this.bridge.getStatus();
@@ -797,7 +793,7 @@ class RemoteManager implements BotDelegate {
         return;
       }
       default:
-        rt.sendMd(msg.chatId, escapeMd("Unknown command. /help lists everything."));
+        rt.sendMd(msg.chatId, escapeMd(tg(tgLangFor(msg.languageCode)).unknownCommand));
     }
   }
 
@@ -811,7 +807,7 @@ class RemoteManager implements BotDelegate {
       const runtime = this.runtimes.get(bot.id);
       if (!runtime || !runtime.isRunning) continue;
       for (const u of bot.paired) {
-        out.push({ runtime, bot, chatId: u.chatId, username: u.username });
+        out.push({ runtime, bot, chatId: u.chatId, username: u.username, ...(u.languageCode ? { languageCode: u.languageCode } : {}) });
       }
     }
     return out;
@@ -866,9 +862,9 @@ class RemoteManager implements BotDelegate {
       const prev = this.lastStatusState;
       this.lastStatusState = st.state;
       if (st.state === "dead" && prev !== "" && prev !== "dead") {
-        const kb = new InlineKeyboard().text("Restart session", "restart");
         const detail = st.detail ? `\n${sanitizeOutbound(st.detail).slice(-400)}` : "";
         for (const t of this.targets()) {
+          const kb = new InlineKeyboard().text(tg(tgLangFor(t.languageCode)).restartSession, "restart");
           t.runtime.sendMd(t.chatId, escapeMd(`⚠ Agent process died.${detail}`), kb);
         }
         this.log("", "", "system", "system", "agent died — alert broadcast");
@@ -944,7 +940,7 @@ class RemoteManager implements BotDelegate {
     if (!targets.length) return;
     const kb = new InlineKeyboard();
     if (req.method === "confirm") {
-      kb.text("Yes", `ui:${req.id}:yes`).text("No", `ui:${req.id}:no`);
+      // Yes/No get localized per target below; the shared kb covers select
     } else if (req.method === "select" && req.options?.length) {
       req.options.forEach((opt, i) => kb.text(opt.slice(0, 48), `ui:${req.id}:${i}`).row());
     }
@@ -955,7 +951,13 @@ class RemoteManager implements BotDelegate {
     ].filter(Boolean);
     const text = escapeMd(parts.join("\n"));
     for (const t of targets) {
-      t.runtime.sendMd(t.chatId, text, req.method === "confirm" || req.method === "select" ? kb : undefined);
+      if (req.method === "confirm") {
+        const L = tg(tgLangFor(t.languageCode));
+        const confirmKb = new InlineKeyboard().text(L.yes, `ui:${req.id}:yes`).text(L.no, `ui:${req.id}:no`);
+        t.runtime.sendMd(t.chatId, text, confirmKb);
+      } else {
+        t.runtime.sendMd(t.chatId, text, req.method === "select" ? kb : undefined);
+      }
     }
   }
 

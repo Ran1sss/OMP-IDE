@@ -220,6 +220,8 @@ export interface Settings {
   motion: "full" | "events" | "minimal";
   /** nebula glass fallback: true = every glass surface renders opaque (auto-on when motion === "minimal") */
   reduceTransparency: boolean;
+  /** UI language: auto = OS locale (ru → Russian, else English); global, not per-workspace */
+  uiLang: "auto" | "ru" | "en";
 }
 
 /** one past conversation on disk (read-only history browser) */
@@ -266,6 +268,8 @@ export interface RemotePairedUser {
   firstName: string;
   chatId: number;
   pairedAt: number;
+  /** Telegram language_code at pairing/last message — localizes fixed bot strings (ru → RU, else EN) */
+  languageCode?: string;
 }
 
 export interface RemoteBotInfo {
@@ -952,4 +956,5 @@ export const DEFAULT_SETTINGS: Settings = {
   breadcrumbs: "on",
   tabSwitcher: "mru",
   motion: "full",
+  uiLang: "auto",
 };
