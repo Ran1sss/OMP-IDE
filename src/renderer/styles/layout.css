@@ -319,11 +319,15 @@
   border-radius: var(--r-s);
   cursor: pointer;
   white-space: nowrap;
+  /* one long filename must not blow the whole strip's overflow budget:
+     the pill caps and end-ellipses; full name lives in the tooltip */
+  max-width: 220px;
   transition: background var(--t-fast) var(--ease-swift), color var(--t-fast) var(--ease-swift),
               border-color var(--t-fast) var(--ease-swift);
   position: relative;
   flex-shrink: 0;
 }
+.tab > span:not([class]) { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .tab:hover { background: var(--bg-1); color: var(--text-hi); }
 .tab.active {
   background: var(--glass-bg);
