@@ -1,6 +1,6 @@
-import { app, BrowserWindow, ipcMain, dialog, shell, Menu, powerMonitor } from "electron";
+import { app, BrowserWindow, ipcMain, dialog, shell, Menu, powerMonitor, screen } from "electron";
 import { join, dirname, resolve } from "node:path";
-import { existsSync, statSync } from "node:fs";
+import { existsSync, statSync, readFileSync, writeFileSync } from "node:fs";
 import { registerFsHandlers, disposeWatchers } from "./fs-service";
 import { registerPtyHandlers, disposePtys } from "./pty-service";
 import { registerSearchHandlers } from "./search-service";
@@ -34,10 +34,50 @@ Menu.setApplicationMenu(null);
 // rAF-dependent behavior when the window is occluded. No effect otherwise.
 const TEST_WINDOW = process.env.OMP_IDE_TEST_WINDOW === "1";
 
+// ---------------------------------------------------------------- window bounds
+// Size/position/maximized survive relaunch (smoke matrix row 27). Best-effort:
+// a corrupt file or off-screen rect falls back to the 1500×920 default.
+interface WindowBounds { x?: number; y?: number; width: number; height: number; maximized?: boolean }
+
+const BOUNDS_FILE = "window-bounds.json";
+
+function loadBounds(): WindowBounds | null {
+  try {
+    const b = JSON.parse(readFileSync(join(app.getPath("userData"), BOUNDS_FILE), "utf8")) as WindowBounds;
+    if (typeof b.width !== "number" || typeof b.height !== "number") return null;
+    // reject rects entirely outside every display (monitor unplugged)
+    const visible = screen.getAllDisplays().some((d) => {
+      if (b.x === undefined || b.y === undefined) return true;
+      const a = d.workArea;
+      return b.x < a.x + a.width && b.x + b.width > a.x && b.y < a.y + a.height && b.y + b.height > a.y;
+    });
+    return visible ? b : { width: b.width, height: b.height, maximized: b.maximized };
+  } catch {
+    return null;
+  }
+}
+
+function saveBounds(win: BrowserWindow): void {
+  try {
+    const maximized = win.isMaximized();
+    // normal (restored) bounds even while maximized, so un-maximize lands right
+    const r = maximized ? win.getNormalBounds() : win.getBounds();
+    const payload: WindowBounds = { x: r.x, y: r.y, width: r.width, height: r.height, maximized };
+    writeFileSync(join(app.getPath("userData"), BOUNDS_FILE), JSON.stringify(payload));
+  } catch {
+    // best-effort persistence
+  }
+}
+
 function createWindow(workspacePath?: string) {
+  // Only the FIRST window adopts saved bounds; extra windows (open-in-new-window)
+  // use the default footprint so they don't stack pixel-perfect on the original.
+  const saved = windows.size === 0 ? loadBounds() : null;
   const win = new BrowserWindow({
-    width: 1500,
-    height: 920,
+    x: saved?.x,
+    y: saved?.y,
+    width: saved?.width ?? 1500,
+    height: saved?.height ?? 920,
     minWidth: 1280,
     minHeight: 760,
     frame: false,
@@ -57,9 +97,26 @@ function createWindow(workspacePath?: string) {
   windows.add(win);
   win.on("closed", () => windows.delete(win));
 
-  win.once("ready-to-show", () => win.show());
+  win.once("ready-to-show", () => {
+    if (saved?.maximized) win.maximize();
+    win.show();
+  });
   win.on("maximize", () => win.webContents.send("win:maximized", true));
   win.on("unmaximize", () => win.webContents.send("win:maximized", false));
+  // debounced bounds persistence — resize/move storms write once, on settle
+  let boundsTimer: NodeJS.Timeout | undefined;
+  const queueSave = () => {
+    clearTimeout(boundsTimer);
+    boundsTimer = setTimeout(() => saveBounds(win), 400);
+  };
+  win.on("resize", queueSave);
+  win.on("move", queueSave);
+  win.on("maximize", queueSave);
+  win.on("unmaximize", queueSave);
+  win.on("close", () => {
+    clearTimeout(boundsTimer);
+    saveBounds(win);
+  });
 
   const query = workspacePath ? `?ws=${encodeURIComponent(workspacePath)}` : "";
   win.loadFile(join(__dirname, "../renderer/index.html"), {
