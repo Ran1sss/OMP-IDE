@@ -1,7 +1,7 @@
 {
   "name": "omp-ide",
   "productName": "OMP IDE",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "description": "Desktop IDE for the Oh My Pi agent harness",
   "main": "dist/main/index.js",
   "private": true,
