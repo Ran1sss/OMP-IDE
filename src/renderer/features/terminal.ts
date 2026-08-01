@@ -275,6 +275,19 @@ export function isTerminalVisible(): boolean {
   return !regionEl.classList.contains("collapsed");
 }
 
+/** Workspace switch: kill every PTY and drop all tabs (no prompts — shells are stateless). */
+export async function disposeAllTerminals(): Promise<void> {
+  for (const t of [...tabs]) {
+    await window.ide.pty.kill(t.id);
+    t.term.dispose();
+    t.mountEl.remove();
+  }
+  tabs.length = 0;
+  active = null;
+  renderHeader();
+  if (!regionEl.classList.contains("collapsed")) regionEl.classList.add("collapsed");
+}
+
 export function fitActiveTerminal() {
   const t = tabs.find((x) => x.id === active);
   if (t && !t.dead && isTerminalVisible()) {

@@ -35,6 +35,8 @@ import type {
   TesterResult,
   TesterTarget,
   TesterProtocol,
+  TesterBatteryResult,
+  TesterBatteryProgress,
 } from "../shared/types";
 
 function on<T extends unknown[]>(channel: string, cb: (...args: T) => void): () => void {
@@ -126,6 +128,11 @@ const api: IdeApi = {
     runAll: () => ipcRenderer.invoke("tester:runAll"),
     modelHints: (): Promise<Record<TesterProtocol, string[]>> => ipcRenderer.invoke("tester:modelHints"),
     onResult: (cb) => on<[TesterResult]>("tester:result", cb),
+    runBattery: (target: TesterTarget): Promise<TesterBatteryResult> =>
+      ipcRenderer.invoke("tester:runBattery", target),
+    batteryInfo: (): Promise<Record<TesterProtocol, { requests: number; checks: number }>> =>
+      ipcRenderer.invoke("tester:batteryInfo"),
+    onBatteryCheck: (cb) => on<[TesterBatteryProgress]>("tester:batteryCheck", cb),
   },
   dialog: {
     openFolder: (): Promise<string | null> => ipcRenderer.invoke("dialog:openFolder"),
@@ -153,6 +160,7 @@ const api: IdeApi = {
     getRecents: (): Promise<RecentWorkspace[]> => ipcRenderer.invoke("store:getRecents"),
     addRecent: (path) => ipcRenderer.invoke("store:addRecent", path),
     removeRecent: (path) => ipcRenderer.invoke("store:removeRecent", path),
+    togglePin: (path) => ipcRenderer.invoke("store:togglePin", path),
     getLayout: (workspace): Promise<LayoutState | null> =>
       ipcRenderer.invoke("store:getLayout", workspace),
     setLayout: (workspace, l: LayoutState) => ipcRenderer.invoke("store:setLayout", workspace, l),
@@ -177,6 +185,8 @@ const api: IdeApi = {
     getWatchState: (): Promise<RemoteWatchState> => ipcRenderer.invoke("remote:getWatchState"),
     setChatWatched: (botId, chatId, watched) =>
       ipcRenderer.invoke("remote:setChatWatched", botId, chatId, watched),
+    setUserOwner: (botId, telegramId, owner) =>
+      ipcRenderer.invoke("remote:setUserOwner", botId, telegramId, owner),
     setChatListener: (botId, chatId, listener) =>
       ipcRenderer.invoke("remote:setChatListener", botId, chatId, listener),
     setChatAnswerMembers: (botId, chatId, enabled) =>

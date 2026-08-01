@@ -1649,3 +1649,25 @@ export function initEditorArea(container: HTMLElement) {
 export function hasDirtyTabs(): boolean {
   return dirtyCount() > 0;
 }
+
+/**
+ * Workspace switch: close EVERY tab in every group. Dirty tabs prompt one by
+ * one (same dialog as closeTab); any Cancel aborts the whole sweep — the
+ * caller must then abort the switch with nothing torn down. Clean tabs are
+ * force-closed (no prompts). Returns false on abort.
+ */
+export async function closeAllTabs(): Promise<boolean> {
+  // dirty first: a Cancel must abort BEFORE anything clean is torn down
+  for (const g of [...groups]) {
+    for (const tab of [...g.tabs]) {
+      if (!tab.dirty) continue;
+      if (!(await closeTab(tab.key, { group: g }))) return false;
+    }
+  }
+  for (const g of [...groups]) {
+    for (const tab of [...g.tabs]) {
+      await closeTab(tab.key, { force: true, group: g });
+    }
+  }
+  return true;
+}

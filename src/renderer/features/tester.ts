@@ -13,6 +13,9 @@ import { t } from "../core/i18n";
 import { toast, inputDialog } from "../core/ui";
 import type {
   ProviderInfo,
+  TesterBatteryResult,
+  TesterCheckId,
+  TesterCheckResult,
   TesterProtocol,
   TesterResult,
   TesterTarget,
@@ -47,8 +50,8 @@ function verdictClass(v: TesterVerdict): string {
   return "v-crit";
 }
 
-/** session-only history (P0: not persisted) */
-const history: TesterResult[] = [];
+/** session-only history (P0: not persisted) — single probes and «Оценка» batteries */
+const history: (TesterResult | TesterBatteryResult)[] = [];
 const MAX_HISTORY = 20;
 
 let hintsCache: Record<TesterProtocol, string[]> | null = null;
@@ -186,6 +189,131 @@ export function renderVerdictCard(r: TesterResult): HTMLElement {
   return card;
 }
 
+// ---------------------------------------------------------------- «Оценка»: battery card
+
+function checkName(id: TesterCheckId): string {
+  switch (id) {
+    case "identity": return t("tst.chkIdentity");
+    case "signature": return t("tst.chkSignature");
+    case "consistency": return t("tst.chkConsistency");
+    case "knowledge": return t("tst.chkKnowledge");
+    case "character": return t("tst.chkCharacter");
+    case "structured": return t("tst.chkStructured");
+    case "protocol": return t("tst.chkProtocol");
+    case "completeness": return t("tst.chkCompleteness");
+    case "roles": return t("tst.chkRoles");
+    case "limit": return t("tst.chkLimit");
+  }
+}
+
+/** ring grade: 100% = system-ok, ≥70% = flare, below = crit */
+function batteryGrade(percent: number): "ok" | "flare" | "crit" {
+  return percent >= 100 ? "ok" : percent >= 70 ? "flare" : "crit";
+}
+
+function batteryRow(c: TesterCheckResult): HTMLElement {
+  const row = el("div", { class: `tb-row s-${c.status}` });
+  const body = el("div", { class: "tb-row-body", style: { display: "none" } });
+  body.append(el("div", { class: "tb-detail mono", text: c.detail }));
+  for (const r of c.raw) {
+    body.append(
+      el("div", { class: "tcr-title mono", text: t("tst.rawReqTitle") }),
+      tintJson(r.request),
+      el("div", { class: "tcr-title mono", text: t("tst.rawRespTitle") }),
+      tintJson(r.response || t("tst.emptyBody")),
+    );
+  }
+  const head = el(
+    "div",
+    { class: "tb-row-head", onClick: () => { body.style.display = body.style.display === "none" ? "" : "none"; } },
+    el("span", { class: "tb-glyph mono", text: c.status === "pass" ? "✓" : c.status === "fail" ? "✕" : "–" }),
+    el("span", { class: "tb-name", text: checkName(c.id) }),
+    c.heuristic ? el("span", { class: "tb-heur", text: c.status === "fail" ? t("tst.suspicion") : t("tst.heuristic") }) : null,
+    c.status === "skip" ? el("span", { class: "tb-skip-label", text: t("tst.skip") }) : null,
+    el("span", { class: "tb-more mono", text: t("tst.details") }),
+  );
+  row.append(head, body);
+  return row;
+}
+
+export function renderBatteryCard(b: TesterBatteryResult): HTMLElement {
+  const card = el("div", { class: "tester-card battery-card materialize" });
+  const grade = batteryGrade(b.percent);
+
+  // the ring — animated fill via stroke-dashoffset transition (once, on mount)
+  const R = 52;
+  const CIRC = 2 * Math.PI * R;
+  const NS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(NS, "svg");
+  svg.setAttribute("viewBox", "0 0 120 120");
+  svg.setAttribute("class", "tbr-svg");
+  const track = document.createElementNS(NS, "circle");
+  track.setAttribute("cx", "60");
+  track.setAttribute("cy", "60");
+  track.setAttribute("r", String(R));
+  track.setAttribute("class", "tbr-track");
+  const arc = document.createElementNS(NS, "circle");
+  arc.setAttribute("cx", "60");
+  arc.setAttribute("cy", "60");
+  arc.setAttribute("r", String(R));
+  arc.setAttribute("class", `tbr-arc g-${grade}`);
+  arc.style.strokeDasharray = String(CIRC);
+  arc.style.strokeDashoffset = String(CIRC);
+  svg.append(track, arc);
+  requestAnimationFrame(() =>
+    requestAnimationFrame(() => {
+      arc.style.strokeDashoffset = String(CIRC * (1 - b.percent / 100));
+    }),
+  );
+
+  const skipped = b.checks.length - b.applicable;
+  const at = new Date(b.at);
+  const hh = `${String(at.getHours()).padStart(2, "0")}:${String(at.getMinutes()).padStart(2, "0")}`;
+  let hostName = b.target.baseUrl;
+  try {
+    hostName = new URL(b.target.baseUrl).host;
+  } catch {
+    // keep the raw base URL
+  }
+  const left = el(
+    "div",
+    { class: "tb-left" },
+    el("div", { class: "tb-ring" }, svg, el("div", { class: `tbr-num mono g-${grade}`, text: `${b.percent}%` })),
+    el("div", {
+      class: "tb-sub",
+      text: t("tst.passedOf", b.passed, b.applicable) + (skipped ? ` · ${t("tst.skipCount", skipped)}` : ""),
+    }),
+    el("div", { class: "tb-meta mono", text: b.target.model }),
+    el("div", { class: "tb-meta", text: `${hh} · ${hostName}` }),
+  );
+
+  // failed rows first — the eye lands on what broke
+  const rank = (c: TesterCheckResult) => (c.status === "fail" ? 0 : c.status === "pass" ? 1 : 2);
+  const rows = el("div", { class: "tb-rows" });
+  for (const c of [...b.checks].sort((x, y) => rank(x) - rank(y))) rows.append(batteryRow(c));
+
+  // metrics footer — absent fields say so, never a fabricated number
+  const metric = (label: string, value: string | null) =>
+    el(
+      "span",
+      { class: "tbf-item" },
+      el("span", { class: "tbf-label", text: label }),
+      el("span", { class: `tbf-value${value === null ? " dim" : ""}`, text: value ?? t("tst.mNotReported") }),
+    );
+  const foot = el(
+    "div",
+    { class: "tb-foot mono" },
+    metric(t("tst.mLatency"), b.medianTtfbMs !== null ? t("tst.msValue", b.medianTtfbMs) : null),
+    metric(t("tst.mTps"), b.tokensPerSec !== null ? String(b.tokensPerSec) : null),
+    metric(t("tst.mIn"), b.inputTokens !== null ? String(b.inputTokens) : null),
+    metric(t("tst.mOut"), b.outputTokens !== null ? String(b.outputTokens) : null),
+    metric(t("tst.mCache"), b.cachedTokens !== null ? String(b.cachedTokens) : null),
+  );
+
+  card.append(el("div", { class: "tb-main" }, left, rows), foot);
+  return card;
+}
+
 // ---------------------------------------------------------------- tester dialog
 
 let dialogClose: (() => void) | null = null;
@@ -226,6 +354,7 @@ export function openApiTester(prefill?: TesterPrefill): void {
         protocol = p;
         for (const [id, btn] of protoBtns) btn.classList.toggle("on", id === p);
         renderHints();
+        syncScoreTip();
       },
     });
     protoBtns.set(p, b);
@@ -258,6 +387,17 @@ export function openApiTester(prefill?: TesterPrefill): void {
   });
 
   const runBtn = el("button", { class: "btn btn-primary", text: t("tst.run") }) as HTMLButtonElement;
+  // «Оценка» — the hvoy-style check battery; tooltip states the request cost BEFORE firing
+  const scoreBtn = el("button", { class: "btn", text: t("tst.score") }) as HTMLButtonElement;
+  let batteryShape: Record<TesterProtocol, { requests: number; checks: number }> | null = null;
+  const syncScoreTip = () => {
+    const info = batteryShape?.[protocol];
+    scoreBtn.title = info ? t("tst.scoreTip", info.requests, info.checks) : "";
+  };
+  void window.ide.tester.batteryInfo().then((i) => {
+    batteryShape = i;
+    syncScoreTip();
+  });
   const saveBtn = el("button", { class: "btn", text: t("tst.saveAsProfile"), style: { display: "none" } }) as HTMLButtonElement;
 
   // ---- results region
@@ -282,6 +422,22 @@ export function openApiTester(prefill?: TesterPrefill): void {
     for (const r of history) {
       const at = new Date(r.at);
       const hh = `${String(at.getHours()).padStart(2, "0")}:${String(at.getMinutes()).padStart(2, "0")}`;
+      if ("kind" in r) {
+        // battery entry: «87% · 8/9 · fable-5» — click restores the full score card
+        const g = batteryGrade(r.percent);
+        historyStrip.append(
+          el("button", {
+            class: `tfh-item mono ${g === "ok" ? "v-ok" : g === "flare" ? "v-flare" : "v-crit"}`,
+            title: `${r.target.baseUrl} · ${r.target.model}`,
+            text: `${hh} ${r.percent}% · ${r.passed}/${r.applicable} · ${r.target.profileId ?? r.target.model.slice(0, 14)}`,
+            onClick: () => {
+              clear(resultHost);
+              resultHost.append(renderBatteryCard(r));
+            },
+          }),
+        );
+        continue;
+      }
       historyStrip.append(
         el("button", {
           class: `tfh-item mono ${verdictClass(r.verdict)}`,
@@ -339,6 +495,51 @@ export function openApiTester(prefill?: TesterPrefill): void {
   };
   runBtn.addEventListener("click", run);
 
+  // «Оценка»: sequential battery with live row fill-in — no spinner-then-dump
+  const runScore = () => {
+    const baseUrl = urlInput.value.trim();
+    const model = modelInput.value.trim();
+    if (!baseUrl || !model) {
+      toast(t("tst.needUrlModel"), { crit: true });
+      return;
+    }
+    const target: TesterTarget = {
+      profileId: prefill?.profileId ?? null,
+      baseUrl,
+      ...(prefill?.profileId ? {} : { apiKey: keyInput.value }),
+      protocol,
+      model,
+      streaming: false,
+    };
+    lastKey = keyInput.value;
+    runBtn.disabled = true;
+    scoreBtn.disabled = true;
+    scoreBtn.textContent = t("tst.scoring");
+    scoreBtn.classList.add("in-flight");
+    clear(resultHost);
+    const total = batteryShape?.[protocol]?.checks ?? 10;
+    const progHead = el("div", { class: "tb-progress mono", text: t("tst.scoreRunning", 0, total) });
+    const progRows = el("div", { class: "tb-rows" });
+    resultHost.append(el("div", { class: "tester-card battery-live" }, progHead, progRows));
+    const offProgress = window.ide.tester.onBatteryCheck((p) => {
+      progHead.textContent = t("tst.scoreRunning", p.done, p.total);
+      progRows.append(batteryRow(p.check));
+    });
+    void window.ide.tester.runBattery(target).then((b) => {
+      offProgress();
+      runBtn.disabled = false;
+      scoreBtn.disabled = false;
+      scoreBtn.textContent = t("tst.score");
+      scoreBtn.classList.remove("in-flight");
+      history.unshift(b);
+      if (history.length > MAX_HISTORY) history.pop();
+      clear(resultHost);
+      resultHost.append(renderBatteryCard(b));
+      renderHistory();
+    });
+  };
+  scoreBtn.addEventListener("click", runScore);
+
   saveBtn.addEventListener("click", () => {
     if (!lastOk) return;
     // name suggestion from the URL host; IP hosts get a generic stem
@@ -394,7 +595,7 @@ export function openApiTester(prefill?: TesterPrefill): void {
       el("div", { class: "ab-row" }, urlInput),
       prefill?.profileId ? null : el("div", { class: "ab-row" }, keyInput),
       protoWrap,
-      el("div", { class: "ab-row tf-model-row" }, modelInput, el("span", { class: "tf-stream" }, el("span", { class: "tfs-label", text: t("tst.streaming") }), streamSw), runBtn),
+      el("div", { class: "ab-row tf-model-row" }, modelInput, el("span", { class: "tf-stream" }, el("span", { class: "tfs-label", text: t("tst.streaming") }), streamSw), runBtn, scoreBtn),
       hintsEl,
     ),
     resultHost,

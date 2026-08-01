@@ -26,7 +26,9 @@ import { getAgentBridge } from "../omp-service";
 import { listSessionMetas, readSessionEntries } from "../session-history";
 import { teamJournalData } from "../omp-team/team-service";
 import { loadModelsStore } from "../models/store";
+import { readOmpProfiles } from "../models/omp-config";
 import { readChatLogPage } from "./chat-log";
+import { loadStore } from "./vault";
 import { sanitizeOutbound } from "./format";
 import type { SessionTracker } from "./session-tracker";
 
@@ -106,6 +108,108 @@ function parseIntent(stdout: string): IntentVerdict {
   }
   // an unparseable verdict is an error — callers fall back to pre-dialogue behavior
   return { intent: "error", error: `unparseable intent verdict: ${lines[lines.length - 1] ?? "(empty)"}` };
+}
+
+// ================================================== disclosure gate
+// User decision (privacy-split spec, 2026-08-01, supersedes the addendum's
+// group status answers): TWO disclosure levels, decided by where and who.
+//   public  — ANY group chat (incl. the paired owner): small talk only.
+//             The redacted context carries a busy/idle flag, a coarse
+//             activity class and a mood line — file names, paths, numbers,
+//             ids, quotes never enter the oneshot prompt at all.
+//   private — paired DM: the full grounded context (unchanged).
+
+export type Disclosure = "public" | "private";
+
+/** specifics-question in a group → deterministic playful redirect, zero model calls */
+const SPECIFICS_RE =
+  /(проект|файл|путь|код|покажи|репозитор|репо\b|модел|баланс|кредит|лог|дифф|коммит|ветк|рабоч(ая|ей) папк|воркспейс|задач|слайс|план|project|file|path|code|show me|repo|model|balance|log|diff|commit|branch|workspace|task|slice|plan)/i;
+
+export function isSpecificsAsk(text: string, botUsername?: string): boolean {
+  return SPECIFICS_RE.test(normalize(text, botUsername));
+}
+
+/** «кто твой владелец?»-class questions — answered deterministically, zero model calls */
+const OWNER_ASK_RE =
+  /(кто (тво(й|я)|у тебя) (овнер|владел(ец|ица)|хозя(ин|йка))|кто тебя (создал|сделал|завел|завёл)|чей ты( бот)?|кому (писать|написать)|whose bot are you|who('s| is) your owner|who owns you|who do i (dm|message|write))/i;
+
+export function isOwnerAsk(text: string, botUsername?: string): boolean {
+  return OWNER_ASK_RE.test(normalize(text, botUsername));
+}
+
+/** the designated owner set — ONE source of truth for every owner line (owner-fix spec) */
+export function ownersFor(botId: string): { name: string; username: string }[] {
+  const bot = loadStore().bots.find((b) => b.id === botId);
+  return (bot?.paired ?? []).filter((u) => u.owner).map((u) => ({ name: u.firstName, username: u.username }));
+}
+
+/** rotate through the localized redirect set so repeats read naturally */
+let redirectSeq = 0;
+export function pickRedirect<T>(lines: T[]): T {
+  return lines[redirectSeq++ % Math.max(1, lines.length)];
+}
+
+/** versioned in code — the PUBLIC voice; separate from the private template */
+const PUBLIC_SYSTEM_V1 =
+  "You are the team's friendly coding agent chatting in a group. Answer in the asker's " +
+  "language (Russian question → Russian answer). 1-2 sentences, casual and warm, plain text; " +
+  "a light emoticon is fine. You may say what KIND of work you're doing in general terms " +
+  "(the 'what you're up to' line below) and how it's going. NEVER name projects, files, " +
+  "paths, numbers, diffstats, models, logs or any other specifics — if asked for specifics, " +
+  "playfully decline and point to your owner's DM. Never invent details.";
+
+/** coarse activity class — the ONLY work signal a public reply may build on */
+function coarseActivity(): string {
+  const bridge = getAgentBridge();
+  const st = bridge.getStatus();
+  const team = teamJournalData();
+  const teamActive = !!team && !["done", "stopped", "stalled"].includes(team.phase);
+  if (!st || st.state === "idle" || st.state === "unavailable" || st.state === "dead" || st.state === "starting") {
+    return tracker && tracker.lastFinalText
+      ? "idle right now; recently wrapped up a piece of work and it went fine"
+      : "idle, nothing in flight";
+  }
+  const tool = (st.state === "tool" ? (st.tool ?? "") : "").toLowerCase();
+  const cls =
+    /edit|write|apply|patch/.test(tool) ? "editing code"
+    : /bash|exec|shell|run|term/.test(tool) ? "running commands and tests"
+    : /read|grep|glob|search|list|find/.test(tool) ? "reading code and researching"
+    : st.state === "awaiting-input" ? "waiting for a human decision"
+    : "thinking through a problem";
+  const phases = bridge.getTodoPhases();
+  let done = 0, total = 0;
+  for (const p of phases) for (const t of p.tasks) { total++; if (t.status === "completed") done++; }
+  const progress = !total ? "" : done / total > 0.8 ? "; almost done" : done / total > 0.4 ? "; in the middle of it" : "; just getting started";
+  return (teamActive ? "building something with the crew — " : "") + cls + progress;
+}
+
+/**
+ * Final no-leak guard over PUBLIC replies: rejects anything path-, file-,
+ * diffstat-, model-id- or workspace-shaped. Redaction happens at context
+ * assembly — this is the belt-and-braces layer; trips are logged upstream.
+ */
+function publicGuard(text: string): string | null {
+  if (/[A-Za-z]:\\/.test(text)) return "windows path";
+  if (/\/(src|dist|docs|node_modules)\//.test(text)) return "source path";
+  if (/\b[\w-]{2,}\.(md|ts|tsx|js|jsx|py|css|json|ya?ml|txt|exe|html)\b/i.test(text)) return "file name";
+  if (/[+−]\d+|\B-\d+\b/.test(text)) return "diffstat-like number";
+  for (const id of configuredModelIds()) {
+    if (id.length > 3 && text.toLowerCase().includes(id.toLowerCase())) return `model id (${id})`;
+  }
+  const root = getAgentBridge().getRoot();
+  if (root) {
+    const name = root.replace(/[\\/]+$/, "").split(/[\\/]/).pop();
+    if (name && name.length > 2 && text.toLowerCase().includes(name.toLowerCase())) return "workspace name";
+  }
+  return null;
+}
+
+function configuredModelIds(): string[] {
+  try {
+    return readOmpProfiles().flatMap((p) => p.models.map((m) => m.id));
+  } catch {
+    return [];
+  }
 }
 
 /**
@@ -299,28 +403,76 @@ const ANSWER_SYSTEM_V1 =
   "«в истории этого нет»), and when helpful add that the full record is in the IDE's History Browser. " +
   "Never invent facts, numbers or file names.";
 
+export type AnswerResult =
+  | { ok: true; answer: string; guardTrips: number }
+  | { ok: false; error: string; guardTrips: number };
+
+/**
+ * The one answer entry point. `disclosure` is computed by the CALLER in
+ * exactly one place per surface: any group chat → "public", paired DM →
+ * "private". The context assembly branches on it — public prompts never
+ * contain names, paths, numbers or ids (redaction at assembly, not model
+ * discretion), and public replies pass the no-leak guard with ONE retry.
+ */
 export async function answerQuestion(args: {
   botId: string;
   chatId: number;
   question: string;
   asker: string;
-  isGroup: boolean;
-}): Promise<{ ok: true; answer: string } | { ok: false; error: string }> {
-  const context = assembleContext(args);
+  disclosure: Disclosure;
+}): Promise<AnswerResult> {
+  if (args.disclosure === "public") {
+    const mem = memoryFor(args.botId, args.chatId);
+    const prompt =
+      (mem.length
+        ? "earlier chit-chat:\n" + mem.map((x) => `${x.asker}: ${oneLine(x.q, 100)}\nbot: ${oneLine(x.a, 120)}`).join("\n") + "\n\n"
+        : "") +
+      `your owner(s), safe to name: ${ownersFor(args.botId).map((o) => `${o.name} (@${o.username})`).join(", ") || "none designated"}\n` +
+      `what you're up to (coarse, do not quote verbatim): ${coarseActivity()}\n\n` +
+      `${args.asker} says: ${args.question.slice(0, 300)}`;
+    const compose = async (): Promise<{ ok: true; answer: string } | { ok: false; error: string }> => {
+      const res = await runOneshot({ system: PUBLIC_SYSTEM_V1, prompt, model: smolSelector(), timeoutMs: 45_000 });
+      if (!res.ok) return res;
+      const a = sanitizeOutbound(res.stdout).trim().replace(/^["'«]|["'»]$/g, "").trim().slice(0, 300);
+      return a ? { ok: true, answer: a } : { ok: false, error: "empty public answer" };
+    };
+    let trips = 0;
+    let out = await compose();
+    if (out.ok) {
+      let violation = publicGuard(out.answer);
+      if (violation) {
+        trips++;
+        out = await compose(); // regenerate once
+        if (out.ok) {
+          violation = publicGuard(out.answer);
+          if (violation) {
+            trips++;
+            out = { ok: false, error: `guard: ${violation}` }; // caller sends the stock line
+          }
+        }
+      }
+    }
+    if (!out.ok) return { ok: false, error: out.error, guardTrips: trips };
+    remember(args.botId, args.chatId, { asker: args.asker, q: args.question, a: out.answer, at: Date.now() });
+    return { ok: true, answer: out.answer, guardTrips: trips };
+  }
+
+  // private — the full grounded path (unchanged behavior)
+  const context = assembleContext({ botId: args.botId, chatId: args.chatId, isGroup: false, question: args.question });
   const res = await runOneshot({
     system: ANSWER_SYSTEM_V1,
     prompt: `${context}\n\nQUESTION from @${args.asker}: ${args.question.slice(0, 500)}`,
     model: smolSelector(),
     timeoutMs: 60_000,
   });
-  if (!res.ok) return { ok: false, error: res.error };
+  if (!res.ok) return { ok: false, error: res.error, guardTrips: 0 };
   // last non-spinner paragraph, unquoted, capped — Message economy: ONE short reply
   const answer = sanitizeOutbound(res.stdout)
     .trim()
     .replace(/^["'«]|["'»]$/g, "")
     .trim()
     .slice(0, 900);
-  if (!answer) return { ok: false, error: "empty answer from oneshot" };
+  if (!answer) return { ok: false, error: "empty answer from oneshot", guardTrips: 0 };
   remember(args.botId, args.chatId, { asker: args.asker, q: args.question, a: answer, at: Date.now() });
-  return { ok: true, answer };
+  return { ok: true, answer, guardTrips: 0 };
 }

@@ -800,8 +800,23 @@ async function newSession() {
 
 export async function startAgent() {
   if (!state.root) return;
+  // NOW-zone counters and todo strip are per-session surfaces: a workspace
+  // switch (repeated startAgent) must not carry the previous root's numbers
+  renderTodos([]);
+  sessionAdd = 0;
+  sessionDel = 0;
+  sessionFiles.clear();
+  lastResultLine = "";
+  activeTodo = null;
+  nowLive = null;
+  renderNow();
   renderWelcomeState();
   await window.ide.omp.start(state.root);
+}
+
+/** Is a turn or team run in flight? (workspace-switch busy guard) */
+export function agentBusy(): boolean {
+  return status.state === "thinking" || status.state === "tool";
 }
 
 // ---------------------------------------------------------------- init

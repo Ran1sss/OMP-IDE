@@ -5,7 +5,7 @@
 
 import { el, clear, svgIcon } from "../core/dom";
 import { I } from "../core/icons";
-import { toast, confirmDialog } from "../core/ui";
+import { toast, confirmDialog, selectDialog } from "../core/ui";
 import { on } from "../core/bus";
 import { t, applyLang, resolveLang } from "../core/i18n";
 import {
@@ -140,18 +140,43 @@ function botCard(bot: RemoteBotInfo): HTMLElement {
   if (bot.paired.length) {
     const list = el("div", { class: "bc-paired" });
     for (const u of bot.paired) {
+      // owner crown (owner-fix): the bot names crowned users in group replies
+      const crown = el("button", {
+        class: u.owner ? "icon-btn pu-crown on" : "icon-btn pu-crown",
+        title: u.owner ? t("rc.removeOwner") : t("rc.makeOwner"),
+        onClick: () => {
+          void window.ide.remote.setUserOwner(bot.id, u.telegramId, !u.owner).then((res) => {
+            if (!res.ok) toast(res.error === "last-owner" ? t("rc.ownerLast") : (res.error ?? "?"), { crit: true });
+          });
+        },
+      }, "♛");
       const revoke = el("button", {
         class: "icon-btn pr-x",
         title: t("rc.revokeUser", u.username),
         onClick: () => {
-          void confirmDialog({
-            title: t("rc.revokeTitle"),
-            message: t("rc.revokeMsg", u.username, bot.username),
-            confirmLabel: t("rc.revoke"),
-            danger: true,
-          }).then((ok) => {
-            if (ok) void window.ide.remote.revokeUser(bot.id, u.telegramId);
-          });
+          const others = bot.paired.filter((p) => p.telegramId !== u.telegramId);
+          const lastOwner = !!u.owner && !others.some((p) => p.owner);
+          const doRevoke = () => {
+            void confirmDialog({
+              title: t("rc.revokeTitle"),
+              message: t("rc.revokeMsg", u.username, bot.username),
+              confirmLabel: t("rc.revoke"),
+              danger: true,
+            }).then((ok) => {
+              if (ok) void window.ide.remote.revokeUser(bot.id, u.telegramId);
+            });
+          };
+          if (lastOwner && others.length) {
+            // forced choice: crown a successor BEFORE the un-pair completes
+            void selectDialog(t("rc.chooseOwner"), others.map((p) => `${p.firstName} @${p.username}`)).then((pick) => {
+              if (!pick) return;
+              const next = others.find((p) => pick.endsWith(`@${p.username}`));
+              if (!next) return;
+              void window.ide.remote.setUserOwner(bot.id, next.telegramId, true).then(() => doRevoke());
+            });
+          } else {
+            doRevoke();
+          }
         },
       });
       revoke.append(svgIcon(I.close));
@@ -159,6 +184,7 @@ function botCard(bot: RemoteBotInfo): HTMLElement {
         el(
           "div",
           { class: "paired-row" },
+          crown,
           el("span", { text: u.firstName }),
           el("span", { class: "mono", text: `@${u.username}` }),
           revoke,
@@ -435,9 +461,9 @@ function maybeCompletePairing(prev: RemoteState, next: RemoteState): void {
 function feedRow(ev: RemoteActivityEvent): HTMLElement {
   return el(
     "div",
-    { class: ev.kind === "blocked-unauthorized" ? "feed-row blocked" : ev.kind === "dialog" ? "feed-row dialog" : "feed-row" },
+    { class: ev.kind === "blocked-unauthorized" ? "feed-row blocked" : ev.kind === "dialog" ? "feed-row dialog" : ev.kind === "dialog-guard" ? "feed-row dialog-guard" : "feed-row" },
     el("span", { class: "fr-time", text: timeShort(ev.time) }),
-    el("span", { class: "fr-kind", text: ev.kind === "blocked-unauthorized" ? t("rc.blocked") : ev.kind === "dialog" ? t("rc.dialog") : ev.kind }),
+    el("span", { class: "fr-kind", text: ev.kind === "blocked-unauthorized" ? t("rc.blocked") : ev.kind === "dialog" ? t("rc.dialog") : ev.kind === "dialog-guard" ? t("rc.dialogGuard") : ev.kind }),
     el("span", { class: "fr-sender", text: ev.sender }),
     el("span", { class: "fr-detail", text: ev.detail }),
     el("span", { class: "fr-bot", text: ev.botUsername ? `@${ev.botUsername}` : "" }),

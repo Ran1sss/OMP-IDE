@@ -112,6 +112,15 @@ class RemoteManager implements BotDelegate {
     this.bridge.onUiRequest((req) => this.onAgentQuestion(req));
 
     const store = loadStore();
+    // owner migration (owner-fix spec): a bot with paired users but no owner
+    // crowns its FIRST paired user, once, and says so in the feed
+    for (const bot of store.bots) {
+      if (bot.paired.length && !bot.paired.some((u) => u.owner)) {
+        bot.paired[0].owner = true;
+        saveStore();
+        this.log(bot.id, bot.username, "system", "system", `owner auto-designated: @${bot.paired[0].username}`);
+      }
+    }
     if (store.globalEnabled) {
       for (const bot of store.bots) {
         if (bot.enabled) await this.spawnRuntime(bot);
@@ -412,6 +421,21 @@ class RemoteManager implements BotDelegate {
     this.pushState();
   }
 
+  /** crown/uncrown a paired user (IDE-only). ≥1 owner stays while users are paired. */
+  setUserOwner(botId: string, telegramId: number, owner: boolean): { ok: boolean; error?: string } {
+    const store = loadStore();
+    const bot = store.bots.find((b) => b.id === botId);
+    const user = bot?.paired.find((p) => p.telegramId === telegramId);
+    if (!bot || !user) return { ok: false, error: "User is not paired" };
+    if (!owner && user.owner && !bot.paired.some((p) => p.owner && p.telegramId !== telegramId) && bot.paired.length > 1)
+      return { ok: false, error: "last-owner" }; // renderer shows the localized hint
+    user.owner = owner;
+    saveStore();
+    this.log(botId, bot.username, "system", "system", `${owner ? "owner designated" : "owner removed"}: @${user.username}`);
+    this.pushState();
+    return { ok: true };
+  }
+
   // ================================================== pairing
 
   startPairing(botId: string): RemotePairing {
@@ -545,10 +569,11 @@ class RemoteManager implements BotDelegate {
       return;
     }
     if (verdict.intent === "question" || verdict.intent === "mixed") {
-      const res = await answerQuestion({ botId, chatId: msg.chatId, question: msg.text, asker: msg.username, isGroup: false });
+      // paired DM = the ONE private surface: full grounded status/history
+      const res = await answerQuestion({ botId, chatId: msg.chatId, question: msg.text, asker: msg.username, disclosure: "private" });
       if (res.ok) {
         rt.sendMd(msg.chatId, escapeMd(res.answer));
-        this.log(botId, bot.username, `@${msg.username}`, "dialog", `«${msg.text.slice(0, 70)}» → ${res.answer.slice(0, 90)}`);
+        this.log(botId, bot.username, `@${msg.username}`, "dialog", `[private] «${msg.text.slice(0, 70)}» → ${res.answer.slice(0, 90)}`);
       } else {
         rt.sendMd(msg.chatId, escapeMd(tg(lang).dialogFailed));
         this.log(botId, bot.username, "system", "dialog", `answer failed: ${res.error.slice(0, 120)}`);
@@ -1198,6 +1223,9 @@ export function registerRemoteHandlers(ipc: IpcMain): void {
   ipc.handle("remote:cancelPairing", async () => m.cancelPairing());
   ipc.handle("remote:revokeUser", async (_e, botId: string, telegramId: number) =>
     m.revokeUser(botId, telegramId),
+  );
+  ipc.handle("remote:setUserOwner", async (_e, botId: string, telegramId: number, owner: boolean) =>
+    m.setUserOwner(botId, telegramId, owner),
   );
   ipc.handle("remote:getActivity", async () => m.getActivity());
 

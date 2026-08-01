@@ -257,6 +257,10 @@ export interface RecentWorkspace {
   path: string;
   name: string;
   openedAt: number;
+  /** pinned rows sort first in the switcher + welcome (persisted) */
+  pinned?: boolean;
+  /** folder no longer exists on disk (switcher renders dimmed, remove-only) */
+  missing?: boolean;
 }
 
 // ---------------------------------------------------------------- remote (telegram bridge)
@@ -271,6 +275,8 @@ export interface RemotePairedUser {
   pairedAt: number;
   /** Telegram language_code at pairing/last message — localizes fixed bot strings (ru → RU, else EN) */
   languageCode?: string;
+  /** designated owner (crown): named in group redirects/owner answers; ≥1 required while users are paired */
+  owner?: boolean;
 }
 
 export interface RemoteBotInfo {
@@ -303,6 +309,7 @@ export type RemoteEventKind =
   | "blocked-unauthorized"
   | "watch"
   | "dialog"
+  | "dialog-guard"
   | "system";
 
 export interface RemoteActivityEvent {
@@ -595,6 +602,60 @@ export interface TesterResult {
   at: number;
 }
 
+/** «Оценка»: named check ids of the hvoy-style battery */
+export type TesterCheckId =
+  | "identity"
+  | "signature"
+  | "consistency"
+  | "knowledge"
+  | "character"
+  | "structured"
+  | "protocol"
+  | "completeness"
+  | "roles"
+  | "limit";
+
+export type TesterCheckStatus = "pass" | "fail" | "skip";
+
+export interface TesterCheckResult {
+  id: TesterCheckId;
+  status: TesterCheckStatus;
+  /** engine-technical reason, same register as TesterResult.detail */
+  detail: string;
+  /** style-fingerprint signal: a fail renders as «подозрение», never proof */
+  heuristic: boolean;
+  /** raw exchanges backing this check (key redacted) */
+  raw: { request: string; response: string }[];
+}
+
+export interface TesterBatteryResult {
+  kind: "battery";
+  checks: TesterCheckResult[];
+  passed: number;
+  /** ring denominator: checks minus skips — skips NEVER count as passes */
+  applicable: number;
+  /** passed/applicable, 0-100; 0 when nothing was applicable */
+  percent: number;
+  /** median TTFB across all battery requests */
+  medianTtfbMs: number | null;
+  /** output tokens / generation time of the largest ok response */
+  tokensPerSec: number | null;
+  /** summed over requests; null = the usage block never reported the field */
+  inputTokens: number | null;
+  outputTokens: number | null;
+  cachedTokens: number | null;
+  requestCount: number;
+  target: TesterResult["target"];
+  at: number;
+}
+
+/** live row fill-in while the battery runs */
+export interface TesterBatteryProgress {
+  done: number;
+  total: number;
+  check: TesterCheckResult;
+}
+
 export interface TesterApi {
   /** run one probe; free-form keys live only in this call and the session history */
   run(target: TesterTarget): Promise<TesterResult>;
@@ -604,6 +665,12 @@ export interface TesterApi {
   modelHints(): Promise<Record<TesterProtocol, string[]>>;
   /** verdicts land here as they finish (both run and runAll) */
   onResult(cb: (r: TesterResult) => void): () => void;
+  /** «Оценка»: run the named check battery — several real sequential requests */
+  runBattery(target: TesterTarget): Promise<TesterBatteryResult>;
+  /** static battery shape per protocol: request cost + check count (cost honesty) */
+  batteryInfo(): Promise<Record<TesterProtocol, { requests: number; checks: number }>>;
+  /** battery rows land here as each check completes */
+  onBatteryCheck(cb: (p: TesterBatteryProgress) => void): () => void;
 }
 
 // ---------------------------------------------------------------- team mode
@@ -843,6 +910,7 @@ export interface IdeApi {
     getRecents(): Promise<RecentWorkspace[]>;
     addRecent(path: string): Promise<void>;
     removeRecent(path: string): Promise<void>;
+    togglePin(path: string): Promise<void>;
     getLayout(workspace: string): Promise<LayoutState | null>;
     setLayout(workspace: string, l: LayoutState): Promise<void>;
   };
@@ -877,6 +945,8 @@ export interface IdeApi {
     removeChat(botId: string, chatId: number, deleteLog: boolean): Promise<{ ok: boolean; error?: string }>;
     /** designate the approver among a bot's paired users */
     setApprover(botId: string, telegramId: number): Promise<void>;
+    /** crown/uncrown a paired user as bot owner (IDE-only, never via Telegram) */
+    setUserOwner(botId: string, telegramId: number, owner: boolean): Promise<{ ok: boolean; error?: string }>;
     setCooldownMinutes(minutes: number): Promise<void>;
     /** newest-first page of the chat log; beforeSeq omitted = tail */
     readChatLog(botId: string, chatId: number, beforeSeq?: number, limit?: number): Promise<RemoteChatLogEntry[]>;

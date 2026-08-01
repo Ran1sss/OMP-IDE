@@ -31,6 +31,18 @@ interface TgStrings {
   dialogNudge: string;
   /** Chat Dialogue: honest one-liner when the answer oneshot fails */
   dialogFailed: string;
+  /** group privacy: rotated playful redirects — WITH a designated owner to point at */
+  dialogRedirectsOwner: ((mention: string) => string)[];
+  /** ownerless fallback redirects (no dead-end mystery text) */
+  dialogRedirects: string[];
+  /** stock small-talk line when the no-leak guard rejects twice */
+  dialogStock: string;
+  /** «кто твой владелец?» — deterministic answers from the owner set */
+  ownerAnswerOne: (name: string, username: string) => string;
+  ownerAnswerMany: (list: string) => string;
+  ownerAnswerNone: string;
+  /** list separator for ownerAnswerMany */
+  ownerListAnd: string;
 }
 
 const RU: TgStrings = {
@@ -64,6 +76,21 @@ const RU: TgStrings = {
   ].join("\n"),
   dialogNudge: "Я на связи — спросите о статусе или дайте задачу.",
   dialogFailed: "Не смог собрать ответ (модель недоступна) — попробуйте ещё раз.",
+  dialogRedirectsOwner: [
+    (m) => `Об этом лучше у ${m} в личке :)`,
+    (m) => `Подробности — у ${m} в личке 🙂`,
+    (m) => `Это к ${m} — пишите в личку!`,
+  ],
+  dialogRedirects: [
+    "Это не для общего чата :)",
+    "Подробности — не для группы 🙂",
+    "Про такое я в группе молчу :)",
+  ],
+  dialogStock: "Всё идёт своим чередом 🙂 Подробности — в личке.",
+  ownerAnswerOne: (name, username) => `Мой владелец — ${name} (@${username}), пишите ему в личку!`,
+  ownerAnswerMany: (list) => `Мои владельцы — ${list}. По вопросам — им в личку.`,
+  ownerAnswerNone: "Владелец пока не настроен — но я на связи :)",
+  ownerListAnd: " и ",
 };
 
 const EN: TgStrings = {
@@ -97,6 +124,21 @@ const EN: TgStrings = {
   ].join("\n"),
   dialogNudge: "I'm here — ask about the status or send a task.",
   dialogFailed: "Couldn't compose an answer (model unavailable) — try again.",
+  dialogRedirectsOwner: [
+    (m) => `Better ask ${m} in DM :)`,
+    (m) => `Details live in ${m}'s DM 🙂`,
+    (m) => `That's one for ${m} — drop them a DM!`,
+  ],
+  dialogRedirects: [
+    "That's not for the group chat :)",
+    "Details aren't for the group 🙂",
+    "I keep that out of group chats :)",
+  ],
+  dialogStock: "All going smoothly 🙂 Details in DM.",
+  ownerAnswerOne: (name, username) => `My owner is ${name} (@${username}) — DM them!`,
+  ownerAnswerMany: (list) => `My owners are ${list}. Questions go to their DMs.`,
+  ownerAnswerNone: "No owner designated yet — but I'm around :)",
+  ownerListAnd: " and ",
 };
 
 export function tg(lang: TgLang): TgStrings {

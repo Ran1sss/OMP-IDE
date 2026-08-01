@@ -17,13 +17,13 @@ import { state, baseName, normPath } from "./core/state";
 import { registerCommand, installKeybindings } from "./core/commands";
 import { t, applyLang, resolveLang } from "./core/i18n";
 import { toast, choiceDialog, installDialogEscape } from "./core/ui";
-import { initEditorArea, saveActive, saveAll, closeActiveTab, splitEditor, toggleWordWrap, zoomFont, goToLine, findInFile, hasDirtyTabs, relayoutEditors, activeFilePath, cycleTab, openMarkdownPreview, focusGroup } from "./features/editor";
+import { initEditorArea, saveActive, saveAll, closeActiveTab, closeAllTabs, splitEditor, toggleWordWrap, zoomFont, goToLine, findInFile, hasDirtyTabs, relayoutEditors, activeFilePath, cycleTab, openMarkdownPreview, focusGroup } from "./features/editor";
 import { initExplorer, loadWorkspaceTree, collapseAll } from "./features/explorer";
-import { initTerminal, toggleTerminal, createTerminal } from "./features/terminal";
-import { initSearchPanel, focusSearch } from "./features/search";
+import { initTerminal, toggleTerminal, createTerminal, disposeAllTerminals } from "./features/terminal";
+import { initSearchPanel, focusSearch, resetSearchPanel } from "./features/search";
 import { initGitPanel, refreshGit, switchBranch, onBranchChange } from "./features/git";
 import { openPalette, invalidateFileCache } from "./features/palette";
-import { initAgentPanel, startAgent, focusAgentInput } from "./features/agent";
+import { initAgentPanel, startAgent, focusAgentInput, agentBusy } from "./features/agent";
 import { openSessionHistory } from "./features/history";
 import { initOutline, setOutlineVisible } from "./features/outline";
 import { openSettingsDialog, applyAccent } from "./features/settings";
@@ -33,6 +33,8 @@ import { initRemote, createBeacon } from "./features/remote";
 import { initModels, createModelChip, openModelsDialog, switchModelViaPicker, assignRoleViaPicker, setSessionThinkingViaPicker } from "./features/models";
 import { openApiTester } from "./features/tester";
 import { createNotificationBell } from "./features/notifications";
+import { createWorkspaceChip, refreshWorkspaceChip, openWorkspaceDropdown } from "./features/workspace-switcher";
+import { teamRun } from "./features/team";
 import "./styles/remote.css";
 import "./styles/models.css";
 import "./styles/mentions.css";
@@ -46,8 +48,8 @@ type ViewId = "explorer" | "search" | "git" | "remote" | "outline";
 
 const app = document.getElementById("app")!;
 
-// title bar
-const wsNameEl = el("span", { class: "ws-name" });
+// title bar — the workspace name is a live switcher chip (approved variant 2)
+const wsChip = createWorkspaceChip({ onSwitch: (path, opts) => void switchWorkspace(path, opts) });
 let winMax = false;
 const minBtn = el("button", { class: "win-btn", title: t("chrome.minimize"), onClick: () => window.ide.win.minimize() });
 minBtn.append(svgIcon(I.minimize));
@@ -60,7 +62,7 @@ const titlebar = el(
   { class: "titlebar" },
   el("div", { class: "grain-layer" }),
   el("div", { class: "app-mark" }, el("span", { class: "mark-core" }), el("span", { text: "OMP IDE" })),
-  wsNameEl,
+  wsChip,
   el("span", { class: "titlebar-spacer" }),
   el("div", { class: "win-controls" },
     minBtn,
@@ -183,7 +185,8 @@ const sbModelChip = createModelChip();
 const sbIslandGit = el("div", { class: "sb-island sbi-git" }, sbBranch);
 const sbIslandFile = el(
   "div",
-  { class: "sb-island sbi-file", title: t("chrome.goToLine"), onClick: () => goToLine() },
+  // no content → no island (§10 fix): hidden until an editor with a real document reports in
+  { class: "sb-island sbi-file", title: t("chrome.goToLine"), style: { display: "none" }, onClick: () => goToLine() },
   sbCursor,
   sbLang,
   sbEnc,
@@ -371,19 +374,42 @@ async function restoreLayout() {
 // ---------------------------------------------------------------- status bar wiring
 
 // last editor status kept so applyChromeLang can re-render the file island live
-let lastEdStatus: { line: number | null; column: number | null; language: string } | null = null;
+let lastEdStatus: { path: string | null; line: number | null; column: number | null; language: string } | null = null;
+// «no content → no island»: an empty glass pill is a ghost slot, never rendered
+let fileIslandShown = false;
+sbIslandFile.addEventListener("animationend", () => {
+  if (sbIslandFile.classList.contains("dematerialize") && !fileIslandShown) sbIslandFile.style.display = "none";
+  sbIslandFile.classList.remove("materialize", "dematerialize");
+});
+function setFileIslandShown(showIt: boolean): void {
+  if (showIt === fileIslandShown) return;
+  fileIslandShown = showIt;
+  sbIslandFile.classList.remove("materialize", "dematerialize");
+  if (showIt) {
+    sbIslandFile.style.display = "";
+    void sbIslandFile.offsetWidth; // restart the standard 240ms entrance cleanly
+    sbIslandFile.classList.add("materialize");
+  } else {
+    sbIslandFile.classList.add("dematerialize");
+  }
+}
 function applyEditorStatus(): void {
   const s = lastEdStatus;
-  if (!s) {
-    // boot placeholder — before the first editor-status event
-    sbCursor.textContent = t("chrome.lnCol", 1, 1);
+  // boot / welcome screen / all tabs closed: no document — the island is ABSENT, not empty
+  if (!s || s.path === null) {
+    setFileIslandShown(false);
     return;
   }
-  // null line/column = non-text tab (image/preview/diff) or empty group — no fake cursor
-  sbCursor.textContent = s.line !== null && s.column !== null ? t("chrome.lnCol", s.line, s.column) : "";
-  sbLang.textContent = s.language === "plaintext" ? t("chrome.plainText") : s.language;
+  // null line/column = non-text tab (image/preview/diff) — no fake cursor, no orphan fields
+  const hasCursor = s.line !== null && s.column !== null;
+  sbCursor.textContent = hasCursor ? t("chrome.lnCol", s.line as number, s.column as number) : "";
+  sbCursor.style.display = hasCursor ? "" : "none";
+  const langText = s.language === "plaintext" ? t("chrome.plainText") : s.language;
+  sbLang.textContent = langText;
+  sbLang.style.display = langText ? "" : "none";
   // encoding is a text-buffer fact; an image or empty group has none
   sbEnc.style.display = s.line !== null ? "" : "none";
+  setFileIslandShown(true);
 }
 on("editor-status", (s) => {
   lastEdStatus = s;
@@ -444,6 +470,7 @@ function registerAllCommands(): void {
       else void openWorkspace(p);
     });
   }, "Ctrl+K Ctrl+O");
+  reg("workbench.switchWorkspace", t("cmd.switchWorkspace"), () => void openWorkspaceDropdown());
   reg("workbench.quickOpen", t("cmd.quickOpen"), () => void openPalette("files"), "Ctrl+P");
   reg("workbench.commandPalette", t("cmd.commandPalette"), () => void openPalette("commands"), "Ctrl+Shift+P");
   reg("workbench.toggleTerminal", t("cmd.toggleTerminal"), () => toggleTerminal(), "Ctrl+`");
@@ -501,8 +528,7 @@ let welcomeEl: HTMLElement | null = null;
 async function openWorkspace(path: string, opts?: { resumeHistory?: boolean }) {
   state.root = normPath(path);
   await window.ide.store.addRecent(state.root);
-  wsNameEl.textContent = "";
-  wsNameEl.append(el("span", { class: "sep", text: "—" }), el("span", { text: baseName(state.root) }));
+  refreshWorkspaceChip();
   document.title = `${baseName(state.root)} — OMP IDE`;
 
   welcomeEl?.remove();
@@ -516,6 +542,53 @@ async function openWorkspace(path: string, opts?: { resumeHistory?: boolean }) {
   await startAgent();
   // welcome «продолжить сессию агента»: open straight into the history browser
   if (opts?.resumeHistory) openSessionHistory();
+}
+
+/**
+ * Switch to another workspace IN PLACE (titlebar chip / palette command).
+ * Order matters: guards first (any Cancel aborts with nothing torn down),
+ * then teardown of per-workspace surfaces, then the normal open path.
+ */
+async function switchWorkspace(path: string, opts?: { resumeHistory?: boolean }) {
+  const target = normPath(path);
+  if (!state.root) {
+    await openWorkspace(target, opts);
+    return;
+  }
+  if (normPath(state.root).toLowerCase() === target.toLowerCase()) return;
+
+  // busy-agent guard: a working turn or live team run must not die silently
+  const team = teamRun();
+  const teamLive = !!team && team.phase !== "done" && team.phase !== "stopped" && team.phase !== "stalled";
+  if (agentBusy() || teamLive) {
+    const choice = await choiceDialog({
+      title: t("ws.busyTitle"),
+      message: t("ws.busyMsg"),
+      choices: [
+        { label: t("ws.busyInterrupt"), value: "interrupt", danger: true },
+        { label: t("ws.busyNewWindow"), value: "window" },
+      ],
+    });
+    if (choice === null) return;
+    if (choice === "window") {
+      window.ide.win.openWorkspaceWindow(target);
+      return;
+    }
+    if (teamLive) await window.ide.team.stop();
+    await window.ide.omp.abort();
+  }
+
+  // dirty-file guard: per-file prompts; Cancel aborts the whole switch
+  if (!(await closeAllTabs())) return;
+
+  // teardown — nothing from the old root may leak into the new one
+  await disposeAllTerminals();
+  resetSearchPanel();
+  if (teamLive) await window.ide.team.clear();
+  await window.ide.fs.unwatch();
+
+  await openWorkspace(target, opts);
+  toast(t("ws.switched", baseName(target)));
 }
 
 window.ide.fs.onChanged((changes) => {

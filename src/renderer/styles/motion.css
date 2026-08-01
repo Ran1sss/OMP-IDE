@@ -211,6 +211,7 @@
 .reduce-transparency .notif-pop,
 .reduce-transparency .beacon-pop,
 .reduce-transparency .tester-dialog,
+.reduce-transparency .ws-dd,
 .reduce-transparency .ws-card {
   background: var(--bg-1) !important;
   backdrop-filter: none !important;

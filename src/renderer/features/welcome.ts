@@ -17,10 +17,13 @@ export async function showWelcome(
 ): Promise<HTMLElement> {
   const raw: RecentWorkspace[] = await window.ide.store.getRecents();
 
-  // normalize + dedup: C:\x and C:/x are one entry (newest wins — list order)
+  // normalize + dedup: C:\x and C:/x are one entry (newest wins — list order).
+  // Missing folders are switcher-only (dimmed, remove-only there) — the
+  // welcome column shows only openable workspaces. Pins keep store order (first).
   const seen = new Set<string>();
   const recents: RecentWorkspace[] = [];
   for (const r of raw) {
+    if (r.missing) continue;
     const n = normPath(r.path);
     if (seen.has(n)) continue;
     seen.add(n);
@@ -79,7 +82,10 @@ export async function showWelcome(
         },
       },
       el("div", { class: "wk-main" },
-        el("div", { class: "wsc-name", text: r.name }),
+        el("div", { class: "wsc-name" },
+          r.pinned ? el("span", { class: "wk-pin", text: "★ ", title: t("ws.pinnedTip") }) : null,
+          r.name,
+        ),
         el("div", { class: "wsc-path mono", text: r.path }),
       ),
       el("span", { class: "wk-age", text: relTime(r.openedAt) }),

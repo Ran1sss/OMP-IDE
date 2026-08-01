@@ -32,7 +32,7 @@ import {
 } from "./watch-store";
 import { appendChatLog, readChatLogPage, chatLogPath, deleteChatLog } from "./chat-log";
 import { evaluateTranscript, oneshotAvailable, smolSelector } from "./oneshot";
-import { routeIntent, answerQuestion } from "./dialogue";
+import { routeIntent, answerQuestion, isSpecificsAsk, isOwnerAsk, ownersFor, pickRedirect } from "./dialogue";
 import { tg, tgLangFor, type TgLang } from "./tg-i18n";
 import { reportOneshotError } from "../models/manager";
 import { escapeMd } from "./format";
@@ -56,7 +56,7 @@ interface ChatRuntimeState {
 /** host services the watch layer borrows from RemoteManager */
 export interface WatchHost {
   runtime(botId: string): BotRuntime | undefined;
-  log(botId: string, sender: string, detail: string, kind?: "watch" | "dialog" | "blocked-unauthorized"): void;
+  log(botId: string, sender: string, detail: string, kind?: "watch" | "dialog" | "dialog-guard" | "blocked-unauthorized"): void;
 }
 
 export class WatchManager {
@@ -237,7 +237,8 @@ export class WatchManager {
   private memberLang(botId: string, userId: number, sample: string): TgLang {
     const bot = loadStore().bots.find((b) => b.id === botId);
     const paired = bot?.paired.find((u) => u.telegramId === userId);
-    if (paired) return tgLangFor(paired.languageCode);
+    // paired user without a stored language_code (older pairing): fall back to script too
+    if (paired?.languageCode) return tgLangFor(paired.languageCode);
     return /[А-Яа-яЁё]/.test(sample) ? "ru" : "en";
   }
 
@@ -270,20 +271,50 @@ export class WatchManager {
       this.propose(botId, chat, gm.messageId, gm.author, gm.text, headline, source);
     }
     if (verdict.intent === "question" || verdict.intent === "mixed") {
+      // group = PUBLIC space (privacy split): small talk only; specifics get a
+      // deterministic playful redirect; the per-chat toggle governs non-paired
+      // members, the paired owner may always small-talk
       const allowed = this.isPaired(botId, gm.authorId) || !!chat.answerMembers;
       if (!allowed) {
         // silent to the chat; visible to the operator (acceptance 7)
         this.host.log(botId, `@${gm.author}`, `dialog blocked (member answers off): ${gm.text.slice(0, 90)}`, "blocked-unauthorized");
       } else {
-        const res = await answerQuestion({ botId, chatId: gm.chatId, question: gm.text, asker: gm.author, isGroup: true });
         const rt = this.host.runtime(botId);
+        const lang = this.memberLang(botId, gm.authorId, gm.text);
         const cur = findChat(botId, gm.chatId);
-        if (res.ok) {
-          rt?.sendMd(gm.chatId, escapeMd(res.answer));
-          this.host.log(botId, `@${gm.author}`, `#${cur?.title ?? gm.chatTitle} «${gm.text.slice(0, 70)}» → ${res.answer.slice(0, 90)}`, "dialog");
+        const title = cur?.title ?? gm.chatTitle;
+        if (isOwnerAsk(gm.text, botUsername)) {
+          // deterministic owner answer — the redirect target by name, zero model calls
+          const owners = ownersFor(botId);
+          const L = tg(lang);
+          const line =
+            owners.length === 0 ? L.ownerAnswerNone
+            : owners.length === 1 ? L.ownerAnswerOne(owners[0].name, owners[0].username)
+            : L.ownerAnswerMany(owners.map((o) => `${o.name} (@${o.username})`).join(L.ownerListAnd));
+          rt?.sendMd(gm.chatId, escapeMd(line));
+          this.host.log(botId, `@${gm.author}`, `[public] #${title} «${gm.text.slice(0, 70)}» → owners: ${line.slice(0, 70)}`, "dialog");
+        } else if (isSpecificsAsk(gm.text, botUsername)) {
+          const owners = ownersFor(botId);
+          const line = owners.length
+            ? pickRedirect(tg(lang).dialogRedirectsOwner)(`@${owners[0].username}`)
+            : pickRedirect(tg(lang).dialogRedirects);
+          rt?.sendMd(gm.chatId, escapeMd(line));
+          this.host.log(botId, `@${gm.author}`, `[public] #${title} «${gm.text.slice(0, 70)}» → redirect: ${line.slice(0, 60)}`, "dialog");
         } else {
-          rt?.sendMd(gm.chatId, escapeMd(tg(this.memberLang(botId, gm.authorId, gm.text)).dialogFailed));
-          this.host.log(botId, "system", `dialog answer failed: ${res.error.slice(0, 120)}`);
+          const res = await answerQuestion({ botId, chatId: gm.chatId, question: gm.text, asker: gm.author, disclosure: "public" });
+          if (res.guardTrips > 0)
+            this.host.log(botId, "system", `public no-leak guard ×${res.guardTrips} on «${gm.text.slice(0, 60)}»${res.ok ? " — regenerated clean" : " — stock line sent"}`, "dialog-guard");
+          if (res.ok) {
+            rt?.sendMd(gm.chatId, escapeMd(res.answer));
+            this.host.log(botId, `@${gm.author}`, `[public] #${title} «${gm.text.slice(0, 70)}» → ${res.answer.slice(0, 90)}`, "dialog");
+          } else if (res.error.startsWith("guard:")) {
+            const line = tg(lang).dialogStock;
+            rt?.sendMd(gm.chatId, escapeMd(line));
+            this.host.log(botId, `@${gm.author}`, `[public] #${title} «${gm.text.slice(0, 70)}» → stock: ${line.slice(0, 60)}`, "dialog");
+          } else {
+            rt?.sendMd(gm.chatId, escapeMd(tg(lang).dialogFailed));
+            this.host.log(botId, "system", `dialog answer failed: ${res.error.slice(0, 120)}`);
+          }
         }
       }
     }

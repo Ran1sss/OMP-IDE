@@ -34,15 +34,44 @@
   background: radial-gradient(circle at 35% 35%, var(--energy), var(--energy-15) 70%);
   box-shadow: 0 0 10px var(--energy-25);
 }
-.titlebar .ws-name {
+/* workspace chip — ghost at rest, magenta affordance on hover (user act);
+   no-drag zone sized exactly to the visual chip so window drag survives */
+.titlebar .ws-chip {
+  -webkit-app-region: no-drag;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   margin-left: 14px;
+  max-width: 320px;
+  padding: 3px 9px;
+  font-family: var(--font-ui);
   font-size: 12px;
   color: var(--text-mid);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: border-color var(--t-fast) var(--ease-swift), color var(--t-fast) var(--ease-swift);
+}
+.titlebar .ws-chip .wsc-name {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.titlebar .ws-name .sep { color: var(--text-low); margin: 0 6px; }
+.titlebar .ws-chip .wsc-chev {
+  font-size: 9px;
+  color: var(--text-low);
+  transition: transform var(--t-med) var(--ease-swift), color var(--t-fast) var(--ease-swift);
+}
+.titlebar .ws-chip:hover,
+.titlebar .ws-chip.open {
+  border-color: var(--power);
+  color: var(--text-hi);
+  box-shadow: 0 0 12px -3px var(--power-40);
+}
+.titlebar .ws-chip:hover .wsc-chev,
+.titlebar .ws-chip.open .wsc-chev { color: var(--power); }
+.titlebar .ws-chip.open .wsc-chev { transform: rotate(180deg); }
 .titlebar .titlebar-spacer { flex: 1; }
 .titlebar .win-controls {
   display: flex;
@@ -64,6 +93,100 @@
 .titlebar .win-btn:hover { background: var(--bg-2); color: var(--text-hi); }
 .titlebar .win-btn.close:hover { background: var(--crit); color: var(--void); }
 .titlebar .win-btn svg { width: 11px; height: 11px; }
+
+/* ---------- workspace dropdown (glass, under the chip) ---------- */
+.ws-dd {
+  position: fixed;
+  z-index: 1150; /* above panels, below toasts */
+  padding: 8px;
+  background: var(--glass-bg);
+  backdrop-filter: blur(var(--glass-blur));
+  border: 1px solid var(--line-bright);
+  border-radius: var(--r-m);
+  box-shadow: var(--shadow-float);
+  opacity: 0;
+  transform: translateY(-6px);
+  transition: opacity var(--t-med) var(--ease-swift), transform var(--t-med) var(--ease-swift);
+  outline: none;
+}
+.ws-dd.visible { opacity: 1; transform: none; }
+.ws-dd .wsd-filter {
+  padding: 4px 10px 8px;
+  font-size: 11px;
+  color: var(--energy);
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 6px;
+}
+.ws-dd .wsd-list { max-height: 320px; overflow-y: auto; scrollbar-gutter: stable; }
+.wsd-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border-radius: var(--r-s);
+  cursor: pointer;
+  transition: background var(--t-fast) var(--ease-swift);
+}
+.wsd-row:hover, .wsd-row:focus { background: var(--bg-2); outline: none; }
+.wsd-row.cur {
+  background: linear-gradient(90deg, var(--energy-15), var(--power-15));
+  cursor: default;
+}
+.wsd-row.cur .wsd-name { color: var(--energy); }
+.wsd-row .wsd-mark { color: var(--energy); font-size: 11px; }
+.wsd-row .wsd-name {
+  color: var(--text-hi);
+  font-weight: 600;
+  font-size: 12.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex-shrink: 0;
+  max-width: 150px;
+}
+.wsd-row .wsd-path {
+  margin-left: auto;
+  color: var(--text-low);
+  font-size: 10px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex-shrink: 1;
+  min-width: 0;
+}
+.wsd-row .wsd-pin {
+  color: var(--gold);
+  font-size: 11px;
+  opacity: 0;
+  cursor: pointer;
+  transition: opacity var(--t-fast) var(--ease-swift), transform var(--t-fast) var(--ease-swift);
+}
+.wsd-row:hover .wsd-pin, .wsd-row:focus .wsd-pin { opacity: 0.35; }
+.wsd-row .wsd-pin.pinned { opacity: 1; }
+.wsd-row .wsd-pin:hover { opacity: 1; transform: scale(1.2); }
+.wsd-row.missing { opacity: 0.55; cursor: default; }
+.wsd-row.missing .wsd-name { color: var(--text-mid); }
+.wsd-badge {
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-size: 8.5px;
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+.wsd-badge.session { color: var(--gold); border: 1px solid rgba(240, 198, 116, 0.35); }
+.wsd-badge.missing-label { color: var(--text-low); border: 1px solid var(--line); }
+.wsd-x { flex-shrink: 0; font-size: 10px; }
+.wsd-sep { height: 1px; background: var(--line); margin: 6px 0; }
+.wsd-actions { display: flex; gap: 6px; padding: 2px 2px 0; }
+.wsd-actions .wsd-btn { flex: 1; font-size: 11.5px; padding: 6px 8px; }
+.wsd-hint {
+  padding: 7px 4px 0;
+  font-size: 9px;
+  color: var(--text-low);
+  text-align: center;
+}
+/* welcome list pin marker (same store as the switcher) */
+.wk-row .wk-pin { color: var(--gold); font-size: 11px; }
 
 /* ---------- workbench grid ---------- */
 .workbench {

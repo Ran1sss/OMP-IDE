@@ -115,7 +115,7 @@ html, body {
 .tf-result, .tc-raw-body, .tree, .search-results, .outline-list, .git-flow .gc-list,
 .scm-diff-pop .md-col, .git-list, .omnibar .pal-list, .palette .pal-list, .agent-chat,
 .tool-card .tc-body, .todo-strip, .wk-work, .history-dialog .hd-scroll, .notif-list,
-.control-center, .lv-rows, .team-surface, .team-feed, .crew-tl {
+.control-center, .lv-rows, .team-surface, .team-feed, .crew-tl, .ws-dd .wsd-list {
   scrollbar-gutter: stable;
 }
 

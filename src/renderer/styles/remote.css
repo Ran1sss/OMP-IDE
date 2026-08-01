@@ -395,6 +395,8 @@
 .feed-row.blocked .fr-kind { color: var(--crit); background: var(--crit-15); }
 /* Chat Dialogue exchanges: the operator sees what the bot said on their behalf */
 .feed-row.dialog .fr-kind { color: var(--power); background: var(--power-15); }
+/* no-leak guard trips: template weaknesses must catch the operator's eye */
+.feed-row.dialog-guard .fr-kind { color: var(--flare); background: var(--crit-15); }
 .feed-row .fr-sender { font-family: var(--font-mono); font-size: 10.5px; color: var(--text-mid); flex-shrink: 0; }
 .feed-row .fr-detail { overflow: hidden; text-overflow: ellipsis; }
 .feed-row .fr-bot { margin-left: auto; font-size: 10px; color: var(--text-low); flex-shrink: 0; }
@@ -604,3 +606,8 @@
 }
 /* the whole view never scrolls horizontally (remote-fix 2 law) */
 .control-center { overflow-x: hidden; }
+
+/* owner crown (owner-fix): dim until crowned, gold when the bot names them */
+.paired-row .pu-crown { font-size: 12px; color: var(--text-low); opacity: 0.55; }
+.paired-row .pu-crown:hover { opacity: 1; color: var(--text-mid); }
+.paired-row .pu-crown.on { opacity: 1; color: var(--gold); }

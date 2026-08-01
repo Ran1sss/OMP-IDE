@@ -340,6 +340,21 @@ export function initSearchPanel(container: HTMLElement) {
   });
 }
 
+/** Workspace switch: drop query/results — nothing may leak into the next root. */
+export function resetSearchPanel(): void {
+  queryInput.value = "";
+  replaceInput.value = "";
+  includeInput.value = "";
+  excludeInput.value = "";
+  currentSearch++; // orphan any in-flight stream
+  searchDone = false;
+  staleBar = null;
+  matchesByFile = new Map();
+  totalMatches = 0;
+  excluded.clear();
+  renderEmptyHint();
+}
+
 export function focusSearch(seed?: string) {
   if (seed !== undefined) {
     (queryInput as HTMLInputElement).value = seed;

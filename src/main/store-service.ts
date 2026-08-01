@@ -67,6 +67,8 @@ export function registerStoreHandlers(ipc: IpcMain) {
 
   // Paths are stored resolved; comparison is case-insensitive (win32 FS).
   // Legacy entries may be relative ("."), duplicated by separator style, or dead.
+  // Dead folders are KEPT and flagged `missing` (switcher renders them dimmed
+  // with remove-only); pinned entries sort first and never age out.
   ipc.handle("store:getRecents", async (): Promise<RecentWorkspace[]> => {
     const s = load();
     const seen = new Set<string>();
@@ -75,10 +77,11 @@ export function registerStoreHandlers(ipc: IpcMain) {
       if (!isAbsolute(r.path)) continue; // relative junk from pre-fix builds
       const full = resolve(r.path);
       const key = full.toLowerCase();
-      if (seen.has(key) || !fs.existsSync(full)) continue;
+      if (seen.has(key)) continue;
       seen.add(key);
-      out.push({ ...r, path: full });
+      out.push({ ...r, path: full, missing: !fs.existsSync(full) });
     }
+    out.sort((a, b) => Number(b.pinned ?? false) - Number(a.pinned ?? false));
     return out.slice(0, 8);
   });
 
@@ -86,8 +89,9 @@ export function registerStoreHandlers(ipc: IpcMain) {
     const s = load();
     const full = resolve(path);
     const key = full.toLowerCase();
+    const prev = s.recents.find((r) => resolve(r.path).toLowerCase() === key);
     s.recents = [
-      { path: full, name: basename(full), openedAt: Date.now() },
+      { path: full, name: basename(full), openedAt: Date.now(), pinned: prev?.pinned ?? false },
       ...s.recents.filter((r) => resolve(r.path).toLowerCase() !== key),
     ].slice(0, 12);
     persist();
@@ -98,6 +102,16 @@ export function registerStoreHandlers(ipc: IpcMain) {
     const key = resolve(path).toLowerCase();
     s.recents = s.recents.filter((r) => resolve(r.path).toLowerCase() !== key);
     persist();
+  });
+
+  ipc.handle("store:togglePin", async (_e, path: string) => {
+    const s = load();
+    const key = resolve(path).toLowerCase();
+    const r = s.recents.find((x) => resolve(x.path).toLowerCase() === key);
+    if (r) {
+      r.pinned = !r.pinned;
+      persist();
+    }
   });
 
   ipc.handle("store:getLayout", async (_e, workspace: string): Promise<LayoutState | null> => {
