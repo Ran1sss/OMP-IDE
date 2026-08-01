@@ -215,6 +215,7 @@ const api: IdeApi = {
     switchModel: (selector, origin) => ipcRenderer.invoke("models:switchModel", selector, origin),
     setRoleThinking: (role, level, origin) => ipcRenderer.invoke("models:setRoleThinking", role, level, origin),
     setSessionThinking: (level, origin) => ipcRenderer.invoke("models:setSessionThinking", level, origin),
+    recheckThinking: (origin) => ipcRenderer.invoke("models:recheckThinking", origin),
     getEvents: (): Promise<ModelEvent[]> => ipcRenderer.invoke("models:getEvents"),
     setBalanceEndpoint: (id, endpoint) => ipcRenderer.invoke("models:setBalanceEndpoint", id, endpoint),
     checkBalance: (id) => ipcRenderer.invoke("models:checkBalance", id),

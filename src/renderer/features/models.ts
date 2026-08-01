@@ -680,6 +680,21 @@ function thinkDial(
     );
   }
   if (opts.overridden) dial.append(el("span", { class: "td-note", text: t("mdl.overriddenSession") }));
+  if (opts.disabled) {
+    // no-thinking can be a stale verdict (bad key / provider hiccup at probe
+    // time): a visible re-check affordance instead of a dead end
+    dial.append(
+      el("button", {
+        class: "td-recheck",
+        text: "↻",
+        title: t("mdl.thinkRecheckTip"),
+        onClick: (e) => {
+          e.stopPropagation();
+          void window.ide.models.recheckThinking("cockpit").then(() => toast(t("mdl.thinkRechecked")));
+        },
+      }),
+    );
+  }
   return dial;
 }
 
@@ -1091,6 +1106,51 @@ function providerCard(p: ProviderInfo): HTMLElement {
     });
   });
 
+  // «Прозвон»: probe EVERY model of the profile — colored dot per row
+  // (green ok · yellow rate/quota · red down), summary counter at the end.
+  const pingBtn = el("button", {
+    class: "btn",
+    text: t("mdl.pingAll"),
+    title: t("mdl.pingAllTip"),
+  }) as HTMLButtonElement;
+  pingBtn.addEventListener("click", () => {
+    if (!p.models.length) return;
+    pingBtn.disabled = true;
+    let done = 0;
+    let okN = 0;
+    const paint = (modelId: string, verdict: string, detail: string) => {
+      const row = [...card.querySelectorAll<HTMLElement>(".mmodel-row")].find(
+        (r) => r.querySelector(".mm-id")?.getAttribute("title") === modelId || r.querySelector(".mm-id")?.textContent === modelId,
+      );
+      if (!row) return;
+      row.querySelector(".mm-ping")?.remove();
+      const cls = verdict === "ok" ? "ok" : verdict === "rate-limited" || verdict === "quota" ? "warn" : "down";
+      const dot = el("span", { class: `mm-ping ${cls}`, title: `${verdict}${detail ? ` · ${detail.slice(0, 120)}` : ""}` });
+      row.querySelector(".mm-ctx")?.before(dot);
+    };
+    const runNext = (queue: string[]): void => {
+      const modelId = queue.shift();
+      if (modelId === undefined) {
+        pingBtn.disabled = false;
+        pingBtn.textContent = t("mdl.pingAll");
+        valMsg.textContent = t("mdl.pingDone", okN, p.models.length);
+        valMsg.style.color = okN === p.models.length ? "var(--power)" : okN > 0 ? "var(--flare)" : "var(--crit)";
+        return;
+      }
+      pingBtn.textContent = t("mdl.pingProgress", ++done, p.models.length);
+      const protocol = p.template === "anthropic" ? "anthropic" : p.template === "google" ? "gemini" : "openai-chat";
+      void window.ide.tester
+        .run({ profileId: p.id, baseUrl: p.baseUrl, protocol, model: modelId, streaming: false, timeoutSeconds: 20 })
+        .then((r) => {
+          if (r.verdict === "ok") okN++;
+          paint(modelId, r.verdict, r.detail ?? "");
+        })
+        .catch(() => paint(modelId, "network", ""))
+        .finally(() => runNext(queue));
+    };
+    runNext(p.models.map((m) => m.id));
+  });
+
   const keyBtn = el("button", {
     class: "btn",
     text: p.hasKey ? t("mdl.changeKey") : t("mdl.setKey"),
@@ -1155,7 +1215,7 @@ function providerCard(p: ProviderInfo): HTMLElement {
       })
     : null;
 
-  card.append(el("div", { class: "pc-actions" }, valBtn, deepBtn, keyBtn, addModelBtn, dupBtn, valMsg, el("span", { style: { flex: "1" } }), delBtn));
+  card.append(el("div", { class: "pc-actions" }, valBtn, deepBtn, pingBtn, keyBtn, addModelBtn, dupBtn, valMsg, el("span", { style: { flex: "1" } }), delBtn));
 
   // balance endpoint row: configure + verify in one place (spec §3 P0)
   const epInput = el("input", {

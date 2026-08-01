@@ -555,7 +555,12 @@ class ModelsManager {
     );
     if (!res.success && res.error) {
       const active = this.bridge.getActiveModel();
-      if (active && this.activeCapability === "unknown") {
+      // Blacklist ONLY on a real capability rejection. Timeouts, dead sessions
+      // and provider hiccups (503 upstream) said nothing about the MODEL —
+      // marking it no-thinking would permanently grey the dial for a model
+      // that works fine an hour later (user-reported).
+      const capabilityRejection = /think|reason|support|invalid|unknown param|not available/i.test(res.error);
+      if (active && this.activeCapability === "unknown" && capabilityRejection) {
         const store = loadModelsStore();
         const sel = `${active.provider}/${active.id}`;
         if (!store.noThinking.includes(sel)) {
@@ -567,8 +572,33 @@ class ModelsManager {
         for (const w of BrowserWindow.getAllWindows())
           w.webContents.send("models:thinkRejected", active.id);
         this.pushState();
+      } else {
+        // transient failure: keep capability as-is, the next switch retries
+        this.log("THINK", `set_thinking_level failed (transient): ${res.error.slice(0, 80)}`, origin);
       }
     }
+  }
+
+  /**
+   * Manual re-check (dial ↻): drop the active model from the no-thinking
+   * blacklist and re-probe capability + re-apply the level. For models that
+   * got blacklisted by a transient failure before this build.
+   */
+  async recheckThinking(origin: string): Promise<void> {
+    const active = this.bridge.getActiveModel();
+    if (!active) return;
+    const sel = `${active.provider}/${active.id}`;
+    const store = loadModelsStore();
+    const i = store.noThinking.indexOf(sel);
+    if (i >= 0) {
+      store.noThinking.splice(i, 1);
+      saveModelsStore();
+    }
+    this.activeCapability = "unknown";
+    this.log("THINK", `${sel}: no-thinking mark cleared — re-probing`, origin);
+    await this.refreshCapability();
+    await this.applyThinking(origin);
+    this.pushState();
   }
 
   setRoleThinking(role: ModelRole, level: ThinkingLevel, origin: string): void {
@@ -862,6 +892,16 @@ class ModelsManager {
       this.reconcile();
     }
     this.health.set(name, { state: "unknown" });
+    // a fresh key invalidates every runtime verdict for this profile: models
+    // blacklisted as no-thinking under the old (broken) key get a clean slate
+    const store = loadModelsStore();
+    const before = store.noThinking.length;
+    store.noThinking = store.noThinking.filter((s) => !s.startsWith(`${name}/`));
+    if (store.noThinking.length !== before) {
+      saveModelsStore();
+      this.log("THINK", `${name}: key change cleared ${before - store.noThinking.length} no-thinking mark(s)`, "settings");
+      void this.refreshCapability().then(() => this.pushState());
+    }
     this.log("provider", `${name}: key updated`, "settings");
     this.applyChildEnv();
     this.pushState();
@@ -1145,6 +1185,7 @@ export function registerModelsHandlers(ipc: IpcMain): void {
   ipc.handle("models:switchModel", async (_e, selector: string, origin: string) => m.switchModel(selector, origin));
   ipc.handle("models:setRoleThinking", async (_e, role: ModelRole, level: ThinkingLevel, origin: string) => m.setRoleThinking(role, level, origin));
   ipc.handle("models:setSessionThinking", async (_e, level: ThinkingLevel | null, origin: string) => m.setSessionThinking(level, origin));
+  ipc.handle("models:recheckThinking", async (_e, origin: string) => m.recheckThinking(origin));
   ipc.handle("models:getEvents", async () => m.getEvents());
   ipc.handle("models:enhance", async (_e, draft: string, origin: string) => m.enhance(draft, origin));
   ipc.handle("models:enhanceStatus", async () => m.enhanceStatus());

@@ -979,6 +979,8 @@ export interface IdeApi {
     setRoleThinking(role: ModelRole, level: ThinkingLevel, origin: string): Promise<void>;
     /** session-only override; null clears back to the role default */
     setSessionThinking(level: ThinkingLevel | null, origin: string): Promise<{ pending: boolean }>;
+    /** drop the active model's no-thinking mark and re-probe capability */
+    recheckThinking(origin: string): Promise<void>;
     getEvents(): Promise<ModelEvent[]>;
     // ---- auto-swap & balance
     /** balance probe endpoint (URL or base-relative path; "" clears) */

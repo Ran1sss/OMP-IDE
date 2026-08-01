@@ -328,6 +328,18 @@
 .mmodel-row:hover { background: var(--bg-2); color: var(--text-hi); }
 .mmodel-row .mm-id { font-family: var(--font-mono); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mmodel-row .mm-ctx { margin-left: auto; font-family: var(--font-mono); font-size: 10px; color: var(--text-low); flex-shrink: 0; }
+/* «прозвон» verdict dot: ok=system green · warn=flare · down=crit */
+.mmodel-row .mm-ping {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  margin-left: auto;
+}
+.mmodel-row .mm-ping + .mm-ctx { margin-left: 0; }
+.mmodel-row .mm-ping.ok { background: var(--ok-system); box-shadow: 0 0 6px var(--ok-system-15); }
+.mmodel-row .mm-ping.warn { background: var(--flare); box-shadow: 0 0 6px var(--flare-15); }
+.mmodel-row .mm-ping.down { background: var(--crit); box-shadow: 0 0 6px var(--crit-15); }
 .mmodel-row .mm-star {
   cursor: pointer;
   color: var(--text-low);
@@ -420,6 +432,20 @@
 .think-dial.disabled .td-seg { color: var(--text-low); opacity: 0.5; cursor: default; }
 .think-dial.disabled .td-seg.active { color: var(--text-low); background: var(--bg-1); border-color: var(--line); }
 .think-dial .td-note { font-size: 9px; color: var(--flare); margin-left: 6px; }
+/* re-check affordance on a disabled dial: the one clickable thing there */
+.think-dial .td-recheck {
+  padding: 1px 7px;
+  font-size: 11px;
+  color: var(--power);
+  background: var(--bg-1);
+  border: 1px solid var(--power-40);
+  border-radius: 4px;
+  cursor: pointer;
+  margin-left: 6px;
+  opacity: 1;
+  transition: background var(--t-fast) var(--ease-swift);
+}
+.think-dial .td-recheck:hover { background: var(--power-15); }
 
 /* ---------- chip thinking glyph: three ascending bars ---------- */
 .mc-think {
