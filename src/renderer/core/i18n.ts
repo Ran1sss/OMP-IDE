@@ -167,6 +167,8 @@ const RU = {
   "set.tour": "Тур по интерфейсу",
   "set.tourBtn": "Запустить тур",
   "set.tourHint": "Пошаговое знакомство с IDE поверх живого интерфейса.",
+  "set.about": "О программе",
+  "set.author": "Автор",
   "set.saved": "Настройки сохранены",
   // command titles (palette)
   "cmd.openFolder": "Открыть папку…",
@@ -415,6 +417,7 @@ const RU = {
   "wk.removeRecent": "Убрать из недавних",
   "wk.tagline": "reactor online · agent standing by",
   "wk.tourLink": "Тур по интерфейсу",
+  "wk.author": "Автор",
   // @section workspace switcher
   "ws.chipNoFolder": "Открыть папку…",
   "ws.chipTip": "Сменить рабочую папку",
@@ -1048,6 +1051,8 @@ const EN: StrTable = {
   "set.tour": "Interface tour",
   "set.tourBtn": "Start tour",
   "set.tourHint": "A step-by-step walkthrough over the live interface.",
+  "set.about": "About",
+  "set.author": "Author",
   "set.saved": "Settings saved",
   "cmd.openFolder": "Open folder…",
   "cmd.switchWorkspace": "Workspace: switch folder…",
@@ -1292,6 +1297,7 @@ const EN: StrTable = {
   "wk.removeRecent": "Remove from recents",
   "wk.tagline": "reactor online · agent standing by",
   "wk.tourLink": "Interface tour",
+  "wk.author": "Author",
   // @section workspace switcher (EN)
   "ws.chipNoFolder": "Open folder…",
   "ws.chipTip": "Switch workspace",

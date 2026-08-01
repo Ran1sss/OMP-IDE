@@ -10,6 +10,7 @@ import { normPath } from "../core/state";
 import { t, relTime } from "../core/i18n";
 import { on } from "../core/bus";
 import { startTour } from "./guide";
+import { ABOUT, TELEGRAM_SVG, GITHUB_SVG } from "../core/about";
 import type { RecentWorkspace } from "../../shared/types";
 
 export async function showWelcome(
@@ -147,6 +148,23 @@ export async function showWelcome(
     text: t("wk.tourLink"),
     onClick: () => startTour(),
   });
+  // author credit footer — quiet, never competes with actions (about.ts is
+  // the single source; links open in the SYSTEM browser via win:openExternal)
+  const authorLink = (svg: string, handle: string, url: string) => {
+    const a = el("button", { class: "wk-author-link", onClick: () => window.ide.win.openExternal(url) });
+    a.innerHTML = svg;
+    a.append(el("span", { text: handle }));
+    return a;
+  };
+  const authorLine = el(
+    "div",
+    { class: "wk-author" },
+    el("span", { class: "wk-author-name", text: `${t("wk.author")} — ${ABOUT.author}` }),
+    el("span", { class: "wk-author-sep", text: "·" }),
+    authorLink(TELEGRAM_SVG, ABOUT.telegram.handle, ABOUT.telegram.url),
+    el("span", { class: "wk-author-sep", text: "·" }),
+    authorLink(GITHUB_SVG, ABOUT.github.handle, ABOUT.github.url),
+  );
   const work = el(
     "div",
     { class: "wk-work" },
@@ -154,6 +172,7 @@ export async function showWelcome(
     recents.length ? list : el("div", { class: "dimmer", text: t("wk.noRecents") }),
     openBtn,
     tourLink,
+    authorLine,
   );
 
   const screen = el("div", { class: "welcome wk-split" }, hero, work);
@@ -172,6 +191,7 @@ export async function showWelcome(
     if (dim) dim.textContent = t("wk.noRecents");
     openBtn.textContent = t("wk.openFolder");
     tourLink.textContent = t("wk.tourLink");
+    authorLine.querySelector(".wk-author-name")!.textContent = `${t("wk.author")} — ${ABOUT.author}`;
     hero.querySelector(".tagline")!.textContent = t("wk.tagline");
     for (const b of list.querySelectorAll<HTMLElement>(".wsc-x")) b.title = t("wk.removeRecent");
     for (const s of list.querySelectorAll(".wk-resume span:last-child")) s.textContent = t("wk.resumeSession");

@@ -7,6 +7,7 @@ import { toast } from "../core/ui";
 import { refreshCrumbs } from "./editor";
 import { applyMotion } from "../core/motion";
 import { startTour } from "./guide";
+import { ABOUT, APP_VERSION, TELEGRAM_SVG, GITHUB_SVG } from "../core/about";
 import { t, applyLang, resolveLang } from "../core/i18n";
 import type { Settings } from "../../shared/types";
 
@@ -16,6 +17,36 @@ let settingsClose: (() => void) | null = null;
 interface SettingsDraft {
   accent: string; font: string; shell: string; omp: string; stall: string;
   crumb: string; switcher: string; motion: string; glass: string; lang: string;
+}
+
+/** «О программе»: version from package.json + author rows (about.ts is the one source) */
+function aboutBlock(): HTMLElement {
+  const row = (label: string, value: HTMLElement | string) =>
+    el(
+      "div",
+      { class: "about-row" },
+      el("span", { class: "about-label", text: label }),
+      typeof value === "string" ? el("span", { class: "about-value", text: value }) : value,
+    );
+  const link = (svg: string, handle: string, url: string) => {
+    const a = el("button", {
+      class: "about-link",
+      title: url,
+      onClick: () => window.ide.win.openExternal(url),
+    });
+    a.innerHTML = svg;
+    a.append(el("span", { text: handle }));
+    return a;
+  };
+  return el(
+    "div",
+    { class: "about-block" },
+    el("div", { class: "about-head", text: t("set.about") }),
+    row("OMP IDE", `v${APP_VERSION}`),
+    row(t("set.author"), ABOUT.author),
+    row("Telegram", link(TELEGRAM_SVG, ABOUT.telegram.handle, ABOUT.telegram.url)),
+    row("GitHub", link(GITHUB_SVG, ABOUT.github.handle, ABOUT.github.url)),
+  );
 }
 
 export function openSettingsDialog(initial?: SettingsDraft): void {
@@ -153,6 +184,7 @@ export function openSettingsDialog(initial?: SettingsDraft): void {
         }),
         t("set.tourHint"),
       ),
+      aboutBlock(),
     ),
     el(
       "div",

@@ -792,6 +792,60 @@
   transition: color var(--t-fast) var(--ease-swift);
 }
 .wk-tour:hover { color: var(--energy); }
+/* author credit footer — quiet ghost line pinned to the column bottom */
+.wk-author {
+  margin-top: auto;
+  padding-top: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-low);
+}
+.wk-author .wk-author-sep { opacity: 0.6; }
+.wk-author-link, .about-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-family: var(--font-ui);
+  font-size: 11px;
+  color: var(--text-low);
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  transition: color var(--t-fast) var(--ease-swift);
+}
+.wk-author-link:hover, .about-link:hover { color: var(--text-hi); text-decoration: underline; text-underline-offset: 3px; }
+.wk-author-link svg, .about-link svg { flex-shrink: 0; }
+/* settings «О программе» block */
+.about-block {
+  margin-top: 4px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.about-head {
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-low);
+  margin-bottom: 2px;
+}
+.about-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12px;
+}
+.about-row .about-label { color: var(--text-mid); }
+.about-row .about-value { color: var(--text-hi); }
+.about-row .about-link { font-size: 12px; }
 .todo-strip .todo-item .ti-dot {
   width: 6px; height: 6px;
   border-radius: 50%;
