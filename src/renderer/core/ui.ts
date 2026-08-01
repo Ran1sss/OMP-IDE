@@ -2,6 +2,7 @@
 
 import { el, clear, svgIcon } from "./dom";
 import { I } from "./icons";
+import { t } from "./i18n";
 
 // ---------------------------------------------------------------- toasts
 
@@ -68,6 +69,7 @@ export function toast(message: string, opts: { crit?: boolean } = {}): void {
   );
   const closeBtn = el("button", {
     class: "icon-btn toast-close",
+    title: t("ui.close"),
     onClick: () => {
       node.remove();
       liveToasts.delete(message);
@@ -115,10 +117,10 @@ export function confirmDialog(opts: ConfirmOptions): Promise<boolean> {
   };
   const confirmBtn = el("button", {
     class: opts.danger ? "btn btn-danger" : "btn btn-primary",
-    text: opts.confirmLabel ?? "Confirm",
+    text: opts.confirmLabel ?? t("ui.confirm"),
     onClick: () => done(true),
   });
-  const cancelBtn = el("button", { class: "btn", text: "Cancel", onClick: () => done(false) });
+  const cancelBtn = el("button", { class: "btn", text: t("ui.cancel"), onClick: () => done(false) });
   const dialog = el(
     "div",
     { class: "dialog" },
@@ -159,7 +161,7 @@ export function choiceDialog(opts: ChoiceDialogOptions): Promise<string | null> 
     setTimeout(() => overlay.remove(), 170);
     resolve(v);
   };
-  const cancelBtn = el("button", { class: "btn", text: "Cancel", onClick: () => done(null) });
+  const cancelBtn = el("button", { class: "btn", text: t("ui.cancel"), onClick: () => done(null) });
   const actions = el("div", { class: "dialog-actions" }, cancelBtn);
   opts.choices.forEach((c, i) => {
     actions.append(el("button", {
@@ -222,10 +224,10 @@ export function inputDialog(opts: InputDialogOptions): Promise<string | null> {
     el(
       "div",
       { class: "dialog-actions" },
-      el("button", { class: "btn", text: "Cancel", onClick: () => done(null) }),
+      el("button", { class: "btn", text: t("ui.cancel"), onClick: () => done(null) }),
       el("button", {
         class: "btn btn-primary",
-        text: opts.confirmLabel ?? "OK",
+        text: opts.confirmLabel ?? t("ui.ok"),
         onClick: () => done(input.value.trim() || null),
       }),
     ),
@@ -304,8 +306,8 @@ export function formDialog(opts: FormDialogOptions): Promise<Record<string, stri
     el(
       "div",
       { class: "dialog-actions" },
-      el("button", { class: "btn", text: "Cancel", onClick: () => done(null) }),
-      el("button", { class: "btn btn-primary", text: opts.confirmLabel ?? "OK", onClick: submit }),
+      el("button", { class: "btn", text: t("ui.cancel"), onClick: () => done(null) }),
+      el("button", { class: "btn btn-primary", text: opts.confirmLabel ?? t("ui.ok"), onClick: submit }),
     ),
   );
   overlay.append(dialog);
@@ -348,7 +350,7 @@ export function selectDialog(title: string, options: string[]): Promise<string |
     el(
       "div",
       { class: "dialog-actions" },
-      el("button", { class: "btn", text: "Cancel", onClick: () => done(null) }),
+      el("button", { class: "btn", text: t("ui.cancel"), onClick: () => done(null) }),
     ),
   );
   overlay.append(dialog);

@@ -134,7 +134,7 @@ function botCard(bot: RemoteBotInfo): HTMLElement {
     // A proxy that died AFTER being committed shows up as generic network
     // failures; point at the likely culprit instead of leaving the user to guess.
     if (bot.state === "degraded" && state.proxyUrl)
-      card.append(el("div", { class: "bc-detail", text: "A Telegram proxy is set — if this persists, hit Test in the proxy row or clear it." }));
+      card.append(el("div", { class: "bc-detail", text: t("rc.proxyDegraded") }));
   }
 
   if (bot.paired.length) {
@@ -279,25 +279,25 @@ async function waitForBotLive(
   while (Date.now() < deadline) {
     const s = await window.ide.remote.getState();
     last = s.bots.find((b) => b.id === botId);
-    if (!last) return { ok: false, error: "Bot was removed" };
+    if (!last) return { ok: false, error: t("rc.botRemoved") };
     if (last.state === "auth-error")
-      return { ok: false, error: `Telegram rejected the token: ${last.detail ?? "auth error"}` };
+      return { ok: false, error: t("rc.tokenRejected", last.detail ?? "auth error") };
     if (last.state === "polling" || last.state === "relaying") return { ok: true, bot: last };
     await sleep(300);
   }
   if (last?.state === "degraded")
-    return { ok: false, error: `Bot can't reach Telegram: ${last.detail ?? "network error"}` };
-  return { ok: false, error: "Bot didn't start in time — check your network and try again" };
+    return { ok: false, error: t("rc.noReachTelegram", last.detail ?? "network error") };
+  return { ok: false, error: t("rc.botStartTimeout") };
 }
 
 async function beginPairing(bot: RemoteBotInfo): Promise<void> {
   if (!state.globalEnabled) {
-    toast("Remote control is switched off — enable the master toggle first", { crit: true });
+    toast(t("rc.masterOffToast"), { crit: true });
     return;
   }
   // pairing needs the bot polling; enable it ourselves instead of bouncing the user
   if (!bot.enabled) {
-    toast(`Starting @${bot.username}…`);
+    toast(t("rc.startingBot", bot.username));
     await window.ide.remote.setBotEnabled(bot.id, true);
   }
   const live = await waitForBotLive(bot.id, 15_000);
@@ -335,7 +335,7 @@ function showPairingDialog(bot: RemoteBotInfo, pairing: RemotePairing): void {
     el("code", {
       class: "copyable",
       text: `/start ${pairing.code}`,
-      title: "Click to copy",
+      title: t("rc.clickCopy"),
       onClick: () => {
         void navigator.clipboard.writeText(`/start ${pairing.code}`);
         toast(t("rc.cmdCopied"));
@@ -435,9 +435,9 @@ function maybeCompletePairing(prev: RemoteState, next: RemoteState): void {
 function feedRow(ev: RemoteActivityEvent): HTMLElement {
   return el(
     "div",
-    { class: ev.kind === "blocked-unauthorized" ? "feed-row blocked" : "feed-row" },
+    { class: ev.kind === "blocked-unauthorized" ? "feed-row blocked" : ev.kind === "dialog" ? "feed-row dialog" : "feed-row" },
     el("span", { class: "fr-time", text: timeShort(ev.time) }),
-    el("span", { class: "fr-kind", text: ev.kind === "blocked-unauthorized" ? t("rc.blocked") : ev.kind }),
+    el("span", { class: "fr-kind", text: ev.kind === "blocked-unauthorized" ? t("rc.blocked") : ev.kind === "dialog" ? t("rc.dialog") : ev.kind }),
     el("span", { class: "fr-sender", text: ev.sender }),
     el("span", { class: "fr-detail", text: ev.detail }),
     el("span", { class: "fr-bot", text: ev.botUsername ? `@${ev.botUsername}` : "" }),
@@ -517,7 +517,7 @@ function renderControlCenter(): void {
     class: "input mono",
     placeholder: t("rc.proxyPlaceholder"),
     value: state.proxyUrl,
-    title: "Proxy for all Telegram traffic: http(s):// or socks(4/5)://, with optional user:pass@. Applies immediately — bots restart on save.",
+    title: t("rc.proxyInputTitle"),
   }) as HTMLInputElement;
   const proxyApply = el("button", { class: "btn", text: t("rc.apply") }) as HTMLButtonElement;
   const proxyTest = el("button", { class: "btn", text: t("rc.proxyTest"), title: t("rc.proxyTestTitle") }) as HTMLButtonElement;
@@ -527,8 +527,8 @@ function renderControlCenter(): void {
     proxyApply.disabled = true;
     void window.ide.remote.setProxyUrl(url).then((res) => {
       proxyApply.disabled = false;
-      if (res.ok) toast(url ? `Telegram ${res.probe ?? "proxy set"} — bots restarting` : "Telegram proxy cleared — bots restarting");
-      else toast(res.error ?? "Invalid proxy URL", { crit: true });
+      if (res.ok) toast(url ? t("rc.proxyApplied", res.probe ?? t("rc.proxySetFallback")) : t("rc.proxyCleared"));
+      else toast(res.error ?? t("rc.invalidProxy"), { crit: true });
     });
   };
   const testProxy = () => {
@@ -589,11 +589,11 @@ function showBeaconPopover(anchor: HTMLElement, openCC: () => void): void {
   document.querySelector(".beacon-pop")?.remove();
   const pop = el("div", { class: "beacon-pop" });
   if (!state.bots.length) {
-    pop.append(el("div", { class: "bp-row", text: "No bots registered." }));
+    pop.append(el("div", { class: "bp-row", text: t("rc.noBots") }));
   }
   const pending = pendingProposals();
   if (pending.length) {
-    pop.append(el("div", { class: "bp-proposals-hdr", text: "Pending proposals" }));
+    pop.append(el("div", { class: "bp-proposals-hdr", text: t("rc.pendingProposals") }));
     for (const p of pending) {
       pop.append(
         el(
@@ -619,13 +619,13 @@ function showBeaconPopover(anchor: HTMLElement, openCC: () => void): void {
   }
   const killBtn = el("button", {
     class: state.globalEnabled ? "btn btn-danger" : "btn",
-    text: state.globalEnabled ? "Kill all remotes" : "Enable remote",
+    text: state.globalEnabled ? t("rc.killAll") : t("rc.enableRemote"),
     onClick: () => {
       void window.ide.remote.setGlobalEnabled(!state.globalEnabled);
       pop.remove();
     },
   });
-  const openBtn = el("button", { class: "btn", text: "Control Center", onClick: () => { pop.remove(); openCC(); } });
+  const openBtn = el("button", { class: "btn", text: t("rc.controlCenter"), onClick: () => { pop.remove(); openCC(); } });
   pop.append(el("div", { class: "bp-actions" }, openBtn, el("span", { style: { flex: "1" } }), killBtn));
   document.body.append(pop);
   const r = anchor.getBoundingClientRect();
@@ -644,11 +644,11 @@ function showBeaconPopover(anchor: HTMLElement, openCC: () => void): void {
 }
 
 export function createBeacon(openCC: () => void): HTMLElement {
-  beaconEl = el("span", { class: "beacon", title: "Remote control" });
+  beaconEl = el("span", { class: "beacon", title: t("rc.remoteControl") });
   beaconEl.innerHTML = `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round">${ANTENNA}</svg>`;
   beaconErrDot = el("span", { class: "beacon-err", style: { display: "none" } });
   beaconEl.append(beaconErrDot);
-  const wrap = el("span", { class: "sb-item", title: "Remote control", onClick: () => showBeaconPopover(wrap, openCC) });
+  const wrap = el("span", { class: "sb-item", title: t("rc.remoteControl"), onClick: () => showBeaconPopover(wrap, openCC) });
   wrap.append(beaconEl);
   beaconBadge = el("span", { class: "beacon-badge", style: { display: "none" } });
   wrap.append(beaconBadge);

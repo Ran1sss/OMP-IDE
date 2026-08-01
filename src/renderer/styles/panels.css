@@ -348,7 +348,11 @@
 .agent-now .now-todo { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-mid); }
 .agent-now .now-add { color: var(--ok-system); }
 .agent-now .now-del { color: var(--crit); }
-.git-section .gs-head {
+/* label+count law (audit Part A.5): a label and its count are NEVER set
+   solid — the count renders as the shared .count-badge with the flex gap.
+   (was scoped to a dead .git-section ancestor — the kanban headers got no
+   styling at all, which produced the glued «CHANGES12» defect) */
+.gs-head {
   display: flex;
   align-items: center;
   gap: 6px;
@@ -358,13 +362,6 @@
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--text-mid);
-}
-.git-section .gs-head .gs-count {
-  font-family: var(--font-mono);
-  background: var(--bg-1);
-  padding: 0 6px;
-  border-radius: 8px;
-  font-size: 10.5px;
 }
 .git-list { overflow-y: auto; }
 .git-file-row {
@@ -813,6 +810,7 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 8px; /* spacing law (audit A.5): TEAM · boost-era gap between controls */
 }
 
 /* silent-model stall nudge — appears in the transcript after 20s of nothing */
@@ -845,7 +843,9 @@
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: center;
+  /* `safe center`: on short panels the hero scrolls instead of clipping its top/bottom (audit e) */
+  justify-content: safe center;
+  overflow-y: auto;
   gap: 14px;
   padding: 24px;
   text-align: center;

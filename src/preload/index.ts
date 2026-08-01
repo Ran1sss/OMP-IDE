@@ -179,6 +179,8 @@ const api: IdeApi = {
       ipcRenderer.invoke("remote:setChatWatched", botId, chatId, watched),
     setChatListener: (botId, chatId, listener) =>
       ipcRenderer.invoke("remote:setChatListener", botId, chatId, listener),
+    setChatAnswerMembers: (botId, chatId, enabled) =>
+      ipcRenderer.invoke("remote:setChatAnswerMembers", botId, chatId, enabled),
     removeChat: (botId, chatId, deleteLog) =>
       ipcRenderer.invoke("remote:removeChat", botId, chatId, deleteLog),
     setApprover: (botId, telegramId) => ipcRenderer.invoke("remote:setApprover", botId, telegramId),
@@ -203,7 +205,6 @@ const api: IdeApi = {
     switchModel: (selector, origin) => ipcRenderer.invoke("models:switchModel", selector, origin),
     setRoleThinking: (role, level, origin) => ipcRenderer.invoke("models:setRoleThinking", role, level, origin),
     setSessionThinking: (level, origin) => ipcRenderer.invoke("models:setSessionThinking", level, origin),
-    boostOnce: (origin) => ipcRenderer.invoke("models:boostOnce", origin),
     getEvents: (): Promise<ModelEvent[]> => ipcRenderer.invoke("models:getEvents"),
     setBalanceEndpoint: (id, endpoint) => ipcRenderer.invoke("models:setBalanceEndpoint", id, endpoint),
     checkBalance: (id) => ipcRenderer.invoke("models:checkBalance", id),

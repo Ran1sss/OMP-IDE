@@ -8,7 +8,7 @@ import { I } from "../core/icons";
 import { on, emit } from "../core/bus";
 import { state, baseName, dirName, joinPath, normPath, languageForPath } from "../core/state";
 import { toast, confirmDialog, selectDialog, formDialog, contextMenu, errorText } from "../core/ui";
-import { t } from "../core/i18n";
+import { t, relTime } from "../core/i18n";
 import { updateGitIndex } from "./explorer";
 import type { GitStatus, GitFileStatus, GitCommitInfo } from "../../shared/types";
 
@@ -66,18 +66,18 @@ async function openFileDiff(f: GitFileStatus, staged: boolean) {
 async function discardFile(f: GitFileStatus) {
   if (!state.root) return;
   const ok = await confirmDialog({
-    title: "Discard changes",
-    message: `Discard all changes to "${f.path}"? This cannot be undone.`,
-    confirmLabel: "Discard",
+    title: t("git.discardTitle"),
+    message: t("git.discardMsg", f.path),
+    confirmLabel: t("git.discardBtn"),
     danger: true,
   });
   if (!ok) return;
   try {
     await window.ide.git.discard(state.root, [f.path]);
     emit("git-refresh", undefined);
-    toast(`Discarded changes to ${baseName(f.path)}`);
+    toast(t("git.discarded", baseName(f.path)));
   } catch (err) {
-    toast(`Discard failed: ${errorText(err)}`, { crit: true });
+    toast(t("git.discardFailed", errorText(err)), { crit: true });
   }
 }
 
@@ -85,7 +85,7 @@ async function doCommit() {
   if (!state.root) return;
   const msg = commitMsg.value.trim();
   if (!msg) {
-    toast("Commit message is empty");
+    toast(t("git.emptyMsg"));
     commitMsg.focus();
     return;
   }
@@ -93,13 +93,13 @@ async function doCommit() {
   if (stagedCount === 0) {
     const unstaged = status.files.filter((f) => f.worktree !== " ");
     if (unstaged.length === 0) {
-      toast("No changes to commit");
+      toast(t("git.nothingToCommit"));
       return;
     }
     const ok = await confirmDialog({
-      title: "Nothing staged",
-      message: `Stage all ${unstaged.length} ${unstaged.length === 1 ? "change" : "changes"} and commit?`,
-      confirmLabel: "Stage All & Commit",
+      title: t("git.nothingStagedTitle"),
+      message: t("git.stageAllMsg", unstaged.length),
+      confirmLabel: t("git.stageAllCommitBtn"),
       focusConfirm: true,
     });
     if (!ok) return;
@@ -110,20 +110,20 @@ async function doCommit() {
     commitMsg.value = "";
     pendingMsg = "";
     emit("git-refresh", undefined);
-    toast("Committed");
+    toast(t("git.committed"));
   } catch (err) {
     const text = err instanceof Error ? err.message : String(err);
     // Fresh machine / fresh repo: git refuses without user.name+email. Walk the
     // user through a repo-local identity instead of dumping 8 lines of stderr.
     if (/unable to auto-detect email|Please tell me who you are/i.test(text)) {
       const identity = await formDialog({
-        title: "Git needs your identity",
-        message: "This repository has no user.name/user.email. Set them for THIS repo to commit.",
+        title: t("git.identityTitle"),
+        message: t("git.identityMsg"),
         fields: [
-          { key: "name", label: "Name", placeholder: "Your Name" },
-          { key: "email", label: "Email", placeholder: "you@example.com" },
+          { key: "name", label: t("git.nameLbl"), placeholder: t("git.namePh") },
+          { key: "email", label: t("git.emailLbl"), placeholder: "you@example.com" },
         ],
-        confirmLabel: "Save & Commit",
+        confirmLabel: t("git.saveCommitBtn"),
       });
       if (!identity) return;
       const { name, email } = identity;
@@ -133,27 +133,27 @@ async function doCommit() {
         commitMsg.value = "";
         pendingMsg = "";
         emit("git-refresh", undefined);
-        toast("Committed");
+        toast(t("git.committed"));
       } catch (err2) {
-        toast(`Commit failed: ${err2 instanceof Error ? err2.message : err2}`, { crit: true });
+        toast(t("git.commitFailed", err2 instanceof Error ? err2.message : String(err2)), { crit: true });
       }
       return;
     }
-    toast(`Commit failed: ${text}`, { crit: true });
+    toast(t("git.commitFailed", text), { crit: true });
   }
 }
 
 export async function switchBranch() {
   if (!state.root || !status.isRepo) return;
   const branches = await window.ide.git.branches(state.root);
-  const pick = await selectDialog("Switch branch", branches.filter((b) => b !== status.branch));
+  const pick = await selectDialog(t("git.switchBranch"), branches.filter((b) => b !== status.branch));
   if (!pick) return;
   try {
     await window.ide.git.checkout(state.root, pick);
     emit("git-refresh", undefined);
-    toast(`Switched to ${pick}`);
+    toast(t("git.switched", pick));
   } catch (err) {
-    toast(`Checkout failed: ${errorText(err)}`, { crit: true });
+    toast(t("git.checkoutFailed", errorText(err)), { crit: true });
   }
 }
 
@@ -276,9 +276,9 @@ function fileRow(f: GitFileStatus, staged: boolean): HTMLElement {
       onContextMenu: (e) => {
         e.preventDefault();
         contextMenu(e.clientX, e.clientY, [
-          { label: "Open diff", action: () => void openFileDiff(f, staged) },
-          { label: staged ? "Unstage" : "Stage", action: () => moveFile(row, f, !staged) },
-          ...(!staged ? [{ label: "Discard changes", action: () => void discardFile(f) }] : []),
+          { label: t("git.openDiff"), action: () => void openFileDiff(f, staged) },
+          { label: staged ? t("git.unstage") : t("git.stage"), action: () => moveFile(row, f, !staged) },
+          ...(!staged ? [{ label: t("git.discardTitle"), action: () => void discardFile(f) }] : []),
         ]);
       },
       onDragStart: (e) => {
@@ -295,7 +295,7 @@ function fileRow(f: GitFileStatus, staged: boolean): HTMLElement {
 /** One kanban column (CHANGES or STAGED) with header, count, drop target. */
 function column(title: string, files: GitFileStatus[], staged: boolean, bulk: HTMLElement | null): HTMLElement {
   const list = el("div", { class: "gc-list" });
-  if (!files.length) list.append(el("div", { class: "dimmer gc-empty", text: staged ? "drop files to stage" : "clean" }));
+  if (!files.length) list.append(el("div", { class: "dimmer gc-empty", text: staged ? t("git.dropToStage") : t("git.clean") }));
   for (const f of files) list.append(fileRow(f, staged));
   const col = el(
     "div",
@@ -326,7 +326,7 @@ function column(title: string, files: GitFileStatus[], staged: boolean, bulk: HT
       "div",
       { class: "gs-head" },
       el("span", { text: title }),
-      el("span", { class: "gs-count", text: String(files.length) }),
+      el("span", { class: "gs-count count-badge", text: String(files.length) }),
       el("span", { style: { flex: "1" } }),
       bulk,
     ),
@@ -347,10 +347,10 @@ function renderPanel() {
         "div",
         { class: "git-empty" },
         svgIcon(I.git),
-        el("div", { text: "This folder is not a git repository." }),
+        el("div", { text: t("git.notRepo") }),
         el("button", {
           class: "btn btn-primary",
-          text: "Initialize Repository",
+          text: t("git.initRepo"),
           onClick: () =>
             void window.ide.git.init(state.root!).then(() => emit("git-refresh", undefined)),
         }),
@@ -365,7 +365,7 @@ function renderPanel() {
 
   commitMsg = el("textarea", {
     class: "input",
-    placeholder: `Message (commit on ${status.branch})`,
+    placeholder: t("git.msgPlaceholder", status.branch),
     onInput: () => {
       pendingMsg = commitMsg.value;
       renderCommitDisabled();
@@ -380,7 +380,7 @@ function renderPanel() {
   commitMsg.value = pendingMsg;
 
   const stageAll = el("button", {
-    class: "icon-btn", title: "Stage all",
+    class: "icon-btn", title: t("git.stageAllTip"),
     onClick: () =>
       void window.ide.git
         .stage(state.root!, unstagedFiles.map((f) => f.path))
@@ -388,7 +388,7 @@ function renderPanel() {
   });
   stageAll.append(svgIcon(I.stage));
   const unstageAll = el("button", {
-    class: "icon-btn", title: "Unstage all",
+    class: "icon-btn", title: t("git.unstageAllTip"),
     onClick: () =>
       void window.ide.git
         .unstage(state.root!, stagedFiles.map((f) => f.path))
@@ -399,12 +399,12 @@ function renderPanel() {
   // «Поток слева-направо»: CHANGES → STAGED kanban; composer under STAGED.
   const commitBtn = el("button", { class: "btn btn-primary", text: t("git.commit"), onClick: () => void doCommit() }) as HTMLButtonElement;
   const composer = el("div", { class: "commit-box" }, commitMsg, commitBtn);
-  const stagedCol = column("STAGED", stagedFiles, true, stagedFiles.length ? unstageAll : null);
+  const stagedCol = column(t("git.staged"), stagedFiles, true, stagedFiles.length ? unstageAll : null);
   stagedCol.append(composer);
   const flow = el(
     "div",
     { class: "git-flow" },
-    column("CHANGES", unstagedFiles, false, unstagedFiles.length ? stageAll : null),
+    column(t("git.changes"), unstagedFiles, false, unstagedFiles.length ? stageAll : null),
     stagedCol,
   );
   panelEl.append(flow);
@@ -434,7 +434,7 @@ async function renderLog() {
   panelEl.querySelector(".git-log")?.remove();
   if (!commits.length) return;
   const logEl = el("div", { class: "git-log" });
-  logEl.append(el("div", { class: "gs-head", style: { marginBottom: "2px" } }, el("span", { text: "Recent Commits" })));
+  logEl.append(el("div", { class: "gs-head", style: { marginBottom: "2px" } }, el("span", { text: t("git.recentCommits") })));
   for (const c of commits) {
     logEl.append(
       el(
@@ -442,7 +442,7 @@ async function renderLog() {
         { class: "git-log-row", title: `${c.subject}\n${c.author}` },
         el("span", { class: "gl-hash", text: c.shortHash }),
         el("span", { class: "gl-subj", text: c.subject }),
-        el("span", { class: "gl-when", text: c.date }),
+        el("span", { class: "gl-when", text: relTime(c.at) }),
       ),
     );
   }

@@ -7,6 +7,8 @@
 
 import { el, clear, svgIcon } from "../core/dom";
 import { I } from "../core/icons";
+import { on } from "../core/bus";
+import { t, relTime } from "../core/i18n";
 import { notificationLog, clearNotificationLog, onNotificationLogChange } from "../core/ui";
 
 let bellEl: HTMLElement | null = null;
@@ -34,20 +36,18 @@ function showPopover(anchor: HTMLElement): void {
 
   const pop = el("div", { class: "notif-pop" });
   const entries = notificationLog();
-  pop.append(el("div", { class: "mp-section", text: "Notifications" }));
+  pop.append(el("div", { class: "mp-section", text: t("notif.title") }));
 
   if (!entries.length) {
-    pop.append(el("div", { class: "mp-empty", text: "No notifications yet — toasts land here." }));
+    pop.append(el("div", { class: "mp-empty", text: t("notif.empty") }));
   } else {
     const list = el("div", { class: "notif-list" });
     for (const n of entries) {
-      const d = new Date(n.at);
-      const hhmm = `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
       list.append(
         el(
           "div",
           { class: n.crit ? "notif-row crit" : "notif-row" },
-          el("span", { class: "notif-time mono", text: hhmm }),
+          el("span", { class: "notif-time mono", text: relTime(n.at) }),
           el("span", { class: "notif-msg", text: n.message }),
         ),
       );
@@ -57,7 +57,7 @@ function showPopover(anchor: HTMLElement): void {
       el(
         "div",
         { class: "mp-foot" },
-        el("button", { class: "btn", text: "Clear", onClick: () => { clearNotificationLog(); closePop(); } }),
+        el("button", { class: "btn", text: t("notif.clear"), onClick: () => { clearNotificationLog(); closePop(); } }),
       ),
     );
   }
@@ -85,7 +85,7 @@ export function createNotificationBell(): HTMLElement {
     "span",
     {
       class: "sb-item notif-bell",
-      title: "Notifications",
+      title: t("notif.title"),
       onClick: () => (openPop ? closePop() : showPopover(bellEl!)),
     },
     svgIcon(I.bell),
@@ -96,5 +96,7 @@ export function createNotificationBell(): HTMLElement {
     // live update while open: re-anchor a fresh popover
     if (openPop && bellEl) showPopover(bellEl);
   });
+  // persistent status-bar item: tooltip re-applied on language switch
+  on("lang-changed", () => { if (bellEl) bellEl.title = t("notif.title"); });
   return bellEl;
 }

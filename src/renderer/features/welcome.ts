@@ -7,6 +7,8 @@
 import { el, svgIcon } from "../core/dom";
 import { I } from "../core/icons";
 import { normPath } from "../core/state";
+import { t, relTime } from "../core/i18n";
+import { on } from "../core/bus";
 import type { RecentWorkspace } from "../../shared/types";
 
 export async function showWelcome(
@@ -25,15 +27,7 @@ export async function showWelcome(
     recents.push({ ...r, path: n });
   }
 
-  const fmtAge = (at: number): string => {
-    const d = Date.now() - at;
-    const h = Math.floor(d / 3600000);
-    if (h < 1) return "недавно";
-    if (h < 24) return `${h}ч назад`;
-    const days = Math.floor(h / 24);
-    return days === 1 ? "вчера" : `${days}д назад`;
-  };
-
+  // relative age via the shared locale-aware helper (i18n audit Part B.4)
   // which recents have a previous agent session? (drives the resume row)
   const sessionsByWs = new Map<string, boolean>();
   await Promise.all(
@@ -60,7 +54,7 @@ export async function showWelcome(
   recents.forEach((r, i) => {
     const x = el("button", {
       class: "icon-btn wsc-x",
-      title: "Remove from recents",
+      title: t("wk.removeRecent"),
       onClick: (e) => {
         e.stopPropagation();
         void window.ide.store.removeRecent(r.path).then(() => {
@@ -88,7 +82,7 @@ export async function showWelcome(
         el("div", { class: "wsc-name", text: r.name }),
         el("div", { class: "wsc-path mono", text: r.path }),
       ),
-      el("span", { class: "wk-age", text: fmtAge(r.openedAt) }),
+      el("span", { class: "wk-age", text: relTime(r.openedAt) }),
       x,
     );
     rows.push(row);
@@ -107,7 +101,7 @@ export async function showWelcome(
             },
           },
           el("span", { class: "wk-resume-ico", text: "↻" }),
-          el("span", { text: "продолжить сессию агента" }),
+          el("span", { text: t("wk.resumeSession") }),
         ),
       );
     }
@@ -115,7 +109,7 @@ export async function showWelcome(
 
   const openBtn = el("button", {
     class: "btn btn-primary",
-    text: "Open Folder…",
+    text: t("wk.openFolder"),
     style: { padding: "9px 26px", fontSize: "13.5px" },
     onClick: () => {
       void window.ide.dialog.openFolder().then((path) => {
@@ -132,7 +126,7 @@ export async function showWelcome(
     el("div", { class: "grain-layer" }),
     glow,
     el("div", { class: "wordmark" }, "OMP ", el("span", { class: "wm-ide", text: "IDE" })),
-    el("div", { class: "tagline", text: "reactor online · agent standing by" }),
+    el("div", { class: "tagline", text: t("wk.tagline") }),
   );
   hero.addEventListener("mousemove", (e) => {
     const r = hero.getBoundingClientRect();
@@ -144,13 +138,34 @@ export async function showWelcome(
   const work = el(
     "div",
     { class: "wk-work" },
-    el("div", { class: "wk-title", text: "Рабочие области" }),
-    recents.length ? list : el("div", { class: "dimmer", text: "Нет недавних рабочих областей" }),
+    el("div", { class: "wk-title", text: t("wk.workspaces") }),
+    recents.length ? list : el("div", { class: "dimmer", text: t("wk.noRecents") }),
     openBtn,
   );
 
   const screen = el("div", { class: "welcome wk-split" }, hero, work);
   container.append(screen);
   if (rows.length) select(0);
+
+  // persistent surface: re-apply fixed strings on language switch; the
+  // subscription drops itself once the welcome screen leaves the DOM
+  const off = on("lang-changed", () => {
+    if (!screen.isConnected) {
+      off();
+      return;
+    }
+    work.querySelector(".wk-title")!.textContent = t("wk.workspaces");
+    const dim = work.querySelector(".dimmer");
+    if (dim) dim.textContent = t("wk.noRecents");
+    openBtn.textContent = t("wk.openFolder");
+    hero.querySelector(".tagline")!.textContent = t("wk.tagline");
+    for (const b of list.querySelectorAll<HTMLElement>(".wsc-x")) b.title = t("wk.removeRecent");
+    for (const s of list.querySelectorAll(".wk-resume span:last-child")) s.textContent = t("wk.resumeSession");
+    recents.forEach((r, i) => {
+      const age = rows[i]?.querySelector(".wk-age");
+      if (age) age.textContent = relTime(r.openedAt);
+    });
+  });
+
   return screen;
 }

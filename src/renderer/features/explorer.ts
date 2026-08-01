@@ -7,6 +7,7 @@ import { I } from "../core/icons";
 import { on, emit } from "../core/bus";
 import { state, baseName, dirName, normPath, joinPath, SEP } from "../core/state";
 import { toast, confirmDialog, contextMenu, inputDialog, errorText } from "../core/ui";
+import { t } from "../core/i18n";
 import { setMentionDragData } from "./mentions";
 import type { DirEntry, GitFileStatus } from "../../shared/types";
 
@@ -295,7 +296,7 @@ async function loadChildren(node: TreeNode) {
     }));
     node.loaded = true;
   } catch (err) {
-    toast(`Cannot read ${node.name}: ${errorText(err)}`, { crit: true });
+    toast(t("explorer.readFailed", node.name, errorText(err)), { crit: true });
   }
 }
 
@@ -347,7 +348,7 @@ function startRename(node: TreeNode) {
       await window.ide.fs.rename(node.path, newPath);
       // watcher events will refresh the tree
     } catch (err) {
-      toast(`Rename failed: ${errorText(err)}`, { crit: true });
+      toast(t("explorer.renameFailed", errorText(err)), { crit: true });
       rerenderVisible(rootNode!);
     }
   };
@@ -365,7 +366,7 @@ async function moveInto(srcPath: string, destDir: string) {
   try {
     await window.ide.fs.move(src, dest);
   } catch (err) {
-    toast(`Move failed: ${errorText(err)}`, { crit: true });
+    toast(t("explorer.moveFailed", errorText(err)), { crit: true });
   }
 }
 
@@ -379,16 +380,16 @@ function showNodeMenu(node: TreeNode, x: number, y: number) {
   contextMenu(x, y, [
     ...(node.isDir
       ? []
-      : [{ label: "Open", action: () => emit("open-file", { path: node.path }) }]),
-    { label: "New File…", action: () => void createIn(dirForNew, "file") },
-    { label: "New Folder…", action: () => void createIn(dirForNew, "folder") },
+      : [{ label: t("explorer.open"), action: () => emit("open-file", { path: node.path }) }]),
+    { label: t("explorer.newFile"), action: () => void createIn(dirForNew, "file") },
+    { label: t("explorer.newFolder"), action: () => void createIn(dirForNew, "folder") },
     { separator: true },
-    { label: "Rename", key: "F2", action: () => startRename(node) },
-    { label: "Copy Path", action: () => void navigator.clipboard.writeText(node.path) },
-    { label: "Copy Relative Path", action: () => void navigator.clipboard.writeText(node.path.slice((state.root?.length ?? 0) + 1)) },
+    { label: t("explorer.rename"), key: "F2", action: () => startRename(node) },
+    { label: t("explorer.copyPath"), action: () => void navigator.clipboard.writeText(node.path) },
+    { label: t("explorer.copyRelativePath"), action: () => void navigator.clipboard.writeText(node.path.slice((state.root?.length ?? 0) + 1)) },
     { separator: true },
     {
-      label: "Delete",
+      label: t("explorer.delete"),
       key: "Del",
       danger: true,
       action: () => void deleteSelected(node),
@@ -398,8 +399,8 @@ function showNodeMenu(node: TreeNode, x: number, y: number) {
 
 async function createIn(dir: string, kind: "file" | "folder") {
   const name = await inputDialog({
-    title: kind === "file" ? "New File" : "New Folder",
-    placeholder: kind === "file" ? "filename.ext" : "folder-name",
+    title: kind === "file" ? t("explorer.newFileTitle") : t("explorer.newFolderTitle"),
+    placeholder: kind === "file" ? t("explorer.newFilePlaceholder") : t("explorer.newFolderPlaceholder"),
   });
   if (!name) return;
   const path = joinPath(dir, name);
@@ -417,22 +418,22 @@ async function createIn(dir: string, kind: "file" | "folder") {
       rerenderVisible(rootNode!);
     }
   } catch (err) {
-    toast(`${errorText(err)}`, { crit: true });
+    toast(t("explorer.createFailed", errorText(err)), { crit: true });
   }
 }
 
 async function deleteNode(node: TreeNode) {
   const ok = await confirmDialog({
-    title: `Delete ${node.isDir ? "folder" : "file"}`,
-    message: `Move "${node.name}" to the trash?`,
-    confirmLabel: "Delete",
+    title: node.isDir ? t("explorer.deleteFolderTitle") : t("explorer.deleteFileTitle"),
+    message: t("explorer.deleteConfirm", node.name),
+    confirmLabel: t("explorer.delete"),
     danger: true,
   });
   if (!ok) return;
   try {
     await window.ide.fs.trash(node.path);
   } catch (err) {
-    toast(`Delete failed: ${errorText(err)}`, { crit: true });
+    toast(t("explorer.deleteFailed", errorText(err)), { crit: true });
   }
 }
 
@@ -441,9 +442,9 @@ async function deleteSelected(node: TreeNode) {
   if (!selectedPaths.has(node.path) || selectedPaths.size <= 1) return deleteNode(node);
   const count = selectedPaths.size;
   const ok = await confirmDialog({
-    title: `Delete ${count} items`,
-    message: `Move ${count} items to the trash?`,
-    confirmLabel: "Delete",
+    title: t("explorer.deleteManyTitle", count),
+    message: t("explorer.deleteManyConfirm", count),
+    confirmLabel: t("explorer.delete"),
     danger: true,
   });
   if (!ok) return;
@@ -451,7 +452,7 @@ async function deleteSelected(node: TreeNode) {
     try {
       await window.ide.fs.trash(p);
     } catch (err) {
-      toast(`Delete failed: ${errorText(err)}`, { crit: true });
+      toast(t("explorer.deleteFailed", errorText(err)), { crit: true });
     }
   }
 }

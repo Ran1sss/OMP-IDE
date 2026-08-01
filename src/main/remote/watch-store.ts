@@ -17,6 +17,8 @@ export interface WatchedChat {
   coverage: ChatCoverage;
   watched: boolean;
   listener: boolean;
+  /** Chat Dialogue: answer status questions from non-paired members (default OFF) */
+  answerMembers?: boolean;
   left: boolean;
   discoveredAt: number;
   messageCount: number;

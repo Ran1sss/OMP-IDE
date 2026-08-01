@@ -14,6 +14,7 @@ import { allCommands, type Command } from "../core/commands";
 import { fuzzyMatch, highlight } from "../core/fuzzy";
 import { omnibarModelItems } from "./models";
 import { focusAgentInput, setAgentDraft } from "./agent";
+import { t } from "../core/i18n";
 
 type Mode = "files" | "commands";
 type Section = "Commands" | "Files" | "Models" | "Agent";
@@ -105,7 +106,7 @@ function buildFlat(query: string): BarItem[] {
   if (q && (capped.length === 0 || best < 12)) {
     capped.push({
       section: "Agent",
-      label: `→ спросить агента: "${q}"`,
+      label: t("pal.askAgent", q),
       indices: [],
       score: -1,
       run: () => {
@@ -120,14 +121,16 @@ function buildFlat(query: string): BarItem[] {
 function renderList(): void {
   clear(listEl);
   if (flat.length === 0) {
-    listEl.append(el("div", { class: "pal-none", text: "Nothing matches" }));
+    listEl.append(el("div", { class: "pal-none", text: t("pal.noMatches") }));
     return;
   }
+  const secLabel = (s: Section): string =>
+    (s === "Commands" ? t("pal.secCommands") : s === "Files" ? t("pal.secFiles") : s === "Models" ? t("pal.secModels") : t("pal.secAgent")).toUpperCase();
   let lastSection: Section | null = null;
   flat.forEach((item, i) => {
     if (item.section !== lastSection) {
       lastSection = item.section;
-      listEl.append(el("div", { class: "ob-section", text: item.section.toUpperCase() }));
+      listEl.append(el("div", { class: "ob-section", text: secLabel(item.section) }));
     }
     const row = el("div", {
       class: i === selected ? "pal-row selected" : "pal-row",
@@ -192,7 +195,7 @@ export async function openPalette(m: Mode): Promise<void> {
 
   inputEl = el("input", {
     class: "pal-input",
-    placeholder: m === "files" ? "Файл, команда, модель… (Tab — след. секция)" : "Команда, файл, модель… (Tab — след. секция)",
+    placeholder: m === "files" ? t("pal.phFiles") : t("pal.phCommands"),
     onInput: () => applyFilter(),
     onKeyDown: (e) => {
       if (e.key === "ArrowDown") {

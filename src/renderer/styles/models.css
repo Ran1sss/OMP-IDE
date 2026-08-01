@@ -141,6 +141,10 @@
   gap: 10px;
   padding-right: 4px;
 }
+/* scroller law (mirror of .control-center): the SCROLLER scrolls — children
+   never compress to fit. Without this, 10+ profile cards squeeze (default
+   flex-shrink:1) and the motion-full overflow clip slices their second line. */
+.models-dialog .md-scroll > * { flex-shrink: 0; }
 .models-dialog .dialog-actions { flex-shrink: 0; }
 
 /* ---------- «Кокпит ролей» (redesign §8) ---------- */
@@ -224,6 +228,8 @@
   border: 1px solid var(--line);
   border-radius: var(--r-m);
   padding: 10px 12px;
+  /* inline-size container: the pc-mid grid re-slots the balance cluster by CARD width */
+  container-type: inline-size;
 }
 .mprov-card.crit { border-color: var(--crit-40); }
 .mprov-card .pc-head { display: flex; align-items: center; gap: 8px; }
@@ -231,7 +237,19 @@
 .mprov-card .pc-glyph svg { width: 16px; height: 16px; }
 .mprov-card.active-prov .pc-glyph { color: var(--text-hi); }
 .mprov-card .pc-name { font-weight: 700; font-size: 13px; }
-.mprov-card .pc-url { font-family: var(--font-mono); font-size: 10px; color: var(--text-low); overflow: hidden; text-overflow: ellipsis; }
+.mprov-card .pc-url { font-family: var(--font-mono); font-size: 10px; line-height: 1.5; color: var(--text-low); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+/* two-line middle column as a grid: the balance cluster re-slots by card
+   width — line 1 next to the badges at normal width, line 2 after the URL
+   (· separated) on narrow cards. One element, CSS reflows it — no dup DOM. */
+.pc-mid { flex: 1; min-width: 0; display: grid; grid-template-columns: minmax(0, max-content) minmax(0, 1fr); column-gap: 6px; align-items: center; }
+.pc-mid .pc-nameline { grid-area: 1 / 1; display: flex; align-items: center; gap: 6px; min-width: 0; }
+.pc-mid .pc-balance { grid-area: 1 / 2; justify-self: start; }
+.pc-mid .pc-url { grid-column: 1 / 3; grid-row: 2; }
+@container (max-width: 520px) {
+  .pc-mid .pc-balance { grid-area: 2 / 2; white-space: nowrap; }
+  .pc-mid .pc-url { grid-column: 1 / 2; }
+  .pc-mid .pc-balance::before { content: "· "; color: var(--text-low); }
+}
 .mprov-card .pc-health {
   font-size: 10px;
   font-weight: 700;
@@ -394,31 +412,6 @@
 .think-dial.disabled .td-seg.active { color: var(--text-low); background: var(--bg-1); border-color: var(--line); }
 .think-dial .td-note { font-size: 9px; color: var(--flare); margin-left: 6px; }
 
-/* ---------- one-shot boost toggle (composer row) ---------- */
-.boost-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 2px 8px;
-  margin-right: 8px;
-  font-family: var(--font-mono);
-  font-size: 10px;
-  color: var(--text-low);
-  background: transparent;
-  border: 1px solid var(--line);
-  border-radius: 4px;
-  cursor: pointer;
-  transition: color var(--t-fast) var(--ease-swift), background var(--t-fast) var(--ease-swift),
-    border-color var(--t-fast) var(--ease-swift);
-}
-.boost-btn svg { width: 11px; height: 11px; }
-.boost-btn:hover { color: var(--text-mid); background: var(--bg-1); }
-.boost-btn.armed {
-  color: var(--power);
-  background: var(--bg-2);
-  border-color: var(--power-40);
-}
-
 /* ---------- chip thinking glyph: three ascending bars ---------- */
 .mc-think {
   display: inline-flex;
@@ -540,6 +533,8 @@
    teal stays agent-only. Numbers ARE the interface: mono tabular. */
 
 .tester-dialog { width: 620px; max-width: 92vw; max-height: 86vh; display: flex; flex-direction: column; }
+/* same scroller law: only the result pane shrinks/scrolls — the form never compresses */
+.tester-dialog > :not(.tf-result) { flex-shrink: 0; }
 .tester-dialog h2 { margin-top: 0; }
 .tf-form { display: flex; flex-direction: column; gap: 8px; }
 .tf-protos { display: flex; gap: 6px; }
@@ -566,7 +561,9 @@
   border-radius: var(--r-s);
   color: var(--text-low);
   font-size: 10px;
-  padding: 1px 7px;
+  /* hit-size law (audit d): chips read small but the button box stays tappable */
+  padding: 5px 8px;
+  min-height: 24px;
   cursor: pointer;
 }
 .tf-hint:hover { color: var(--power); border-color: var(--power-40); }

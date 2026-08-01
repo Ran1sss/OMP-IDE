@@ -121,6 +121,32 @@ export function teamDigestData(): { phase: string; active: string[]; done: numbe
   };
 }
 
+/**
+ * Read-only журнал slice for the Chat Dialogue answer composer: milestones
+ * (feed tail), slice states with diffstats, plan summary, final report.
+ * Present for the LAST run too (done/stalled) — history questions need it.
+ */
+export function teamJournalData(): {
+  phase: string;
+  goal: string;
+  planSummary: string;
+  feed: { author: string; text: string; at: number }[];
+  slices: { id: string; title: string; state: string; worker: string; add: number; del: number }[];
+  report: string | null;
+  startedAt: number;
+} | null {
+  if (!run) return null;
+  return {
+    phase: run.phase,
+    goal: run.goal,
+    planSummary: run.planSummary,
+    feed: run.feed.slice(-20).map((f) => ({ author: f.author, text: f.text, at: f.at })),
+    slices: run.slices.map((s) => ({ id: s.id, title: s.title, state: s.state, worker: s.worker, add: s.add, del: s.del })),
+    report: run.report,
+    startedAt: run.startedAt,
+  };
+}
+
 // -------------------------------------------------- persistence (restart honesty)
 
 function persistPath(): string {

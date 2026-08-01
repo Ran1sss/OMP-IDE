@@ -97,76 +97,82 @@ function metaFor(file: string, root: string): OmpSessionMeta | null {
   };
 }
 
-export function registerSessionHistoryHandlers(ipc: IpcMain) {
-  ipc.handle("omp:listSessions", async (_e, root: string): Promise<OmpSessionMeta[]> => {
-    const dir = join(sessionsRoot(), slugFor(root));
-    let names: string[];
-    try {
-      names = fs.readdirSync(dir).filter((n) => n.endsWith(".jsonl"));
-    } catch {
-      return []; // no history for this workspace yet — designed empty state
-    }
-    const metas: OmpSessionMeta[] = [];
-    for (const n of names) {
-      const m = metaFor(join(dir, n), root);
-      if (m) metas.push(m);
-    }
-    metas.sort((a, b) => b.startedAt - a.startedAt);
-    return metas.slice(0, MAX_SESSIONS);
-  });
+/** newest-first session list for a workspace (shared: IPC + Chat Dialogue) */
+export function listSessionMetas(root: string): OmpSessionMeta[] {
+  const dir = join(sessionsRoot(), slugFor(root));
+  let names: string[];
+  try {
+    names = fs.readdirSync(dir).filter((n) => n.endsWith(".jsonl"));
+  } catch {
+    return []; // no history for this workspace yet — designed empty state
+  }
+  const metas: OmpSessionMeta[] = [];
+  for (const n of names) {
+    const m = metaFor(join(dir, n), root);
+    if (m) metas.push(m);
+  }
+  metas.sort((a, b) => b.startedAt - a.startedAt);
+  return metas.slice(0, MAX_SESSIONS);
+}
 
-  ipc.handle("omp:readSession", async (_e, file: string): Promise<OmpSessionEntry[]> => {
-    // read-only, and only from inside the sessions root
-    const full = resolve(file);
-    if (!samePath(full.slice(0, sessionsRoot().length), sessionsRoot()))
-      throw new Error("Not a session file");
-    // Bounded read: never pull a whole multi-MB jsonl into memory. Large
-    // sessions read only the last TAIL_READ_BYTES; the first (possibly
-    // partial) line of the window is discarded so every parsed line is whole.
-    const stat = await fs.promises.stat(full);
-    let raw: string;
-    let tailOnly = false;
-    if (stat.size > TAIL_READ_BYTES) {
-      const fh = await fs.promises.open(full, "r");
-      try {
-        const buf = Buffer.alloc(TAIL_READ_BYTES);
-        await fh.read(buf, 0, TAIL_READ_BYTES, stat.size - TAIL_READ_BYTES);
-        raw = buf.toString("utf-8");
-      } finally {
-        await fh.close();
-      }
-      const firstNl = raw.indexOf("\n");
-      raw = firstNl >= 0 ? raw.slice(firstNl + 1) : "";
-      tailOnly = true;
-    } else {
-      raw = await fs.promises.readFile(full, "utf-8");
+/**
+ * Parse one session transcript (shared: IPC + Chat Dialogue). Read-only and
+ * only from inside the sessions root. Bounded: a huge session parses only
+ * its last TAIL_READ_BYTES window; the first (possibly partial) line of the
+ * window is discarded so every parsed line is whole.
+ */
+export function readSessionEntries(file: string): OmpSessionEntry[] {
+  const full = resolve(file);
+  if (!samePath(full.slice(0, sessionsRoot().length), sessionsRoot()))
+    throw new Error("Not a session file");
+  const stat = fs.statSync(full);
+  let raw: string;
+  let tailOnly = false;
+  if (stat.size > TAIL_READ_BYTES) {
+    const fd = fs.openSync(full, "r");
+    try {
+      const buf = Buffer.alloc(TAIL_READ_BYTES);
+      fs.readSync(fd, buf, 0, TAIL_READ_BYTES, stat.size - TAIL_READ_BYTES);
+      raw = buf.toString("utf-8");
+    } finally {
+      fs.closeSync(fd);
     }
-    const entries: OmpSessionEntry[] = [];
-    for (const l of parseLines(raw)) {
-      const at = l.timestamp ? Date.parse(l.timestamp) : 0;
-      if (l.type === "model_change" && l.model) {
-        entries.push({ kind: "model", model: l.model, at });
-      } else if (l.type === "message" && l.message) {
-        const role = l.message.role;
-        const parts = l.message.content ?? [];
-        const text = parts.map((c) => (c.type === "text" ? c.text ?? "" : "")).join("").trim();
-        if (role === "user") {
-          if (text) entries.push({ kind: "user", text, at });
-        } else if (role === "assistant") {
-          if (text) entries.push({ kind: "assistant", text, at });
-          for (const c of parts) {
-            if (c.type === "toolCall" && c.name) entries.push({ kind: "tool", name: c.name, at });
-          }
+    const firstNl = raw.indexOf("\n");
+    raw = firstNl >= 0 ? raw.slice(firstNl + 1) : "";
+    tailOnly = true;
+  } else {
+    raw = fs.readFileSync(full, "utf-8");
+  }
+  const entries: OmpSessionEntry[] = [];
+  for (const l of parseLines(raw)) {
+    const at = l.timestamp ? Date.parse(l.timestamp) : 0;
+    if (l.type === "model_change" && l.model) {
+      entries.push({ kind: "model", model: l.model, at });
+    } else if (l.type === "message" && l.message) {
+      const role = l.message.role;
+      const parts = l.message.content ?? [];
+      const text = parts.map((c) => (c.type === "text" ? c.text ?? "" : "")).join("").trim();
+      if (role === "user") {
+        if (text) entries.push({ kind: "user", text, at });
+      } else if (role === "assistant") {
+        if (text) entries.push({ kind: "assistant", text, at });
+        for (const c of parts) {
+          if (c.type === "toolCall" && c.name) entries.push({ kind: "tool", name: c.name, at });
         }
       }
     }
-    if (entries.length > MAX_ENTRIES || tailOnly) {
-      const dropped = Math.max(0, entries.length - MAX_ENTRIES);
-      const note = tailOnly
-        ? `earlier entries omitted (large session — parsed the last ${Math.round(TAIL_READ_BYTES / 1048576)} MB of ${Math.round(stat.size / 1048576)} MB)`
-        : `${dropped} earlier entries omitted (session too large)`;
-      return [{ kind: "notice", text: note, at: 0 }, ...entries.slice(dropped)];
-    }
-    return entries;
-  });
+  }
+  if (entries.length > MAX_ENTRIES || tailOnly) {
+    const dropped = Math.max(0, entries.length - MAX_ENTRIES);
+    const note = tailOnly
+      ? `earlier entries omitted (large session — parsed the last ${Math.round(TAIL_READ_BYTES / 1048576)} MB of ${Math.round(stat.size / 1048576)} MB)`
+      : `${dropped} earlier entries omitted (session too large)`;
+    return [{ kind: "notice", text: note, at: 0 }, ...entries.slice(dropped)];
+  }
+  return entries;
+}
+
+export function registerSessionHistoryHandlers(ipc: IpcMain) {
+  ipc.handle("omp:listSessions", async (_e, root: string): Promise<OmpSessionMeta[]> => listSessionMetas(root));
+  ipc.handle("omp:readSession", async (_e, file: string): Promise<OmpSessionEntry[]> => readSessionEntries(file));
 }

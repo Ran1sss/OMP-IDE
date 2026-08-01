@@ -591,3 +591,18 @@ textarea.input { resize: none; line-height: 1.5; }
 .md table { border-collapse: collapse; margin: 8px 0; }
 .md th, .md td { border: 1px solid var(--line); padding: 4px 10px; font-size: 12px; }
 .md hr { border: none; border-top: 1px solid var(--line); margin: 12px 0; }
+
+/* ---------- label+count law (audit Part A.5) ----------
+   THE one convention: a count next to a label renders as this badge,
+   separated by the parent's flex gap — label and number are never set
+   solid. Used by SCM column headers, tab overflow, requests, history. */
+.count-badge {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  background: var(--bg-1);
+  padding: 0 6px;
+  border-radius: 8px;
+  font-size: 10.5px;
+  color: var(--text-mid);
+  flex-shrink: 0;
+}

@@ -20,6 +20,8 @@ import type {
 } from "../../shared/types";
 import { MODEL_ROLES, THINKING_LEVELS } from "../../shared/types";
 import { openApiTester, deepTestProfile, runTestAll } from "./tester";
+import { t } from "../core/i18n";
+import { on } from "../core/bus";
 
 const PROVIDER_GLYPHS: Record<ProviderTemplateId, string> = {
   anthropic: `<path d="M6.2 3h3.6L14 13h-2.4l-.9-2.3H5.3L4.4 13H2L6.2 3zm.1 5.8h3.4L8 4.5 6.3 8.8z"/>`,
@@ -40,7 +42,6 @@ let state: ModelsState = {
     effective: "med",
     capability: "unknown",
     pending: null,
-    boost: null,
   },
   autoSwap: { enabled: true, roleOptOut: { default: false, smol: false, slow: false } },
   balancePollMinutes: 10,
@@ -56,7 +57,6 @@ let lastChipText = "";
 // agent panel mounts
 let usageEl: HTMLElement | null = null;
 let warnHost: HTMLElement | null = null;
-let boostBtn: HTMLElement | null = null;
 
 // ---------------------------------------------------------------- helpers
 
@@ -79,8 +79,8 @@ function providerOf(selector: string | null): ProviderInfo | null {
 
 /** human label for a role selector: registry, omp-native, or @alias forms */
 function selectorLabel(sel: string | null): { model: string; provider: string } {
-  if (!sel) return { model: "unassigned", provider: "" };
-  if (sel.startsWith("@")) return { model: sel, provider: "role alias" };
+  if (!sel) return { model: t("mdl.unassigned"), provider: "" };
+  if (sel.startsWith("@")) return { model: sel, provider: t("mdl.roleAlias") };
   const slash = sel.indexOf("/");
   if (slash < 0) return { model: sel, provider: "" };
   const prov = providerOf(sel);
@@ -150,14 +150,14 @@ let chipQual: HTMLElement | null = null;
 
 export function createModelChip(): HTMLElement {
   chipQual = el("span", { class: "mc-qual", style: { display: "none" } });
-  chipName = el("span", { class: "mc-name", text: "no model" });
-  chipPendingEl = el("span", { class: "mc-pending", style: { display: "none" }, text: "PENDING" });
+  chipName = el("span", { class: "mc-name", text: t("mdl.noModel") });
+  chipPendingEl = el("span", { class: "mc-pending", style: { display: "none" }, text: t("mdl.pendingBadge") });
   const bar = el("span", { class: "mc-bar" });
-  chipThinkEl = el("span", { class: "mc-think", title: "Thinking level" });
+  chipThinkEl = el("span", { class: "mc-think", title: t("mdl.thinkingLevel") });
   for (let i = 0; i < 5; i++) chipThinkEl.append(el("span", { class: "mct-bar" }));
   chipEl = el(
     "span",
-    { class: "sb-item model-chip", title: "Active model — click to switch", onClick: () => showSwitchPopover(chipEl!) },
+    { class: "sb-item model-chip", title: t("mdl.chipTipIdle"), onClick: () => showSwitchPopover(chipEl!) },
     bar,
     chipQual,
     chipName,
@@ -172,13 +172,13 @@ const LEVEL_BARS: Record<ThinkingLevel, number> = { off: 0, low: 1, med: 2, high
 function renderChip(): void {
   if (!chipEl || !chipName || !chipPendingEl) return;
   const active = state.active;
-  const text = active ? shortName(active.id) : "no model";
+  const text = active ? shortName(active.id) : t("mdl.noModel");
   const broken = anyRoleProviderBroken();
   chipEl.classList.toggle("crit", !!broken);
   const activeProfile = active ? state.providers.find((p) => p.id === active.provider) : null;
   const activeModel = activeProfile?.models.find((m) => m.id === active?.id) ?? null;
   chipEl.style.setProperty("--mc-fill", ctxClass(activeModel?.contextWindow ?? null));
-  chipPendingEl.textContent = switchInFlight ? "SWITCHING" : "PENDING";
+  chipPendingEl.textContent = switchInFlight ? t("mdl.switchingBadge") : t("mdl.pendingBadge");
   chipPendingEl.style.display = switchInFlight || state.pending || state.thinking.pending ? "" : "none";
   // qualifier: shown exactly while another enabled profile exposes the same id
   if (chipQual) {
@@ -192,18 +192,18 @@ function renderChip(): void {
   const bal = activeProfile?.balance;
   const balAge = bal ? Math.max(0, Math.round((Date.now() - bal.checkedAt) / 60_000)) : 0;
   const balText = bal && bal.value !== null
-    ? ` — balance ${bal.value.toFixed(2)}${bal.currency ? " " + bal.currency : ""} · ${balAge < 1 ? "now" : `${balAge}m`}`
+    ? t("mdl.chipBalSuffix", `${bal.value.toFixed(2)}${bal.currency ? " " + bal.currency : ""}`, t("mdl.ageShort", balAge))
     : "";
   chipEl.title = active
-    ? `${active.provider}/${active.id}${balText} — click to switch`
-    : "Active model — click to switch";
+    ? t("mdl.chipTipActive", `${active.provider}/${active.id}`, balText)
+    : t("mdl.chipTipIdle");
   // thinking glyph: hidden entirely for no-thinking models
   if (chipThinkEl) {
     chipThinkEl.style.display = state.thinking.capability === "no-thinking" ? "none" : "";
     const lit = LEVEL_BARS[state.thinking.effective];
     const bars = chipThinkEl.children;
     for (let i = 0; i < bars.length; i++) bars[i].classList.toggle("lit", i < lit);
-    chipThinkEl.title = `Thinking: ${state.thinking.effective}${state.thinking.sessionOverride ? " (session override)" : ""}${state.thinking.capability === "unknown" ? " · unverified" : ""}`;
+    chipThinkEl.title = `${t("mdl.thinkTip", state.thinking.effective)}${state.thinking.sessionOverride ? t("mdl.thinkOverrideSfx") : ""}${state.thinking.capability === "unknown" ? t("mdl.thinkUnverifiedSfx") : ""}`;
   }
 
   if (text !== lastChipText) {
@@ -237,7 +237,7 @@ function showSwitchPopover(anchor: HTMLElement): void {
   closePop();
   const pop = el("div", { class: "model-pop" });
 
-  pop.append(el("div", { class: "mp-section", text: "Roles" }));
+  pop.append(el("div", { class: "mp-section", text: t("mdl.roles") }));
   for (const role of MODEL_ROLES) {
     const sel = state.roles[role].selector;
     pop.append(
@@ -247,7 +247,7 @@ function showSwitchPopover(anchor: HTMLElement): void {
           class: "mp-row",
           onClick: () => {
             closePop();
-            void pickModel(`Assign ${role} model`).then((choice) => {
+            void pickModel(t("mdl.assignRoleTitle", role)).then((choice) => {
               if (choice) void assignRoleAction(role, choice.selector, "chip");
             });
           },
@@ -260,9 +260,9 @@ function showSwitchPopover(anchor: HTMLElement): void {
   }
 
   const favs = allChoices(true);
-  pop.append(el("div", { class: "mp-section", text: "Favorites" }));
+  pop.append(el("div", { class: "mp-section", text: t("mdl.favorites") }));
   if (!favs.length) {
-    pop.append(el("div", { class: "mp-empty", text: "No favorites yet — star models in Model Settings." }));
+    pop.append(el("div", { class: "mp-empty", text: t("mdl.noFavorites") }));
   }
   // type-to-filter over favorites (falls back to all models when filtering);
   // rows grouped under sticky per-profile headers, fuzzy over the QUALIFIED id
@@ -326,7 +326,7 @@ function showSwitchPopover(anchor: HTMLElement): void {
   };
   const popFilter = el("input", {
     class: "input",
-    placeholder: "Filter models… (profile/model)",
+    placeholder: t("mdl.popFilterPh"),
     onInput: () => renderFavs(popFilter.value.trim()),
     onKeyDown: (e) => {
       if (e.key === "Enter" && popTop) {
@@ -349,7 +349,7 @@ function showSwitchPopover(anchor: HTMLElement): void {
     el(
       "div",
       { class: "mp-foot" },
-      el("button", { class: "btn", text: "Model Settings…", onClick: () => { closePop(); openModelsDialog(); } }),
+      el("button", { class: "btn", text: t("mdl.modelSettingsBtn"), onClick: () => { closePop(); openModelsDialog(); } }),
     ),
   );
 
@@ -386,16 +386,16 @@ async function switchAction(selector: string, origin: string): Promise<void> {
   renderChip();
   if (!res.ok) {
     const hint = res.error?.includes("Model not found")
-      ? " — the agent session predates this provider; restart the session and retry"
+      ? t("mdl.switchStaleHint")
       : "";
-    toast(`Switch failed: ${res.error ?? "unknown error"}${hint}`, { crit: true });
-  } else if (res.pending) toast("Model switch queued — applies when the agent finishes this run");
-  else toast(`Switched to ${selector.split("/")[1]}`);
+    toast(`${t("mdl.switchFailed", res.error ?? t("mdl.unknownError"))}${hint}`, { crit: true });
+  } else if (res.pending) toast(t("mdl.switchQueued"));
+  else toast(t("mdl.switchedTo", selector.split("/")[1]));
 }
 
 async function assignRoleAction(role: ModelRole, selector: string, origin: string): Promise<void> {
   const res = await window.ide.models.assignRole(role, selector, origin);
-  if (!res.ok) toast(`Assign failed: ${res.error ?? "unknown error"}`, { crit: true });
+  if (!res.ok) toast(t("mdl.assignFailed", res.error ?? t("mdl.unknownError")), { crit: true });
   else toast(`${role} → ${selector.split("/")[1]}`);
 }
 
@@ -429,18 +429,18 @@ function forceReassignRoles(roles: ModelRole[]): void {
         orphanQueue.delete(role);
         // state may have moved on (user reassigned meanwhile) — re-check
         if (!roleIsOrphaned(role)) continue;
-        toast(`The ${role} model was removed from models.yml — pick a replacement`, { crit: true });
+        toast(t("mdl.roleRemoved", role), { crit: true });
         let picked = false;
         while (!picked) {
           if (!allChoices().length) return; // pickModel would toast + resolve null forever
-          const c = await pickModel(`Reassign ${role} model (profile removed)`);
+          const c = await pickModel(t("mdl.reassignRoleRemovedTitle", role));
           if (c) {
             await assignRoleAction(role, c.selector, "external");
             picked = true;
           } else if (!roleIsOrphaned(role)) {
             picked = true; // repointed elsewhere while the picker was up
           } else {
-            toast(`${role} still points at a removed model — reassignment required`, { crit: true });
+            toast(t("mdl.roleStillOrphaned", role), { crit: true });
           }
         }
       }
@@ -461,7 +461,7 @@ export function pickModel(
   let choices = allChoices();
   if (opts?.excludeProfile) choices = choices.filter((c) => c.provider.id !== opts.excludeProfile);
   if (!choices.length) {
-    toast("No models available — add a profile in Model Settings", { crit: true });
+    toast(t("mdl.noModels"), { crit: true });
     resolve(null);
     return promise;
   }
@@ -477,7 +477,7 @@ export function pickModel(
 
   const render = () => {
     clear(list);
-    if (!filtered.length) list.append(el("div", { class: "pal-none", text: "No matching models" }));
+    if (!filtered.length) list.append(el("div", { class: "pal-none", text: t("mdl.noMatch") }));
     filtered.forEach(({ c, indices }, i) => {
       const row = el("div", {
         class: i === selected ? "pal-row selected" : "pal-row",
@@ -542,7 +542,7 @@ export function setSessionThinkingViaPicker(origin: string): void {
   const list = el("div", { class: "pal-list" });
   const options: { label: string; level: ThinkingLevel | null }[] = [
     ...THINKING_LEVELS.map((l) => ({ label: l, level: l as ThinkingLevel | null })),
-    { label: "clear override (use role default)", level: null },
+    { label: t("mdl.clearOverride"), level: null },
   ];
   for (const opt of options) {
     const isActive = opt.level !== null && state.thinking.sessionOverride === opt.level;
@@ -554,10 +554,10 @@ export function setSessionThinkingViaPicker(origin: string): void {
           void window.ide.models.setSessionThinking(opt.level, origin).then((r) => {
             toast(
               r.pending
-                ? "Thinking level queued — applies when the agent finishes this run"
+                ? t("mdl.thinkQueued")
                 : opt.level
-                  ? `Thinking: ${opt.level} (this session)`
-                  : "Thinking override cleared",
+                  ? t("mdl.thinkSetSession", opt.level)
+                  : t("mdl.thinkCleared"),
             );
           });
         },
@@ -567,9 +567,9 @@ export function setSessionThinkingViaPicker(origin: string): void {
   const dialog = el(
     "div",
     { class: "dialog", style: { padding: "16px" } },
-    el("h2", { text: "Thinking level — this session" }),
+    el("h2", { text: t("mdl.thinkDialogTitle") }),
     list,
-    el("div", { class: "dialog-actions" }, el("button", { class: "btn", text: "Cancel", onClick: close })),
+    el("div", { class: "dialog-actions" }, el("button", { class: "btn", text: t("ui.cancel"), onClick: close })),
   );
   overlay.append(dialog);
   overlay.addEventListener("mousedown", (e) => {
@@ -580,7 +580,7 @@ export function setSessionThinkingViaPicker(origin: string): void {
 }
 
 export function switchModelViaPicker(origin: string): void {
-  void pickModel("Switch default model…").then((c) => {
+  void pickModel(t("mdl.switchDefaultTitle")).then((c) => {
     if (c) void switchAction(c.selector, origin);
   });
 }
@@ -598,18 +598,18 @@ export function assignRoleViaPicker(origin: string): void {
         class: "pal-row",
         onClick: () => {
           closeRole();
-          void pickModel(`Assign ${role} model`).then((c) => {
+          void pickModel(t("mdl.assignRoleTitle", role)).then((c) => {
             if (c) void assignRoleAction(role, c.selector, origin);
           });
         },
-      }, el("span", { class: "mp-role", text: role }), el("span", { class: "mono", text: state.roles[role].selector ?? "unassigned" })),
+      }, el("span", { class: "mp-role", text: role }), el("span", { class: "mono", text: state.roles[role].selector ?? t("mdl.unassigned") })),
     );
   }
   roleOverlay.append(
     el("div", { class: "dialog", style: { padding: "16px" } },
-      el("h2", { text: "Assign role" }),
+      el("h2", { text: t("mdl.assignRoleDialogTitle") }),
       listEl,
-      el("div", { class: "dialog-actions" }, el("button", { class: "btn", text: "Cancel", onClick: closeRole })),
+      el("div", { class: "dialog-actions" }, el("button", { class: "btn", text: t("ui.cancel"), onClick: closeRole })),
     ),
   );
   document.body.append(roleOverlay);
@@ -643,7 +643,7 @@ export function openModelsDialog(): void {
     { class: "dialog models-dialog" },
     dialogHead,
     dialogBody,
-    el("div", { class: "dialog-actions" }, el("button", { class: "btn", text: "Close", onClick: close })),
+    el("div", { class: "dialog-actions" }, el("button", { class: "btn", text: t("ui.close"), onClick: close })),
   );
   overlay.append(dialog);
   overlay.addEventListener("mousedown", (e) => {
@@ -665,7 +665,7 @@ function thinkDial(
 ): HTMLElement {
   const dial = el("span", {
     class: `think-dial${opts.disabled ? " disabled" : ""}`,
-    title: opts.disabled ? opts.disabledTip ?? "" : "Thinking level",
+    title: opts.disabled ? opts.disabledTip ?? "" : t("mdl.thinkingLevel"),
   });
   for (const level of THINKING_LEVELS) {
     dial.append(
@@ -679,7 +679,7 @@ function thinkDial(
       }),
     );
   }
-  if (opts.overridden) dial.append(el("span", { class: "td-note", text: "overridden this session" }));
+  if (opts.overridden) dial.append(el("span", { class: "td-note", text: t("mdl.overriddenSession") }));
   return dial;
 }
 
@@ -705,15 +705,15 @@ function cockpitSlot(role: ModelRole): HTMLElement {
 
   const slot = el("div", {
     class: `ck-slot${sel ? "" : " empty"}`,
-    title: sel ? `${role}: ${sel}` : "перетащи модель или кликни",
+    title: sel ? `${role}: ${sel}` : t("mdl.slotTip"),
     tabIndex: 0,
-    onClick: () => void pickModel(`Assign ${role} model`).then((c) => {
+    onClick: () => void pickModel(t("mdl.assignRoleTitle", role)).then((c) => {
       if (c) void assignRoleAction(role, c.selector, "cockpit");
     }),
     onKeyDown: (e) => {
       if (e.key === "Enter" || e.key === " ") {
         e.preventDefault();
-        void pickModel(`Assign ${role} model`).then((c) => {
+        void pickModel(t("mdl.assignRoleTitle", role)).then((c) => {
           if (c) void assignRoleAction(role, c.selector, "cockpit");
         });
       }
@@ -736,7 +736,7 @@ function cockpitSlot(role: ModelRole): HTMLElement {
         slot.classList.remove("shake");
         void slot.offsetWidth;
         slot.classList.add("shake");
-        toast(!p ? "Unknown profile" : !p.enabled ? `Profile ${p.id} is disabled` : `Profile ${p.id} is depleted`, { crit: true });
+        toast(!p ? t("mdl.unknownProfile") : !p.enabled ? t("mdl.profileDisabled", p.id) : t("mdl.profileDepleted", p.id), { crit: true });
         return;
       }
       void assignRoleAction(role, selector, "cockpit-drag");
@@ -754,19 +754,19 @@ function cockpitSlot(role: ModelRole): HTMLElement {
       const bal = prov.balance;
       if (bal && bal.value !== null) {
         const age = Math.round((Date.now() - bal.checkedAt) / 60000);
-        meta.append(el("span", { class: "mono ck-bal", text: `${bal.value.toFixed(2)}${bal.currency ? ` ${bal.currency}` : ""} · ${age}m` }));
+        meta.append(el("span", { class: "mono ck-bal", text: `${bal.value.toFixed(2)}${bal.currency ? ` ${bal.currency}` : ""} · ${t("mdl.ageShort", Math.max(0, age))}` }));
       }
     }
     slot.append(meta);
     slot.append(
       thinkDial(
         state.thinking.roles[role],
-        { disabled: noThink, disabledTip: "not supported by this model", overridden: role === "default" && state.thinking.sessionOverride !== null },
+        { disabled: noThink, disabledTip: t("mdl.noThinkTip"), overridden: role === "default" && state.thinking.sessionOverride !== null },
         (level) => void window.ide.models.setRoleThinking(role, level, "cockpit"),
       ),
     );
   } else {
-    slot.append(el("div", { class: "ck-hint", text: "перетащи модель" }));
+    slot.append(el("div", { class: "ck-hint", text: t("mdl.slotHint") }));
   }
   return slot;
 }
@@ -775,7 +775,7 @@ function cockpitSlot(role: ModelRole): HTMLElement {
 function favoritesStrip(): HTMLElement {
   const strip = el("div", { class: "ck-favs" });
   const chipHost = el("div", { class: "ck-chip-row" });
-  const filter = el("input", { class: "input mono ck-filter", placeholder: "фильтр: ranis fable…" }) as HTMLInputElement;
+  const filter = el("input", { class: "input mono ck-filter", placeholder: t("mdl.favFilterPh") }) as HTMLInputElement;
   const renderChips = () => {
     clear(chipHost);
     const q = filter.value.trim();
@@ -788,7 +788,7 @@ function favoritesStrip(): HTMLElement {
         {
           class: "ck-chip mono",
           draggable: true,
-          title: `drag onto a role slot · ${c.selector}`,
+          title: t("mdl.chipDragTip", c.selector),
           onDragStart: (e) => e.dataTransfer?.setData("omp/model", c.selector),
         },
         el("span", { class: `pc-dot ${c.provider.health}` }),
@@ -796,7 +796,7 @@ function favoritesStrip(): HTMLElement {
       );
       chipHost.append(chip);
     }
-    if (!chipHost.children.length) chipHost.append(el("span", { class: "dimmer", text: "nothing matches" }));
+    if (!chipHost.children.length) chipHost.append(el("span", { class: "dimmer", text: t("mdl.nothingMatches") }));
   };
   filter.addEventListener("input", renderChips);
   renderChips();
@@ -811,9 +811,9 @@ function renderDialog(): void {
 
   // global "Check balance" (top-right, quiet; in-flight shows n/total inline)
   const probeTargets = state.providers.filter((p) => p.enabled && p.balanceEndpoint).length;
-  const checkBtn = el("button", { class: "btn mh-checkbal", text: "Check balance" }) as HTMLButtonElement;
+  const checkBtn = el("button", { class: "btn mh-checkbal", text: t("mdl.checkBalance") }) as HTMLButtonElement;
   checkBtn.disabled = probeTargets === 0;
-  if (probeTargets === 0) checkBtn.title = "No profile has a balance endpoint configured";
+  if (probeTargets === 0) checkBtn.title = t("mdl.noBalanceEndpoints");
   checkBtn.addEventListener("click", () => {
     checkBtn.disabled = true;
     let done = 0;
@@ -825,7 +825,7 @@ function renderDialog(): void {
     };
     const targets = state.providers.filter((p) => p.enabled && p.balanceEndpoint);
     void Promise.allSettled(targets.map((p) => window.ide.models.checkBalance(p.id).then(tick))).then(() => {
-      checkBtn.textContent = "Check balance";
+      checkBtn.textContent = t("mdl.checkBalance");
       checkBtn.disabled = false;
     });
   });
@@ -840,16 +840,16 @@ function renderDialog(): void {
         renderDialog();
       },
     });
-  const testerBtn = el("button", { class: "btn ck-tab", text: "Тестер", title: "Test any base URL + key with a real completion (free-form)", onClick: () => openApiTester() });
+  const testerBtn = el("button", { class: "btn ck-tab", text: t("mdl.testerBtn"), title: t("mdl.testerTip"), onClick: () => openApiTester() });
   dialogHead.append(
     el(
       "div",
       { style: { display: "flex", alignItems: "center", gap: "6px" } },
-      el("h2", { text: "Models", style: { margin: "0", flex: "1" } }),
-      tabBtn("cockpit", "Кокпит"),
-      tabBtn("profiles", "Профили"),
+      el("h2", { text: t("mdl.title"), style: { margin: "0", flex: "1" } }),
+      tabBtn("cockpit", t("mdl.tabCockpit")),
+      tabBtn("profiles", t("mdl.tabProfiles")),
       testerBtn,
-      tabBtn("events", "События"),
+      tabBtn("events", t("mdl.tabEvents")),
       checkBtn,
     ),
   );
@@ -867,19 +867,19 @@ function renderDialog(): void {
   }
 
   // «Профили» — the existing provider cards + swap/poll settings + Test all
-  const testAllBtn = el("button", { class: "btn mh-checkbal", text: "Test all", title: "Deep-test every enabled profile (one minimal completion each)" }) as HTMLButtonElement;
+  const testAllBtn = el("button", { class: "btn mh-checkbal", text: t("mdl.testAll"), title: t("mdl.testAllTip") }) as HTMLButtonElement;
   const swapRow = el("div", { class: "mh-swap-row" });
   const swapSw = el("div", {
     class: state.autoSwap.enabled ? "switch on" : "switch",
-    title: "Auto-swap: on quota exhaustion re-point the role to another profile with the same model",
+    title: t("mdl.autoSwapTip"),
     onClick: () => void window.ide.models.setAutoSwap(!state.autoSwap.enabled),
   });
-  swapRow.append(swapSw, el("span", { class: "mh-swap-label", text: "auto-swap on quota" }));
+  swapRow.append(swapSw, el("span", { class: "mh-swap-label", text: t("mdl.autoSwapLabel") }));
   for (const role of MODEL_ROLES) {
     const cb = el("input", { type: "checkbox" }) as HTMLInputElement;
     cb.checked = !state.autoSwap.roleOptOut[role];
     cb.disabled = !state.autoSwap.enabled;
-    cb.title = `Allow auto-swap for ${role}`;
+    cb.title = t("mdl.roleSwapTip", role);
     cb.addEventListener("change", () => void window.ide.models.setRoleSwapOptOut(role, !cb.checked));
     swapRow.append(el("label", { class: "mh-role-opt" }, cb, el("span", { text: role })));
   }
@@ -887,7 +887,7 @@ function renderDialog(): void {
     class: "input mono",
     type: "number",
     value: String(state.balancePollMinutes),
-    title: "Balance poll interval, minutes (0 = off)",
+    title: t("mdl.pollTip"),
     style: { width: "52px" },
   }) as HTMLInputElement;
   pollInput.addEventListener("change", () => {
@@ -896,9 +896,9 @@ function renderDialog(): void {
   });
   swapRow.append(
     el("span", { style: { flex: "1" } }),
-    el("span", { class: "mh-swap-label", text: "poll" }),
+    el("span", { class: "mh-swap-label", text: t("mdl.pollLabel") }),
     pollInput,
-    el("span", { class: "mh-swap-label", text: "m" }),
+    el("span", { class: "mh-swap-label", text: t("mdl.pollUnit") }),
     testAllBtn,
   );
   dialogBody.append(swapRow);
@@ -924,7 +924,7 @@ function providerCard(p: ProviderInfo): HTMLElement {
 
   const enableSw = el("div", {
     class: p.enabled ? "switch on" : "switch",
-    title: readonly ? "Managed outside IDE" : p.enabled ? "Disable profile" : "Enable profile",
+    title: readonly ? t("mdl.managedTip") : p.enabled ? t("mdl.disableProfile") : t("mdl.enableProfile"),
     onClick: () => {
       if (!readonly) void window.ide.models.setProviderEnabled(p.id, !p.enabled);
     },
@@ -933,7 +933,7 @@ function providerCard(p: ProviderInfo): HTMLElement {
   // profile name: inline-editable for parseable profiles (rename propagates atomically)
   const nameEl = el("div", { class: "pc-name", text: p.displayName });
   if (!readonly && p.template === "custom") {
-    nameEl.title = "Click to rename profile";
+    nameEl.title = t("mdl.renameTip");
     nameEl.classList.add("editable");
     nameEl.addEventListener("click", () => {
       const input = el("input", { class: "input mono pc-rename" }) as HTMLInputElement;
@@ -946,8 +946,8 @@ function providerCard(p: ProviderInfo): HTMLElement {
         input.replaceWith(nameEl);
         if (!next || next === p.id) return;
         void window.ide.models.renameProfile(p.id, next).then((r) => {
-          if (!r.ok) toast(`Rename failed: ${r.error ?? "?"}`, { crit: true });
-          else toast(`Profile ${p.id} → ${next}`);
+          if (!r.ok) toast(t("mdl.renameFailed", r.error ?? "?"), { crit: true });
+          else toast(t("mdl.profileRenamed", p.id, next));
         });
       };
       input.addEventListener("keydown", (e) => {
@@ -959,14 +959,17 @@ function providerCard(p: ProviderInfo): HTMLElement {
   }
 
   const badges = el("span", { class: "pc-badges" });
-  if (p.origin === "imported") badges.append(el("span", { class: "pc-badge", text: "imported" }));
-  if (readonly) badges.append(el("span", { class: "pc-badge ro", text: "managed outside IDE" }));
-  if (p.health === "depleted") badges.append(el("span", { class: "pc-badge depleted", text: "depleted" }));
+  if (p.origin === "imported") badges.append(el("span", { class: "pc-badge", text: t("mdl.badgeImported") }));
+  if (readonly) badges.append(el("span", { class: "pc-badge ro", text: t("mdl.badgeManaged") }));
+  if (p.health === "depleted") badges.append(el("span", { class: "pc-badge depleted", text: t("mdl.badgeDepleted") }));
   // inline balance readout: value is data (mono), age is context (ui/low).
   // No configured endpoint ⇒ no balance UI at all — never a fake "—".
+  // Lives in the pc-mid grid: line 1 next to the badges at normal width,
+  // line 2 after the URL (· separated) when the card is narrow.
+  let bal: HTMLElement | null = null;
   if (p.balanceEndpoint && p.balance) {
     const age = Math.max(0, Math.round((Date.now() - p.balance.checkedAt) / 60_000));
-    const bal = el("span", {
+    bal = el("span", {
       class:
         "pc-balance" +
         (p.health === "depleted" || (p.balance.value !== null && p.balance.value <= 0)
@@ -974,19 +977,18 @@ function providerCard(p: ProviderInfo): HTMLElement {
           : p.lowThreshold !== null && p.balance.value !== null && p.balance.value < p.lowThreshold
             ? " low"
             : ""),
-      title: p.balance.value === null ? `unparseable response: ${p.balance.raw ?? ""}` : "Click to re-check balance",
+      title: p.balance.value === null ? t("mdl.unparseableTip", p.balance.raw ?? "") : t("mdl.recheckBalanceTip"),
       onClick: () => void window.ide.models.checkBalance(p.id),
     });
     if (p.balance.value === null) {
-      bal.append(el("span", { class: "pcb-unparseable", text: "unparseable response" }));
+      bal.append(el("span", { class: "pcb-unparseable", text: t("mdl.unparseable") }));
     } else {
       bal.append(
         el("span", { class: "pcb-value mono", text: `${p.balance.value.toFixed(2)}` }),
         p.balance.currency ? el("span", { class: "pcb-unit", text: ` ${p.balance.currency}` }) : "",
       );
     }
-    bal.append(el("span", { class: "pcb-age", text: ` · ${age < 1 ? "now" : `${age}m`}` }));
-    badges.append(bal);
+    bal.append(el("span", { class: "pcb-age", text: ` · ${t("mdl.ageShort", age)}` }));
   }
 
   card.append(
@@ -994,11 +996,14 @@ function providerCard(p: ProviderInfo): HTMLElement {
       "div",
       { class: "pc-head" },
       glyph,
-      el("div", { style: { flex: "1", minWidth: "0" } },
-        el("div", { style: { display: "flex", alignItems: "center", gap: "6px" } }, nameEl, badges),
-        el("div", { class: "pc-url", text: p.baseUrl || "—" }),
+      el(
+        "div",
+        { class: "pc-mid" },
+        el("div", { class: "pc-nameline" }, nameEl, badges),
+        bal ?? "",
+        el("div", { class: "pc-url", text: p.baseUrl || "—", title: p.baseUrl || "" }),
       ),
-      el("span", { class: `pc-health ${p.health}`, text: readonly ? "" : p.health }),
+      el("span", { class: `pc-health ${p.health}`, text: readonly ? "" : t("mdl.health", p.health) }),
       enableSw,
     ),
   );
@@ -1019,7 +1024,7 @@ function providerCard(p: ProviderInfo): HTMLElement {
       const star = el("span", {
         class: m.favorite ? "mm-star on" : "mm-star",
         text: "★",
-        title: m.favorite ? "Unfavorite" : "Favorite (shows in quick switcher)",
+        title: m.favorite ? t("mdl.unfavorite") : t("mdl.favoriteTip"),
         onClick: () => void window.ide.models.setFavorite(p.id, m.id, !m.favorite),
       });
       const idSpan = el("span", { class: "mm-id", title: m.name });
@@ -1033,8 +1038,8 @@ function providerCard(p: ProviderInfo): HTMLElement {
           el("span", { class: "mm-ctx", text: m.contextWindow ? `${Math.round(m.contextWindow / 1000)}k` : "" }),
           el("button", {
             class: "btn mm-use",
-            text: "Use",
-            title: "Switch default role to this model",
+            text: t("mdl.use"),
+            title: t("mdl.useTip"),
             onClick: () => void switchAction(`${p.id}/${m.id}`, "settings"),
           }),
         ),
@@ -1046,7 +1051,7 @@ function providerCard(p: ProviderInfo): HTMLElement {
     let top: ModelEntry | null = null;
     const filterInput = el("input", {
       class: "input",
-      placeholder: `Filter ${p.models.length} models…`,
+      placeholder: t("mdl.filterModelsPh", p.models.length),
       onInput: () => {
         const res = renderRows(filterInput.value.trim());
         top = res[0]?.m ?? null;
@@ -1067,20 +1072,20 @@ function providerCard(p: ProviderInfo): HTMLElement {
   card.append(table);
 
   // actions
-  const valBtn = el("button", { class: "btn", text: "Test" }) as HTMLButtonElement;
+  const valBtn = el("button", { class: "btn", text: t("mdl.test") }) as HTMLButtonElement;
   const deepBtn = el("button", {
     class: "btn",
-    text: "Deep test",
-    title: "Real completion probe: status, latency, token usage, model echo",
+    text: t("mdl.deepTest"),
+    title: t("mdl.deepTestTip"),
     onClick: () => deepTestProfile(p),
   });
   const valMsg = el("span", { class: "pc-valmsg" });
   valBtn.addEventListener("click", () => {
     valBtn.disabled = true;
-    valBtn.textContent = "Testing…";
+    valBtn.textContent = t("mdl.testing");
     void window.ide.models.validateProvider(p.id).then((res) => {
       valBtn.disabled = false;
-      valBtn.textContent = "Test";
+      valBtn.textContent = t("mdl.test");
       valMsg.textContent = res.message;
       valMsg.style.color = res.ok ? "var(--power)" : "var(--crit)";
     });
@@ -1088,9 +1093,9 @@ function providerCard(p: ProviderInfo): HTMLElement {
 
   const keyBtn = el("button", {
     class: "btn",
-    text: p.hasKey ? "Change key…" : "Set key…",
+    text: p.hasKey ? t("mdl.changeKey") : t("mdl.setKey"),
     onClick: () => {
-      void inputDialog({ title: `API key for ${p.displayName}`, placeholder: "sk-…", message: "Stored encrypted via OS keychain. Restart the agent session to apply." }).then((key) => {
+      void inputDialog({ title: t("mdl.apiKeyFor", p.displayName), placeholder: "sk-…", message: t("mdl.keyStoredMsg") }).then((key) => {
         if (key) void window.ide.models.setProviderKey(p.id, key);
       });
     },
@@ -1098,9 +1103,9 @@ function providerCard(p: ProviderInfo): HTMLElement {
 
   const addModelBtn = el("button", {
     class: "btn",
-    text: "Add model id…",
+    text: t("mdl.addModelId"),
     onClick: () => {
-      void inputDialog({ title: "Add model id", placeholder: "model-id-as-the-api-expects-it" }).then((id) => {
+      void inputDialog({ title: t("mdl.addModelIdTitle"), placeholder: t("mdl.addModelIdPh") }).then((id) => {
         if (id) void window.ide.models.addCustomModel(p.id, id);
       });
     },
@@ -1108,20 +1113,20 @@ function providerCard(p: ProviderInfo): HTMLElement {
 
   const delBtn = el("button", {
     class: "btn btn-danger",
-    text: "Remove",
+    text: t("mdl.remove"),
     onClick: () => {
-      const file = p.template === "custom" ? "~/.omp/agent/models.yml" : "the IDE registry";
+      const file = p.template === "custom" ? "~/.omp/agent/models.yml" : t("mdl.ideRegistry");
       void confirmDialog({
-        title: "Remove profile",
-        message: `Remove profile "${p.displayName}"? Its entry is deleted from ${file} and its key is wiped from secure storage.`,
-        confirmLabel: "Remove",
+        title: t("mdl.removeProfileTitle"),
+        message: t("mdl.removeProfileMsg", p.displayName, file),
+        confirmLabel: t("mdl.remove"),
         danger: true,
       }).then(async (ok) => {
         if (!ok) return;
         const res = await window.ide.models.removeProvider(p.id);
         if (res && res.needsReassign.length) {
-          toast(`Reassign ${res.needsReassign.join(", ")} first — a role points at this profile`, { crit: true });
-          void pickModel(`Reassign ${res.needsReassign[0]} model`).then((c) => {
+          toast(t("mdl.reassignFirst", res.needsReassign.join(", ")), { crit: true });
+          void pickModel(t("mdl.reassignRoleTitle", res.needsReassign[0])).then((c) => {
             if (c) void assignRoleAction(res.needsReassign[0], c.selector, "settings");
           });
         }
@@ -1132,17 +1137,17 @@ function providerCard(p: ProviderInfo): HTMLElement {
   const dupBtn = p.template === "custom"
     ? el("button", {
         class: "btn",
-        text: "Duplicate…",
-        title: "New profile with the same base URL — the fast path for a second endpoint",
+        text: t("mdl.duplicate"),
+        title: t("mdl.duplicateTip"),
         onClick: () => {
-          void inputDialog({ title: `Duplicate ${p.displayName}`, placeholder: "new-profile-name", message: `Same template + base URL (${p.baseUrl}); you provide the name and a key.` }).then((name) => {
+          void inputDialog({ title: t("mdl.duplicateTitle", p.displayName), placeholder: t("mdl.dupNamePh"), message: t("mdl.dupMsg", p.baseUrl) }).then((name) => {
             if (!name) return;
-            void inputDialog({ title: `API key for ${name}`, placeholder: "sk-… (empty = no auth)" }).then((key) => {
+            void inputDialog({ title: t("mdl.apiKeyFor", name), placeholder: t("mdl.dupKeyPh") }).then((key) => {
               void window.ide.models
                 .addProvider({ template: "custom", name, apiKey: key ?? "", baseUrl: p.baseUrl })
                 .then((res) => {
-                  if (res.ok) toast(`Profile ${res.provider.id} created — ${res.provider.models.length} models`);
-                  else toast(`Duplicate failed: ${res.error}`, { crit: true });
+                  if (res.ok) toast(t("mdl.profileCreated", res.provider.id, res.provider.models.length));
+                  else toast(t("mdl.duplicateFailed", res.error), { crit: true });
                 });
             });
           });
@@ -1155,14 +1160,14 @@ function providerCard(p: ProviderInfo): HTMLElement {
   // balance endpoint row: configure + verify in one place (spec §3 P0)
   const epInput = el("input", {
     class: "input mono pc-ep-input",
-    placeholder: "Balance endpoint (URL or path, e.g. /wallet/balance) — empty = off",
+    placeholder: t("mdl.balEndpointPh"),
     value: p.balanceEndpoint,
-    title: "GET, authenticated like the profile's completions calls",
+    title: t("mdl.balEndpointTip"),
   }) as HTMLInputElement;
   epInput.addEventListener("change", () => {
     void window.ide.models.setBalanceEndpoint(p.id, epInput.value);
   });
-  const epTest = el("button", { class: "btn", text: "Test" }) as HTMLButtonElement;
+  const epTest = el("button", { class: "btn", text: t("mdl.test") }) as HTMLButtonElement;
   const epMsg = el("span", { class: "pc-valmsg" });
   epTest.addEventListener("click", () => {
     void window.ide.models.setBalanceEndpoint(p.id, epInput.value);
@@ -1170,10 +1175,10 @@ function providerCard(p: ProviderInfo): HTMLElement {
     void window.ide.models.checkBalance(p.id).then((res) => {
       epTest.disabled = false;
       if (!res.ok) {
-        epMsg.textContent = res.error ?? "probe failed";
+        epMsg.textContent = res.error ?? t("mdl.probeFailed");
         epMsg.style.color = "var(--crit)";
       } else if (res.value === undefined) {
-        epMsg.textContent = "unparseable response";
+        epMsg.textContent = t("mdl.unparseable");
         epMsg.style.color = "var(--flare)";
         epMsg.title = res.raw ?? "";
       } else {
@@ -1185,8 +1190,8 @@ function providerCard(p: ProviderInfo): HTMLElement {
   const thInput = el("input", {
     class: "input mono pc-th-input",
     type: "number",
-    placeholder: "low ⚠",
-    title: "Low-balance warning threshold (empty = off)",
+    placeholder: t("mdl.lowThresholdPh"),
+    title: t("mdl.lowThresholdTip"),
     value: p.lowThreshold !== null ? String(p.lowThreshold) : "",
   }) as HTMLInputElement;
   thInput.addEventListener("change", () => {
@@ -1196,8 +1201,8 @@ function providerCard(p: ProviderInfo): HTMLElement {
   const reenable = p.health === "depleted"
     ? el("button", {
         class: "btn",
-        text: "Re-enable",
-        title: "Clear the depleted mark manually",
+        text: t("mdl.reenable"),
+        title: t("mdl.reenableTip"),
         onClick: () => void window.ide.models.clearDepleted(p.id),
       })
     : null;
@@ -1208,7 +1213,7 @@ function providerCard(p: ProviderInfo): HTMLElement {
 function addProviderCard(): HTMLElement {
   const tmplSelect = el("select", { class: "input" }) as HTMLSelectElement;
   for (const [id, label] of [
-    ["custom", "Custom (OpenAI-compatible) — OMP profile"],
+    ["custom", t("mdl.tmplCustom")],
     ["anthropic", "Anthropic"],
     ["openai", "OpenAI"],
     ["google", "Google (Gemini)"],
@@ -1219,12 +1224,12 @@ function addProviderCard(): HTMLElement {
     opt.textContent = label;
     tmplSelect.append(opt);
   }
-  const nameInput = el("input", { class: "input mono", placeholder: "profile-name (slug — becomes the model qualifier)" }) as HTMLInputElement;
-  const keyInput = el("input", { class: "input mono", placeholder: "API key" }) as HTMLInputElement;
+  const nameInput = el("input", { class: "input mono", placeholder: t("mdl.namePh") }) as HTMLInputElement;
+  const keyInput = el("input", { class: "input mono", placeholder: t("mdl.keyPh") }) as HTMLInputElement;
   keyInput.type = "password";
-  const urlInput = el("input", { class: "input mono", placeholder: "Base URL (optional for built-ins)" }) as HTMLInputElement;
+  const urlInput = el("input", { class: "input mono", placeholder: t("mdl.urlPh") }) as HTMLInputElement;
   const errEl = el("div", { class: "ab-error", style: { display: "none" } });
-  const addBtn = el("button", { class: "btn btn-primary", text: "Validate & Add" }) as HTMLButtonElement;
+  const addBtn = el("button", { class: "btn btn-primary", text: t("mdl.validateAdd") }) as HTMLButtonElement;
 
   const nameRow = el("div", { class: "ab-row" }, nameInput);
   const syncNameVisibility = () => {
@@ -1235,19 +1240,19 @@ function addProviderCard(): HTMLElement {
 
   addBtn.addEventListener("click", () => {
     addBtn.disabled = true;
-    addBtn.textContent = "Validating…";
+    addBtn.textContent = t("mdl.validating");
     errEl.style.display = "none";
     const template = tmplSelect.value as ProviderTemplateId;
     void window.ide.models
       .addProvider({ template, name: nameInput.value, apiKey: keyInput.value, baseUrl: urlInput.value })
       .then((res) => {
         addBtn.disabled = false;
-        addBtn.textContent = "Validate & Add";
+        addBtn.textContent = t("mdl.validateAdd");
         if (res.ok) {
           nameInput.value = "";
           keyInput.value = "";
           urlInput.value = "";
-          toast(`Profile ${res.provider.id} added — ${res.provider.models.length} models. Restart the agent session to expose new profiles.`);
+          toast(t("mdl.profileAdded", res.provider.id, res.provider.models.length));
         } else {
           errEl.textContent = res.error;
           errEl.style.display = "";
@@ -1258,7 +1263,7 @@ function addProviderCard(): HTMLElement {
   return el(
     "div",
     { class: "addbot-card" },
-    el("div", { class: "panel-header", text: "Add Profile" }),
+    el("div", { class: "panel-header", text: t("mdl.addProfile") }),
     el("div", { class: "ab-row" }, tmplSelect),
     nameRow,
     el("div", { class: "ab-row" }, keyInput),
@@ -1269,18 +1274,22 @@ function addProviderCard(): HTMLElement {
 
 async function renderEventLog(host: HTMLElement): Promise<void> {
   const events = await window.ide.models.getEvents();
-  if (!events.length) return;
   const wrap = el("div", {});
-  wrap.append(el("div", { class: "panel-header", text: "Model Events", style: { padding: "4px 2px" } }));
+  wrap.append(el("div", { class: "panel-header", text: t("mdl.eventsHead"), style: { padding: "4px 2px" } }));
+  if (!events.length) {
+    wrap.append(el("div", { class: "dimmer", text: t("mdl.eventsEmpty"), style: { padding: "6px 2px" } }));
+    host.append(wrap);
+    return;
+  }
   const feed = el("div", { class: "cc-feed" });
   for (const ev of [...events].reverse().slice(0, 50)) {
     const d = new Date(ev.time);
-    const t = `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}:${String(d.getSeconds()).padStart(2, "0")}`;
+    const hhmmss = `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}:${String(d.getSeconds()).padStart(2, "0")}`;
     feed.append(
       el(
         "div",
         { class: "feed-row" },
-        el("span", { class: "fr-time", text: t }),
+        el("span", { class: "fr-time", text: hhmmss }),
         el("span", { class: "fr-kind", text: ev.kind }),
         el("span", { class: "fr-detail", text: ev.detail }),
         el("span", { class: "fr-bot", text: ev.origin }),
@@ -1303,52 +1312,21 @@ function renderUsage(): void {
   if (!usageEl) return;
   clear(usageEl);
   usageEl.append(
-    el("span", {}, "req ", el("span", { class: "us-val", text: String(usage.requests) })),
+    el("span", { title: t("mdl.usageReqTip") }, "req ", el("span", { class: "us-val", text: String(usage.requests) })),
   );
   if (usage.hasTokenData) {
     usageEl.append(
-      el("span", {}, "in ", el("span", { class: "us-val", text: usage.inputTokens.toLocaleString() })),
-      el("span", {}, "out ", el("span", { class: "us-val", text: usage.outputTokens.toLocaleString() })),
+      el("span", { title: t("mdl.usageInTip") }, "in ", el("span", { class: "us-val", text: usage.inputTokens.toLocaleString() })),
+      el("span", { title: t("mdl.usageOutTip") }, "out ", el("span", { class: "us-val", text: usage.outputTokens.toLocaleString() })),
     );
     if (usage.reasoningTokens > 0) {
       usageEl.append(
-        el("span", {}, "think ", el("span", { class: "us-val", text: usage.reasoningTokens.toLocaleString() })),
+        el("span", { title: t("mdl.usageThinkTip") }, "think ", el("span", { class: "us-val", text: usage.reasoningTokens.toLocaleString() })),
       );
     }
   }
   const active = state.active;
   if (active) usageEl.append(el("span", { style: { marginLeft: "auto" } }, el("span", { class: "us-val", text: shortName(active.id) })));
-}
-
-/** one-shot "think harder" toggle for the composer row (owned here — single store) */
-export function createBoostToggle(): HTMLElement {
-  boostBtn = el("button", {
-    class: "boost-btn",
-    title: "Think harder — one level up for the next send only",
-    onClick: () => {
-      void window.ide.models.boostOnce("composer").then((r) => {
-        if (!r.armed && r.level !== null) toast(`Already at ${r.level} — no higher level`);
-        if (!r.armed && r.level === null && state.thinking.capability === "no-thinking")
-          toast("Model doesn't support thinking", { crit: true });
-      });
-    },
-  });
-  boostBtn.append(svgIcon(I.sparkle), el("span", { class: "bb-label", text: "boost" }));
-  renderBoost();
-  return boostBtn;
-}
-
-function renderBoost(): void {
-  if (!boostBtn) return;
-  const noThink = state.thinking.capability === "no-thinking";
-  boostBtn.style.display = noThink ? "none" : "";
-  const armed = state.thinking.boost !== null;
-  boostBtn.classList.toggle("armed", armed);
-  const label = boostBtn.querySelector(".bb-label");
-  if (label) label.textContent = armed ? `boost ${state.thinking.boost}` : "boost";
-  boostBtn.title = armed
-    ? `Boost armed: ${state.thinking.boost} for the next send — click to disarm`
-    : "Think harder — one level up for the next send only";
 }
 
 export function mountModelWarning(host: HTMLElement): void {
@@ -1364,24 +1342,24 @@ function renderWarning(): void {
   const brokenModel = state.roles.default.selector?.startsWith(`${broken.id}/`)
     ? state.roles.default.selector.slice(broken.id.length + 1)
     : null;
-  const switchLabel = brokenModel ? "Switch profile" : "Switch model";
+  const switchLabel = brokenModel ? t("mdl.switchProfile") : t("mdl.switchModel");
   const banner = el(
     "div",
     { class: "model-warn" },
     el("div", {},
-      el("div", { text: `Profile "${broken.displayName}" is failing (${broken.health})` }),
+      el("div", { text: t("mdl.profileFailing", broken.displayName, t("mdl.health", broken.health)) }),
       el("div", { class: "mw-detail", text: (broken.healthDetail ?? "").slice(0, 120) }),
     ),
     el(
       "span",
       { class: "mw-actions" },
-      el("button", { class: "btn", text: "Fix key", onClick: () => openModelsDialog() }),
+      el("button", { class: "btn", text: t("mdl.fixKey"), onClick: () => openModelsDialog() }),
       el("button", {
         class: "btn",
         text: switchLabel,
         onClick: () => {
           void pickModel(
-            brokenModel ? `Switch profile for ${brokenModel}` : "Switch model…",
+            brokenModel ? t("mdl.switchProfileFor", brokenModel) : t("mdl.switchModelTitle"),
             brokenModel ? { prefilter: brokenModel, excludeProfile: broken.id } : undefined,
           ).then((c) => {
             if (c) void switchAction(c.selector, "recovery");
@@ -1390,7 +1368,7 @@ function renderWarning(): void {
       }),
       el("button", {
         class: "btn",
-        text: "Retry",
+        text: t("mdl.retry"),
         onClick: () => void window.ide.models.validateProvider(broken.id),
       }),
     ),
@@ -1406,7 +1384,6 @@ export function initModels(): void {
     renderChip();
     renderUsage();
     renderWarning();
-    renderBoost();
   });
   void window.ide.models.getUsage().then((u) => {
     usage = u;
@@ -1417,7 +1394,6 @@ export function initModels(): void {
     renderChip();
     renderUsage();
     renderWarning();
-    renderBoost();
     if (dialogBody) renderDialog();
   });
   window.ide.models.onUsage((u) => {
@@ -1425,7 +1401,7 @@ export function initModels(): void {
     renderUsage();
   });
   window.ide.models.onThinkRejected((modelId) => {
-    toast(`Model ${modelId} doesn't support thinking — level ignored`, { crit: true });
+    toast(t("mdl.thinkNotSupported", modelId), { crit: true });
   });
   window.ide.models.onRolesOrphaned((roles) => {
     forceReassignRoles(roles);
@@ -1441,5 +1417,13 @@ export function initModels(): void {
         setTimeout(() => slot.classList.remove("swap-flash"), 300);
       }
     }
+  });
+  // language switch: chip/usage/warning re-apply; the dialog re-renders
+  // in place if it is open (same path as a state push)
+  on("lang-changed", () => {
+    renderChip();
+    renderUsage();
+    renderWarning();
+    if (dialogBody) renderDialog();
   });
 }

@@ -7,6 +7,7 @@
 
 import { el, clear } from "../core/dom";
 import { on } from "../core/bus";
+import { t } from "../core/i18n";
 import {
   activeOutline,
   activeCursorOffset,
@@ -57,6 +58,8 @@ export function initOutline(container: HTMLElement): void {
   // tab opened/closed/switched/group collapsed — without this the panel goes
   // stale (e.g. keeps the last file's symbols after every tab is closed)
   on("active-tab-changed", () => visible && scheduleRefresh());
+  // fixed strings (empty states, row tooltips) re-render on language switch
+  on("lang-changed", () => visible && render());
 }
 
 /** view-switch hook: the shell shows/hides the view and tells us */
@@ -97,15 +100,15 @@ function render(): void {
   clear(host);
   listEl = null;
   if (!snapshot) {
-    host.append(empty("Open a file to see its outline."));
+    host.append(empty(t("outline.emptyOpen")));
     return;
   }
   if (snapshot.unsupported) {
-    host.append(empty("No symbol provider for this language — outline covers TS/JS."));
+    host.append(empty(t("outline.unsupported")));
     return;
   }
   if (!snapshot.nodes.length) {
-    host.append(empty("No symbols in this file."));
+    host.append(empty(t("outline.noSymbols")));
     return;
   }
   listEl = el("div", { class: "outline-list" });

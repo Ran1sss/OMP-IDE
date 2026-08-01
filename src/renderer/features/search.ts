@@ -57,9 +57,9 @@ function renderEmptyHint() {
         "div",
         { class: "hint-row", style: { display: "flex", gap: "6px", alignItems: "center" } },
         el("span", { class: "keycap", text: ".*" }),
-        el("span", { text: "regex" }),
+        el("span", { text: t("search.hintRegex") }),
         el("span", { class: "keycap", text: "Aa" }),
-        el("span", { text: "case" }),
+        el("span", { text: t("search.hintCase") }),
       ),
     ),
   );
@@ -68,14 +68,14 @@ function renderEmptyHint() {
 /** Designed zero-hit state — never the onboarding hint (that means "no query"). */
 function renderNoMatches() {
   clear(resultsEl);
-  const filters = [includeInput.value.trim() && "include", excludeInput.value.trim() && "exclude", caseOn && "case", regexOn && "regex"].filter(Boolean).join(" · ");
+  const filters = [includeInput.value.trim() && t("search.filterInclude"), excludeInput.value.trim() && t("search.filterExclude"), caseOn && t("search.hintCase"), regexOn && t("search.hintRegex")].filter(Boolean).join(" · ");
   resultsEl.append(
     el(
       "div",
       { class: "search-empty" },
       svgIcon(I.search),
-      el("div", {}, "No matches for ", el("span", { class: "mono", text: `"${queryInput.value}"` })),
-      filters ? el("div", { class: "hint-row", text: `active filters: ${filters}` }) : null,
+      el("div", {}, t("search.noMatchesFor") + " ", el("span", { class: "mono", text: `"${queryInput.value}"` })),
+      filters ? el("div", { class: "hint-row", text: t("search.activeFilters", filters) }) : null,
     ),
   );
 }
@@ -91,13 +91,17 @@ function renderSummary(done: boolean, hitLimit: boolean, error?: string) {
     summaryEl.append(el("span", { text: t("search.noResults") }));
     return;
   }
+  if (totalMatches === 0) {
+    summaryEl.append(el("span", { text: t("search.searching") }));
+    return;
+  }
   summaryEl.append(
     el("span", {
       class: "mono",
-      text: `${totalMatches} match${totalMatches === 1 ? "" : "es"} in ${files} file${files === 1 ? "" : "s"}${done ? "" : "…"}`,
+      text: done ? t("search.summary", totalMatches, files) : `${t("search.summary", totalMatches, files)}…`,
     }),
   );
-  if (hitLimit) summaryEl.append(el("span", { class: "warn", text: " (limit reached)" }));
+  if (hitLimit) summaryEl.append(el("span", { class: "warn", text: ` ${t("search.limitReached")}` }));
 }
 
 function highlightSegments(m: SearchMatch, replacement: string | null): HTMLElement {
@@ -214,22 +218,22 @@ async function applyReplace() {
     }
   }
   if (edits.length === 0) {
-    toast("Nothing selected to replace");
+    toast(t("search.nothingSelected"));
     return;
   }
   const fileCount = new Set(edits.map((e) => e.file)).size;
   const ok = await confirmDialog({
-    title: "Replace in files",
-    message: `Replace ${edits.length} occurrence${edits.length === 1 ? "" : "s"} across ${fileCount} file${fileCount === 1 ? "" : "s"}?`,
-    confirmLabel: `Replace ${edits.length}`,
+    title: t("search.replaceTitle"),
+    message: t("search.replaceConfirm", edits.length, fileCount),
+    confirmLabel: t("search.replaceN", edits.length),
     danger: true,
   });
   if (!ok) return;
   const res = await window.ide.search.replace(edits);
   if (res.failed.length) {
-    toast(`Replaced ${res.applied}; ${res.failed.length} failed (files changed since search)`, { crit: true });
+    toast(t("search.replacedFailed", res.applied, res.failed.length), { crit: true });
   } else {
-    toast(`Replaced ${res.applied} occurrence${res.applied === 1 ? "" : "s"}`);
+    toast(t("search.replacedOk", res.applied));
   }
   emit("git-refresh", undefined);
   void startSearch();
@@ -272,12 +276,12 @@ export function initSearchPanel(container: HTMLElement) {
 
   includeInput = el("input", {
     class: "input mono",
-    placeholder: "include: **/*.ts",
+    placeholder: t("search.includePlaceholder"),
     onInput: () => runSearch(),
   }) as HTMLInputElement;
   excludeInput = el("input", {
     class: "input mono",
-    placeholder: "exclude: **/dist/**",
+    placeholder: t("search.excludePlaceholder"),
     onInput: () => runSearch(),
   }) as HTMLInputElement;
 
@@ -299,6 +303,8 @@ export function initSearchPanel(container: HTMLElement) {
     replaceBtn.textContent = t("search.replaceAll");
     regexBtn.title = t("search.regex");
     caseBtn.title = t("search.matchCase");
+    includeInput.placeholder = t("search.includePlaceholder");
+    excludeInput.placeholder = t("search.excludePlaceholder");
     if (!matchesByFile.size) renderEmptyHint();
   });
 
@@ -327,8 +333,8 @@ export function initSearchPanel(container: HTMLElement) {
     staleBar = el(
       "div",
       { class: "search-stale" },
-      el("span", { text: "Files changed since this search" }),
-      el("button", { class: "btn", text: "Re-run", onClick: () => void startSearch() }),
+      el("span", { text: t("search.stale") }),
+      el("button", { class: "btn", text: t("search.rerun"), onClick: () => void startSearch() }),
     );
     resultsEl.prepend(staleBar);
   });

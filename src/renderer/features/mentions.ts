@@ -9,6 +9,7 @@ import { I } from "../core/icons";
 import { on } from "../core/bus";
 import { state, normPath, baseName, relPath, SEP } from "../core/state";
 import { toast } from "../core/ui";
+import { t } from "../core/i18n";
 
 export const MENTION_MIME = "application/x-omp-file-ref";
 
@@ -83,7 +84,7 @@ function renderChipInto(host: HTMLElement, ref: MentionRef, opts: { removable: b
     "span",
     {
       class: `mention-chip${opts.missing ? " missing" : ""}`,
-      title: opts.missing ? `${relPath(ref.path)} — missing (deleted on disk)` : relPath(ref.path),
+      title: opts.missing ? t("agent.mentionMissing", relPath(ref.path)) : relPath(ref.path),
       onClick: () => {
         if (ref.kind === "file" && openFile) openFile(ref.path);
       },
@@ -94,7 +95,7 @@ function renderChipInto(host: HTMLElement, ref: MentionRef, opts: { removable: b
   if (opts.removable) {
     const x = el("span", {
       class: "mc-x",
-      title: "Remove mention",
+      title: t("agent.mentionRemove"),
       onClick: (e) => {
         e.stopPropagation();
         removeChip(ref.path);
@@ -191,7 +192,7 @@ function onFsChanges(changes: { type: string; path: string }[]): void {
       if (c.type === "unlink" || c.type === "unlinkDir") {
         chip.missing = true;
         chip.el.classList.add("missing");
-        chip.el.title = `${relPath(chip.path)} — missing (deleted on disk)`;
+        chip.el.title = t("agent.mentionMissing", relPath(chip.path));
       } else if (c.type === "add" || c.type === "addDir") {
         // rename lands as unlink+add of different paths; a re-add of the SAME
         // path means the file is back
@@ -260,7 +261,7 @@ export function initMentionInput(opts: {
     const refs = e.dataTransfer ? parseRefs(e.dataTransfer) : null;
     const label = refs?.length
       ? `+ ${chipLabel(refs[0])}${refs.length > 1 ? ` +${refs.length - 1}` : ""}`
-      : "+ mention";
+      : t("agent.mentionAdd");
     hint.textContent = label;
     hint.style.display = "";
   });
@@ -313,7 +314,7 @@ async function handleOsFiles(files: FileList, zone: HTMLElement): Promise<void> 
     addMention({ path: n, kind: st?.isDir ? "folder" : "file" });
   }
   if (rejected) {
-    toast("Outside workspace", { crit: true });
+    toast(t("agent.outsideWorkspace"), { crit: true });
     zone.classList.add("drop-invalid");
     setTimeout(() => zone.classList.remove("drop-invalid"), 600);
   }

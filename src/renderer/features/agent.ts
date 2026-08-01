@@ -9,8 +9,9 @@ import { I, toolIcon } from "../core/icons";
 import { on, emit } from "../core/bus";
 import { state, relPath, baseName, normPath, joinPath, languageForPath } from "../core/state";
 import { toast, confirmDialog, inputDialog, selectDialog } from "../core/ui";
+import { t } from "../core/i18n";
 import type { OmpEvent, OmpStatus, OmpTodoPhase, OmpFileEdit, OmpUiRequest, RemoteVia } from "../../shared/types";
-import { switchModelViaPicker, mountUsageStrip, mountModelWarning, openModelsDialog, setSessionThinkingViaPicker, createBoostToggle } from "./models";
+import { switchModelViaPicker, mountUsageStrip, mountModelWarning, openModelsDialog, setSessionThinkingViaPicker } from "./models";
 import { openSessionHistory } from "./history";
 import { initPromptEnhance, notifyPromptSent } from "./enhance";
 import { createTeamToggle, teamConsumesPrompt, initTeamSurface, stripTeamMarkers, teamRun } from "./team";
@@ -63,28 +64,28 @@ function elapsedTick() {
   const busy = status.state === "thinking" || status.state === "tool";
   if (!busy) return;
   const secs = Math.floor((Date.now() - turnStartedAt) / 1000);
-  if (secs >= 3) headModel.textContent = `${headLabel} · ${secs}s`;
+  if (secs >= 3) headModel.textContent = `${headLabel} · ${t("team.elapsedSec", secs)}`;
   const stallMs = state.settings.stallSeconds * 1000;
   if (!gotTurnData && stallMs > 0 && secs * 1000 >= stallMs) {
     if (!stallCard) {
-      const counter = el("span", { class: "mono", text: `${secs}s` });
+      const counter = el("span", { class: "mono", text: t("team.elapsedSec", secs) });
       stallCard = el(
         "div",
         { class: "stall-card" },
-        el("div", { class: "sc-title" }, "Still waiting for the first token — ", counter),
-        el("p", { text: "The model hasn't sent anything since this turn started. It may be slow — or unresponsive." }),
+        el("div", { class: "sc-title" }, t("agent.stallTitle"), counter),
+        el("p", { text: t("agent.stallBody") }),
         el(
           "div",
           { class: "sc-actions" },
-          el("button", { class: "btn", text: "Interrupt", onClick: () => void interruptAgent() }),
-          el("button", { class: "btn", text: "Switch model…", onClick: () => switchModelViaPicker("stall-nudge") }),
+          el("button", { class: "btn", text: t("agent.stallInterrupt"), onClick: () => void interruptAgent() }),
+          el("button", { class: "btn", text: t("agent.stallSwitchModel"), onClick: () => switchModelViaPicker("stall-nudge") }),
         ),
       );
       chatEl.append(stallCard);
       stallCard.scrollIntoView({ block: "nearest" });
     } else {
       const counter = stallCard.querySelector(".sc-title .mono");
-      if (counter) counter.textContent = `${secs}s`;
+      if (counter) counter.textContent = t("team.elapsedSec", secs);
     }
   }
 }
@@ -113,17 +114,20 @@ let activeTodo: { content: string; done: number; total: number } | null = null;
 
 function fmtNowElapsed(startedAt: number): string {
   const s = Math.floor((Date.now() - startedAt) / 1000);
-  return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`;
+  return s < 60 ? t("team.elapsedSec", s) : t("team.elapsedMinSec", Math.floor(s / 60), s % 60);
 }
 
 /** NOW-zone phase words for a live team run — state only, never plan/summary prose */
-const TEAM_PHASE_RU: Record<string, string> = {
-  probe: "проба возможностей",
-  deliberate: "совещание планировщиков",
-  gate: "план ждёт подтверждения",
-  execute: "сборка",
-  verify: "проверка",
-};
+function teamPhaseLabel(phase: string): string {
+  switch (phase) {
+    case "probe": return t("agent.phaseProbe");
+    case "deliberate": return t("agent.phaseDeliberate");
+    case "gate": return t("agent.phaseGate");
+    case "execute": return t("agent.phaseExecute");
+    case "verify": return t("agent.phaseVerify");
+    default: return phase;
+  }
+}
 
 function renderNow(): void {
   if (!nowEl) return;
@@ -145,8 +149,8 @@ function renderNow(): void {
       el("div", { class: "now-idle" },
         el("span", { class: "now-dot" }),
         team
-          ? el("span", { text: teamLive ? `команда · ${TEAM_PHASE_RU[team.phase] ?? team.phase}` : "агент свободен" })
-          : el("span", { text: `агент свободен${lastResultLine ? ` · ${lastResultLine}` : ""}` }),
+          ? el("span", { text: teamLive ? t("agent.nowTeam", teamPhaseLabel(team.phase)) : t("agent.idle") })
+          : el("span", { text: `${t("agent.idle")}${lastResultLine ? ` · ${lastResultLine}` : ""}` }),
       ),
     );
     if (nowTimer) { clearInterval(nowTimer); nowTimer = undefined; }
@@ -157,9 +161,9 @@ function renderNow(): void {
     // Team mode: one row per ACTIVE worker — sigil + tool + target + ticking elapsed
     for (const w of teamActive) {
       const target =
-        w.state === "throttled" ? "rate-limited · backing off" :
-        w.state === "waking" ? "запуск…" :
-        (w.lastActivity ?? (w.slice ? `slice ${w.slice}` : ""));
+        w.state === "throttled" ? t("team.rateLimited") :
+        w.state === "waking" ? t("team.stWaking") :
+        (w.lastActivity ?? (w.slice ? t("team.sliceN", w.slice) : ""));
       nowEl.append(
         el("div", { class: `now-row${w.state === "throttled" ? " throttled" : ""}` },
           el("span", { class: "now-sigil mono", text: w.glyph }),
@@ -175,7 +179,7 @@ function renderNow(): void {
       el("span", { class: "now-dot live" }),
       nowLive
         ? el("span", { class: "mono now-name", text: nowLive.name })
-        : el("span", { class: "mono now-name", text: "thinking" }),
+        : el("span", { class: "mono now-name", text: t("agent.nowThinking") }),
       nowLive ? el("span", { class: "now-target", text: nowLive.target }) : null,
       el("span", { class: "mono now-elapsed", text: fmtNowElapsed(nowLive?.startedAt ?? turnStartedAt) }),
     );
@@ -199,7 +203,7 @@ function renderNow(): void {
   if (sessionFiles.size > 0) {
     nowEl.append(
       el("div", { class: "now-sub mono dimmer" },
-        el("span", { text: `${sessionFiles.size} file${sessionFiles.size > 1 ? "s" : ""}` }),
+        el("span", { text: t("agent.filesN", sessionFiles.size) }),
         el("span", { class: "now-add", text: `+${sessionAdd}` }),
         el("span", { class: "now-del", text: `−${sessionDel}` }),
       ),
@@ -212,11 +216,7 @@ function renderNow(): void {
 // re-render the NOW zone on each so rows appear/collapse with the processes
 on("team-state", () => renderNow());
 
-const EXAMPLE_PROMPTS = [
-  "Explain the structure of this project",
-  "Find and fix the failing test",
-  "Add error handling to the main entry point",
-];
+const EXAMPLE_PROMPT_KEYS = ["agent.example1", "agent.example2", "agent.example3"] as const;
 
 // ---------------------------------------------------------------- status
 
@@ -226,9 +226,9 @@ function applyStatus(s: OmpStatus) {
   emit("agent-status", s);
   headOrb.className = `orb ${s.state}`;
   headLabel =
-    s.state === "unavailable" ? "unavailable" :
-    s.state === "dead" ? "process exited" :
-    s.state === "tool" && s.tool ? `running ${s.tool}` :
+    s.state === "unavailable" ? t("agent.stUnavailable") :
+    s.state === "dead" ? t("agent.stProcessExited") :
+    s.state === "tool" && s.tool ? t("agent.stRunningTool", s.tool) :
     s.model ?? "";
   headModel.textContent = headLabel;
   stopBtn.disabled = !(s.state === "thinking" || s.state === "tool");
@@ -266,12 +266,12 @@ function renderUnavailable(detail?: string) {
       "div",
       { class: "agent-blank dead disabled-state" },
       el("div", { class: "ab-orb" }),
-      el("h3", { text: "Agent unavailable" }),
-      el("p", { text: detail ?? "The omp binary was not found." }),
-      el("p", {}, "Install Oh My Pi and ensure ", el("code", { text: "omp" }), " is on your PATH, or set the binary path in Settings."),
+      el("h3", { text: t("agent.unavailableTitle") }),
+      el("p", { text: detail ?? t("agent.unavailableBody") }),
+      el("p", {}, t("agent.installPre"), el("code", { text: "omp" }), t("agent.installPost")),
       el("button", {
         class: "btn btn-agent",
-        text: "Retry",
+        text: t("agent.retry"),
         onClick: () => void startAgent(),
       }),
     ),
@@ -284,11 +284,11 @@ function renderDead(detail?: string) {
     "div",
     { class: "agent-blank dead disabled-state", style: { flex: "0 0 auto", padding: "18px" } },
     el("div", { class: "ab-orb" }),
-    el("h3", { text: "Agent process died" }),
+    el("h3", { text: t("agent.deadTitle") }),
     el("p", { class: "mono", text: detail ?? "" }),
     el("button", {
       class: "btn btn-agent",
-      text: "Restart Agent",
+      text: t("agent.restartBtn"),
       onClick: () => {
         card.remove();
         void window.ide.omp.restart();
@@ -308,7 +308,8 @@ function clearChatSurface() {
 function renderWelcomeState() {
   clearChatSurface();
   const prompts = el("div", { class: "example-prompts" });
-  for (const p of EXAMPLE_PROMPTS) {
+  for (const k of EXAMPLE_PROMPT_KEYS) {
+    const p = t(k);
     prompts.append(
       el("button", {
         class: "example-prompt",
@@ -322,9 +323,9 @@ function renderWelcomeState() {
   }
   const noModel = el("p", { class: "no-model-line", style: { display: "none" } });
   noModel.append(
-    "No model configured → ",
+    t("agent.noModelPre"),
     el("a", {
-      text: "Set up a model",
+      text: t("agent.noModelLink"),
       style: { color: "var(--power)", cursor: "pointer" },
       onClick: () => openModelsDialog(),
     }),
@@ -339,7 +340,7 @@ function renderWelcomeState() {
       el("div", { class: "grain-layer" }),
       el("div", { class: "ab-orb" }),
       el("h3", { text: "OMP Agent" }),
-      el("p", { text: "Converse with the agent about this workspace. It can read, edit and run code — you watch every action here." }),
+      el("p", { text: t("agent.heroBody") }),
       noModel,
       prompts,
     ),
@@ -364,7 +365,7 @@ function addUserMessage(text: string, via?: RemoteVia, mentions?: MentionAttachm
     chatEl.append(
       el(
         "span",
-        { class: "remote-chip", title: `Sent remotely via Telegram bot ${via.botName}` },
+        { class: "remote-chip", title: t("agent.remoteVia", via.botName) },
         el("span", { class: "rc-user", text: `@${via.username}` }),
         el("span", { class: "rc-bot", text: `· ${via.botName}` }),
       ),
@@ -408,7 +409,7 @@ function ensureThinkBlock(): ThinkBlock {
       root.classList.toggle("open", !open);
     },
   });
-  head.textContent = "∴ thinking";
+  head.textContent = t("agent.thinkingHead");
   const root = el("div", { class: "think-block streaming" }, head, body);
   chatEl.append(root);
   void window.ide.models.getState().then((s) => {
@@ -424,15 +425,15 @@ function ensureThinkBlock(): ThinkBlock {
 
 function closeThinkBlock(): void {
   if (!activeThink) return;
-  const t = activeThink;
+  const tb = activeThink;
   activeThink = null;
-  t.root.classList.remove("streaming");
-  const secs = ((Date.now() - t.startedAt) / 1000).toFixed(1);
+  tb.root.classList.remove("streaming");
+  const secs = ((Date.now() - tb.startedAt) / 1000).toFixed(1);
   // ~4 chars/token is an estimate — label it as such
-  const approxTokens = Math.round(t.chars / 4);
-  t.head.textContent = t.chars
-    ? `∴ thinking · ~${approxTokens} tokens · ${secs}s`
-    : `∴ thinking · ${secs}s`;
+  const approxTokens = Math.round(tb.chars / 4);
+  tb.head.textContent = tb.chars
+    ? t("agent.thinkingDone", approxTokens, secs)
+    : t("agent.thinkingLive", secs);
   for (const orb of document.querySelectorAll(".statusbar .orb, .agent-head .orb"))
     orb.classList.remove("reasoning", "level-low", "level-med", "level-high", "level-xhigh", "level-max");
   chipReasoningPulse(false);
@@ -545,7 +546,7 @@ function finishToolCard(
 
   const body = card.querySelector(".tc-body") as HTMLElement | null;
   if (body && resultText) {
-    body.textContent = `${body.textContent}\n\n── result ──\n${resultText.slice(0, 2500)}`;
+    body.textContent = `${body.textContent}\n\n${t("agent.resultDivider")}\n${resultText.slice(0, 2500)}`;
   }
 
   if (fileEdit && state.root) {
@@ -569,11 +570,11 @@ function finishToolCard(
         bar,
         el("button", {
           class: "btn btn-agent",
-          text: "View diff",
+          text: t("agent.viewDiff"),
           style: { padding: "2px 10px", fontSize: "11px" },
           onClick: () => {
             emit("open-diff", {
-              title: `${baseName(abs)} (agent edit)`,
+              title: t("agent.diffTitle", baseName(abs)),
               path: abs,
               original: fileEdit.oldText,
               modified: fileEdit.newText,
@@ -647,10 +648,10 @@ function handleEvent(e: OmpEvent) {
     }
     case "thinking-delta": {
       noteTurnData();
-      const t = ensureThinkBlock();
-      t.chars += e.delta.length;
-      t.body.textContent += e.delta;
-      t.head.textContent = `∴ thinking · ${((Date.now() - t.startedAt) / 1000).toFixed(0)}s`;
+      const tb = ensureThinkBlock();
+      tb.chars += e.delta.length;
+      tb.body.textContent += e.delta;
+      tb.head.textContent = t("agent.thinkingLive", ((Date.now() - tb.startedAt) / 1000).toFixed(0));
       chipReasoningPulse(true);
       if (nearBottom()) scrollBottom();
       break;
@@ -703,7 +704,7 @@ function handleEvent(e: OmpEvent) {
       // NOW zone: idle summary line = last agent text, one line
       {
         const last = [...chatEl.querySelectorAll(".chat-agent")].pop()?.textContent ?? "";
-        lastResultLine = e.aborted ? "прервано" : last.trim().split("\n")[0].slice(0, 80);
+        lastResultLine = e.aborted ? t("agent.interrupted") : last.trim().split("\n")[0].slice(0, 80);
         nowLive = null;
         renderNow();
       }
@@ -714,14 +715,14 @@ function handleEvent(e: OmpEvent) {
 async function handleUiRequest(req: OmpUiRequest) {
   if (req.method === "confirm") {
     const ok = await confirmDialog({
-      title: req.title ?? "Agent asks",
+      title: req.title ?? t("agent.asksTitle"),
       message: req.message ?? "",
-      confirmLabel: "Yes",
+      confirmLabel: t("agent.yes"),
     });
     void window.ide.omp.uiResponse(req.id, { confirmed: ok });
   } else if (req.method === "input" || req.method === "editor") {
     const value = await inputDialog({
-      title: req.title ?? "Agent asks",
+      title: req.title ?? t("agent.asksTitle"),
       message: req.message,
       placeholder: req.placeholder,
     });
@@ -730,7 +731,7 @@ async function handleUiRequest(req: OmpUiRequest) {
       value === null ? { cancelled: true } : { value },
     );
   } else if (req.method === "select") {
-    const pick = await selectDialog(req.title ?? "Agent asks", req.options ?? []);
+    const pick = await selectDialog(req.title ?? t("agent.asksTitle"), req.options ?? []);
     void window.ide.omp.uiResponse(
       req.id,
       pick === null ? { cancelled: true } : { value: pick },
@@ -745,7 +746,7 @@ function sendPrompt() {
   const text = promptInput.value.trim();
   if (!text && !hasMentions()) return;
   if (status.state === "unavailable" || status.state === "dead" || status.state === "starting") {
-    toast("Agent is not running", { crit: true });
+    toast(t("agent.notRunning"), { crit: true });
     return;
   }
   const mentions = mentionSnapshot();
@@ -766,7 +767,7 @@ let pendingLocalMentions: MentionAttachment[] | null = null;
 async function interruptAgent() {
   if (status.state === "thinking" || status.state === "tool") {
     await window.ide.omp.abort();
-    toast("Interrupt sent");
+    toast(t("agent.interruptSent"));
     // transcript marker arrives with the agent-end {aborted} event
   }
 }
@@ -775,9 +776,9 @@ async function newSession() {
   const busy = status.state === "thinking" || status.state === "tool";
   if (busy) {
     const ok = await confirmDialog({
-      title: "Agent is working",
-      message: "Start a new session and drop the current run?",
-      confirmLabel: "New Session",
+      title: t("agent.busyTitle"),
+      message: t("agent.newSessionMsg"),
+      confirmLabel: t("agent.newSessionBtn"),
       danger: true,
     });
     if (!ok) return;
@@ -794,7 +795,7 @@ async function newSession() {
   activeTodo = null;
   nowLive = null;
   renderNow();
-  toast("New agent session");
+  toast(t("agent.newSessionToast"));
 }
 
 export async function startAgent() {
@@ -812,25 +813,25 @@ export function initAgentPanel(container: HTMLElement) {
   headModel = el("span", { class: "agent-model" });
   stopBtn = el("button", {
     class: "icon-btn",
-    title: "Interrupt agent",
+    title: t("agent.tipInterrupt"),
     onClick: () => void interruptAgent(),
   }) as HTMLButtonElement;
   stopBtn.append(svgIcon(I.stop));
   const newBtn = el("button", {
     class: "icon-btn",
-    title: "New session",
+    title: t("agent.tipNewSession"),
     onClick: () => void newSession(),
   });
   newBtn.append(svgIcon(I.plus));
   const restartBtn = el("button", {
     class: "icon-btn",
-    title: "Restart agent process",
+    title: t("agent.tipRestart"),
     onClick: () => void window.ide.omp.restart(),
   });
   restartBtn.append(svgIcon(I.restart2));
   const historyBtn = el("button", {
     class: "icon-btn",
-    title: "Session history (read-only)",
+    title: t("agent.tipHistory"),
     onClick: () => openSessionHistory(),
   });
   historyBtn.append(svgIcon(I.history));
@@ -838,14 +839,14 @@ export function initAgentPanel(container: HTMLElement) {
   // next turn), so this button IS the per-session override surface.
   const modelBtn = el("button", {
     class: "icon-btn",
-    title: "Switch model (applies next turn)",
+    title: t("agent.tipSwitchModel"),
     onClick: () => switchModelViaPicker("agent-header"),
   });
   modelBtn.append(svgIcon(I.zap));
   // Session thinking dial — override for THIS session only (clears on /new)
   const thinkBtn = el("button", {
     class: "icon-btn",
-    title: "Thinking level (this session)",
+    title: t("agent.tipThinking"),
     onClick: () => setSessionThinkingViaPicker("agent-header"),
   });
   thinkBtn.append(svgIcon(I.sparkle));
@@ -864,7 +865,7 @@ export function initAgentPanel(container: HTMLElement) {
 
   promptInput = el("textarea", {
     class: "input",
-    placeholder: "Ask the agent… (Enter to send, Shift+Enter for a new line)",
+    placeholder: t("agent.placeholder"),
     onKeyDown: (e) => {
       if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
         // Enter sends; Shift+Enter inserts a newline (default behavior)
@@ -882,7 +883,7 @@ export function initAgentPanel(container: HTMLElement) {
   }) as HTMLTextAreaElement;
 
   const mentionStrip = el("div", { class: "mention-strip", style: { display: "none" } });
-  const sendBtn = el("button", { class: "btn btn-agent", text: "Send", onClick: () => sendPrompt() });
+  const sendBtn = el("button", { class: "btn btn-agent", text: t("agent.send"), onClick: () => sendPrompt() });
   composerEl = el(
     "div",
     { class: "agent-composer" },
@@ -893,10 +894,30 @@ export function initAgentPanel(container: HTMLElement) {
       { class: "composer-row" },
       el("span", { style: { flex: "1" } }),
       createTeamToggle(),
-      createBoostToggle(),
       sendBtn,
     ),
   );
+
+  // live language switch: the persistent panel re-applies its fixed strings.
+  // Registered BEFORE initTeamSurface so the team handler (placeholder for
+  // armed/live runs) always wins over the plain agent placeholder.
+  on("lang-changed", () => {
+    promptInput.placeholder = t("agent.placeholder");
+    sendBtn.textContent = t("agent.send");
+    stopBtn.title = t("agent.tipInterrupt");
+    newBtn.title = t("agent.tipNewSession");
+    restartBtn.title = t("agent.tipRestart");
+    historyBtn.title = t("agent.tipHistory");
+    modelBtn.title = t("agent.tipSwitchModel");
+    thinkBtn.title = t("agent.tipThinking");
+    // stall card rebuilds translated on the next tick (≤1s while stalled)
+    if (stallCard) { stallCard.remove(); stallCard = null; }
+    // header label + NOW zone + dead/unavailable cards re-derive from status;
+    // drop the old disabled-state card first so dead never duplicates
+    panelEl.querySelector(".agent-blank.disabled-state")?.remove();
+    applyStatus(status);
+    if (chatEl.querySelector(".agent-blank:not(.disabled-state)")) renderWelcomeState();
+  });
   initMentionInput({
     strip: mentionStrip,
     zone: composerEl,

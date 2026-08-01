@@ -71,9 +71,9 @@ function hhmm(t: number): string {
 
 /** listener toggle block reason; null = toggleable */
 function listenerBlockReason(chat: RemoteChatInfo): string | null {
-  if (chat.left) return "Bot left this chat";
-  if (!chat.watched) return "Watch the chat first — the listener needs the log";
-  if (chat.coverage === "limited") return chat.coverageHint || "Limited coverage — the listener can't hear ordinary messages";
+  if (chat.left) return t("rc.botLeft");
+  if (!chat.watched) return t("rc.blockWatchFirst");
+  if (chat.coverage === "limited") return chat.coverageHint || t("rc.blockLimited");
   if (watch.oneshotUnavailable) return watch.oneshotUnavailable;
   return null;
 }
@@ -109,7 +109,7 @@ export function watchChatsSection(bot: RemoteBotInfo): HTMLElement | null {
 
   // approver picker: only meaningful with several paired users
   if (bot.paired.length > 1) {
-    const sel = el("select", { class: "wc-approver-sel", title: "Who approves proposals from this bot's chats" }) as HTMLSelectElement;
+    const sel = el("select", { class: "wc-approver-sel", title: t("rc.approverTitle") }) as HTMLSelectElement;
     const current = watch.approvers[bot.id] ?? bot.paired[0].telegramId;
     for (const u of bot.paired) {
       const opt = el("option", { text: `@${u.username}` }) as HTMLOptionElement;
@@ -137,19 +137,19 @@ function chatCard(bot: RemoteBotInfo, chat: RemoteChatInfo): HTMLElement {
       (chat.evaluating ? " evaluating" : "") +
       (chat.evalError ? " failing" : ""),
     title: chat.evalError
-      ? `Evaluation failing: ${chat.evalError}`
+      ? t("rc.evalFailingTip", chat.evalError)
       : chat.listener
         ? chat.evaluating
-          ? "Evaluating…"
-          : "Listener on"
-        : "Listener off",
+          ? t("rc.evaluating")
+          : t("rc.listenerOn")
+        : t("rc.listenerOff"),
   });
   ear.innerHTML = `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round">${EAR_GLYPH}</svg>`;
 
   const coverage = el("span", {
     class: chat.coverage === "full" ? "wc-cov full" : "wc-cov limited",
-    text: chat.coverage,
-    title: chat.coverage === "limited" ? chat.coverageHint : "Bot receives all group messages",
+    text: chat.coverage === "full" ? t("rc.covFull") : t("rc.covLimited"),
+    title: chat.coverage === "limited" ? chat.coverageHint : t("rc.covFullTip"),
   });
 
   const watchSwitch = switchLike(chat.watched, !chat.left, chat.left ? t("rc.botLeft") : chat.watched ? t("rc.watchOff") : t("rc.watchOn"), (next) => {
@@ -161,19 +161,19 @@ function chatCard(bot: RemoteBotInfo, chat: RemoteChatInfo): HTMLElement {
   const removeBtn = removable
     ? el("button", {
         class: "icon-btn wc-remove",
-        title: chat.messageCount ? "Remove chat (asks about the log)" : "Remove chat",
+        title: chat.messageCount ? t("rc.removeChatAsksLog") : t("rc.removeChatTitle"),
         onClick: () => {
           void confirmDialog({
-            title: "Remove chat",
+            title: t("rc.removeChatTitle"),
             message: chat.messageCount
-              ? `Remove "${chat.title}" from the registry AND delete its ${chat.messageCount}-message log? Cancel keeps everything.`
-              : `Remove "${chat.title}" from the registry?`,
-            confirmLabel: chat.messageCount ? "Remove + delete log" : "Remove",
+              ? t("rc.removeChatMsgLog", chat.title, chat.messageCount)
+              : t("rc.removeChatMsg", chat.title),
+            confirmLabel: chat.messageCount ? t("rc.removeDeleteLog") : t("rc.remove"),
             danger: true,
           }).then((ok) => {
             if (!ok) return;
             void window.ide.remote.removeChat(chat.botId, chat.chatId, true).then((res) => {
-              if (!res.ok) toast(res.error ?? "Failed to remove chat", { crit: true });
+              if (!res.ok) toast(res.error ?? t("rc.removeChatFailed"), { crit: true });
             });
           });
         },
@@ -187,7 +187,7 @@ function chatCard(bot: RemoteBotInfo, chat: RemoteChatInfo): HTMLElement {
       { class: "wc-head" },
       ear,
       el("span", { class: "wc-title", text: chat.title }),
-      chat.left ? el("span", { class: "wc-left-tag", text: "left chat" }) : coverage,
+      chat.left ? el("span", { class: "wc-left-tag", text: t("rc.leftTag") }) : coverage,
       el("span", { style: { flex: "1" } }),
       removeBtn,
       watchSwitch,
@@ -195,12 +195,12 @@ function chatCard(bot: RemoteBotInfo, chat: RemoteChatInfo): HTMLElement {
   );
 
   if (!chat.left && chat.coverage === "limited") {
-    card.append(el("div", { class: "wc-note-limited", text: `Listening is meaningless at limited coverage — ${chat.coverageHint}` }));
+    card.append(el("div", { class: "wc-note-limited", text: t("rc.limitedNote", chat.coverageHint ?? "") }));
   }
 
   // listener row
   const reason = listenerBlockReason(chat);
-  const listenerSwitch = switchLike(chat.listener, reason === null, reason ?? (chat.listener ? "Disable smart listening" : "Enable smart listening"), (next) => {
+  const listenerSwitch = switchLike(chat.listener, reason === null, reason ?? (chat.listener ? t("rc.listenerDisable") : t("rc.listenerEnable")), (next) => {
     void window.ide.remote.setChatListener(chat.botId, chat.chatId, next).then((res) => {
       if (!res.ok && res.error) toast(res.error, { crit: true });
     });
@@ -218,8 +218,29 @@ function chatCard(bot: RemoteBotInfo, chat: RemoteChatInfo): HTMLElement {
     listenerSwitch,
   );
   card.append(listenerRow);
+
+  // Chat Dialogue: «отвечать участникам» — read-only answers for non-paired
+  // members of THIS chat (default OFF; paired users need no toggle)
+  const amEnabled = chat.watched && !chat.left;
+  const amSwitch = switchLike(
+    !!chat.answerMembers,
+    amEnabled,
+    amEnabled ? (chat.answerMembers ? t("rc.answerMembersOff") : t("rc.answerMembersOn")) : t("rc.answerMembersNeedsWatch"),
+    (next) => {
+      void window.ide.remote.setChatAnswerMembers(chat.botId, chat.chatId, next);
+    },
+  );
+  card.append(
+    el(
+      "div",
+      { class: "wc-listener-row" },
+      el("span", { class: "wc-listener-label", title: t("rc.answerMembersTip"), text: t("rc.answerMembers") }),
+      el("span", { style: { flex: "1" } }),
+      amSwitch,
+    ),
+  );
   if (watch.smolWarning) card.append(el("div", { class: "wc-smol-warn", text: watch.smolWarning }));
-  if (chat.evalError) card.append(el("div", { class: "wc-eval-err", text: `evaluation failing: ${chat.evalError.slice(0, 140)}` }));
+  if (chat.evalError) card.append(el("div", { class: "wc-eval-err", text: t("rc.evalErrLine", chat.evalError.slice(0, 140)) }));
 
   // meta + log path + viewer
   const viewBtn = el("button", { class: "btn wc-viewlog", text: t("rc.viewLog"), onClick: () => void showLogViewer(chat) });
@@ -227,9 +248,9 @@ function chatCard(bot: RemoteBotInfo, chat: RemoteChatInfo): HTMLElement {
     el(
       "div",
       { class: "wc-meta" },
-      el("span", {}, "msgs: ", el("span", { class: "mono", text: String(chat.messageCount) })),
-      el("span", {}, "evals: ", el("span", { class: "mono", text: String(chat.evalCount) })),
-      el("span", {}, "last: ", el("span", { class: "mono", text: chat.lastEvalAt ? hhmm(chat.lastEvalAt) : "—" })),
+      el("span", {}, `${t("rc.msgs")}: `, el("span", { class: "mono", text: String(chat.messageCount) })),
+      el("span", {}, `${t("rc.evals")}: `, el("span", { class: "mono", text: String(chat.evalCount) })),
+      el("span", {}, `${t("rc.last")}: `, el("span", { class: "mono", text: chat.lastEvalAt ? hhmm(chat.lastEvalAt) : "—" })),
       el("span", { style: { flex: "1" } }),
       viewBtn,
     ),
@@ -284,7 +305,7 @@ export function proposalsSection(): HTMLElement | null {
   const pending = pendingProposals();
   if (!pending.length) return null;
   const wrap = el("div", { class: "pp-list" });
-  wrap.append(el("div", { class: "panel-header", text: `${t("rc.proposals")} (${pending.length})`, style: { padding: "6px 2px 2px" } }));
+  wrap.append(el("div", { class: "panel-header", text: `${t("rc.proposals")} · ${pending.length}`, style: { padding: "6px 2px 2px" } }));
   for (const p of pending) wrap.append(proposalCard(p));
   return wrap;
 }
@@ -356,8 +377,8 @@ function proposalCard(p: RemoteProposal): HTMLElement {
 
 async function showLogViewer(chat: RemoteChatInfo): Promise<void> {
   const rows = el("div", { class: "lv-rows" });
-  const search = el("input", { class: "input mono lv-search", placeholder: "search loaded window…" }) as HTMLInputElement;
-  const olderBtn = el("button", { class: "btn", text: "Load older" }) as HTMLButtonElement;
+  const search = el("input", { class: "input mono lv-search", placeholder: t("rc.lvSearchPh") }) as HTMLInputElement;
+  const olderBtn = el("button", { class: "btn", text: t("rc.lvLoadOlder") }) as HTMLButtonElement;
 
   /** proposal status per trigger messageId for marker rendering */
   const markers = new Map<number, RemoteProposal>();
@@ -375,8 +396,8 @@ async function showLogViewer(chat: RemoteChatInfo): Promise<void> {
       el("span", { class: "lv-time", text: hhmm(e.time) }),
       el("span", { class: "lv-sender", text: e.author }),
       p?.status === "approved" ? el("span", { class: "lv-chev", text: "›" }) : null,
-      el("span", { class: "lv-text", text: e.edit ? `${e.text} ✎` : e.text, title: e.edit ? `edit of #${e.messageId}` : undefined }),
-      p ? el("span", { class: "lv-marker", text: p.status }) : null,
+      el("span", { class: "lv-text", text: e.edit ? `${e.text} ✎` : e.text, title: e.edit ? t("rc.lvEditOf", e.messageId) : undefined }),
+      p ? el("span", { class: "lv-marker", text: t("rc.propStatus", p.status) }) : null,
     );
     return r;
   };
@@ -388,7 +409,7 @@ async function showLogViewer(chat: RemoteChatInfo): Promise<void> {
       if (q && !`${e.author} ${e.text}`.toLowerCase().includes(q)) continue;
       rows.append(row(e));
     }
-    if (!rows.children.length) rows.append(el("div", { class: "cc-empty", text: q ? "No matches in the loaded window." : "Log is empty." }));
+    if (!rows.children.length) rows.append(el("div", { class: "cc-empty", text: q ? t("rc.lvNoMatches") : t("rc.lvEmpty") }));
   };
 
   const loadPage = async (beforeSeq?: number) => {
@@ -416,10 +437,10 @@ async function showLogViewer(chat: RemoteChatInfo): Promise<void> {
   const dialog = el(
     "div",
     { class: "dialog lv-dialog" },
-    el("h2", { text: `Chat log — ${chat.title}` }),
+    el("h2", { text: t("rc.lvTitle", chat.title) }),
     el("div", { class: "lv-toolbar" }, olderBtn, search),
     rows,
-    el("div", { class: "dialog-actions" }, el("button", { class: "btn", text: "Close", onClick: close })),
+    el("div", { class: "dialog-actions" }, el("button", { class: "btn", text: t("rc.dlgClose"), onClick: close })),
   );
   overlay.append(dialog);
   overlay.addEventListener("mousedown", (e) => {

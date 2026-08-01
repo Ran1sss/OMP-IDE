@@ -48,7 +48,12 @@ const app = document.getElementById("app")!;
 
 // title bar
 const wsNameEl = el("span", { class: "ws-name" });
-const maxBtn = el("button", { class: "win-btn", title: "Maximize" });
+let winMax = false;
+const minBtn = el("button", { class: "win-btn", title: t("chrome.minimize"), onClick: () => window.ide.win.minimize() });
+minBtn.append(svgIcon(I.minimize));
+const closeWinBtn = el("button", { class: "win-btn close", title: t("chrome.close"), onClick: () => window.ide.win.close() });
+closeWinBtn.append(svgIcon(I.close));
+const maxBtn = el("button", { class: "win-btn", title: t("chrome.maximize") });
 maxBtn.append(svgIcon(I.maximize));
 const titlebar = el(
   "div",
@@ -58,14 +63,16 @@ const titlebar = el(
   wsNameEl,
   el("span", { class: "titlebar-spacer" }),
   el("div", { class: "win-controls" },
-    (() => { const b = el("button", { class: "win-btn", title: "Minimize", onClick: () => window.ide.win.minimize() }); b.append(svgIcon(I.minimize)); return b; })(),
+    minBtn,
     (() => { maxBtn.addEventListener("click", () => window.ide.win.maximize()); return maxBtn; })(),
-    (() => { const b = el("button", { class: "win-btn close", title: "Close", onClick: () => window.ide.win.close() }); b.append(svgIcon(I.close)); return b; })(),
+    closeWinBtn,
   ),
 );
 window.ide.win.onMaximized((max) => {
+  winMax = max;
   clear(maxBtn);
   maxBtn.append(svgIcon(max ? I.restore : I.maximize));
+  maxBtn.title = t(max ? "chrome.restore" : "chrome.maximize");
 });
 
 // activity bar
@@ -76,7 +83,7 @@ function actButton(id: string, icon: string, title: string, extraClass = ""): HT
   viewButtons.set(id, b);
   return b;
 }
-const settingsBtn = el("button", { class: "act-btn", title: "Settings", onClick: () => openSettingsDialog() });
+const settingsBtn = el("button", { class: "act-btn", title: t("chrome.settings"), onClick: () => openSettingsDialog() });
 // chrome strings re-applied live on language switch (fix 4)
 function applyChromeLang(): void {
   settingsBtn.title = t("chrome.settings");
@@ -86,24 +93,30 @@ function applyChromeLang(): void {
     outline: t("view.outline"),
     git: t("view.git"),
     remote: t("view.remote"),
+    agent: t("chrome.agentView"),
   };
   for (const [vid, btn] of viewButtons) if (titles[vid]) btn.title = titles[vid];
   sideHandle.title = t("chrome.panelResize");
   sbBranch.title = t("chrome.sourceControl");
   sbAgent.title = t("chrome.agentStatus");
   sbIslandFile.title = t("chrome.goToLine");
+  minBtn.title = t("chrome.minimize");
+  closeWinBtn.title = t("chrome.close");
+  maxBtn.title = t(winMax ? "chrome.restore" : "chrome.maximize");
+  applyEditorStatus();
+  registerAllCommands();
   if (activeView && activeView !== "agent") sideTitle.textContent = titles[activeView] ?? "";
 }
 settingsBtn.append(svgIcon(I.settings));
 const activitybar = el(
   "div",
   { class: "activitybar" },
-  actButton("explorer", I.files, "Explorer"),
-  actButton("search", I.search, "Search"),
-  actButton("outline", I.outline, "Outline"),
-  actButton("git", I.git, "Source Control"),
-  actButton("remote", I.zap, "Remote Control Center"),
-  actButton("agent", I.agent, "OMP Agent", "agent-act"),
+  actButton("explorer", I.files, t("view.explorer")),
+  actButton("search", I.search, t("view.search")),
+  actButton("outline", I.outline, t("view.outline")),
+  actButton("git", I.git, t("view.git")),
+  actButton("remote", I.zap, t("view.remote")),
+  actButton("agent", I.agent, t("chrome.agentView"), "agent-act"),
   el("span", { class: "act-spacer" }),
   settingsBtn,
 );
@@ -157,20 +170,20 @@ const workbench = el(
 // status bar — «Острова»: three glass islands on a void base (redesign §10).
 // Left = git (click → SCM), center = file context (click → go-to-line),
 // right = model chip + agent orb + beacon + bell (existing popovers).
-const sbBranch = el("span", { class: "sb-item sb-branch", title: "Source control", onClick: () => switchView("git") });
-const sbCursor = el("span", { class: "sb-item mono static", text: "Ln 1, Col 1" });
+const sbBranch = el("span", { class: "sb-item sb-branch", title: t("chrome.sourceControl"), onClick: () => switchView("git") });
+const sbCursor = el("span", { class: "sb-item mono static", text: t("chrome.lnCol", 1, 1) });
 const sbLang = el("span", { class: "sb-item static", text: "" });
 const sbEnc = el("span", { class: "sb-item static", text: "UTF-8" });
 const sbAgentOrb = el("span", { class: "orb idle" });
 const sbAgentTool = el("span", { class: "sb-tool" });
-const sbAgent = el("span", { class: "sb-item sb-agent", title: "Agent status", onClick: () => switchView("agent") }, sbAgentOrb, sbAgentTool);
+const sbAgent = el("span", { class: "sb-item sb-agent", title: t("chrome.agentStatus"), onClick: () => switchView("agent") }, sbAgentOrb, sbAgentTool);
 const sbBell = createNotificationBell();
 const sbBeacon = createBeacon(() => switchView("remote"));
 const sbModelChip = createModelChip();
 const sbIslandGit = el("div", { class: "sb-island sbi-git" }, sbBranch);
 const sbIslandFile = el(
   "div",
-  { class: "sb-island sbi-file", title: "Go to line", onClick: () => goToLine() },
+  { class: "sb-island sbi-file", title: t("chrome.goToLine"), onClick: () => goToLine() },
   sbCursor,
   sbLang,
   sbEnc,
@@ -357,12 +370,24 @@ async function restoreLayout() {
 
 // ---------------------------------------------------------------- status bar wiring
 
-on("editor-status", (s) => {
+// last editor status kept so applyChromeLang can re-render the file island live
+let lastEdStatus: { line: number | null; column: number | null; language: string } | null = null;
+function applyEditorStatus(): void {
+  const s = lastEdStatus;
+  if (!s) {
+    // boot placeholder — before the first editor-status event
+    sbCursor.textContent = t("chrome.lnCol", 1, 1);
+    return;
+  }
   // null line/column = non-text tab (image/preview/diff) or empty group — no fake cursor
-  sbCursor.textContent = s.line !== null && s.column !== null ? `Ln ${s.line}, Col ${s.column}` : "";
-  sbLang.textContent = s.language === "plaintext" ? "Plain Text" : s.language;
+  sbCursor.textContent = s.line !== null && s.column !== null ? t("chrome.lnCol", s.line, s.column) : "";
+  sbLang.textContent = s.language === "plaintext" ? t("chrome.plainText") : s.language;
   // encoding is a text-buffer fact; an image or empty group has none
   sbEnc.style.display = s.line !== null ? "" : "none";
+}
+on("editor-status", (s) => {
+  lastEdStatus = s;
+  applyEditorStatus();
 });
 
 onBranchChange((branch, ahead, behind) => {
@@ -409,57 +434,62 @@ function reg(id: string, title: string, handler: () => void, keybinding?: string
   registerCommand({ id, title, handler, keybinding, hidden });
 }
 
-reg("workbench.openFolder", "Open Folder…", () => {
-  void window.ide.dialog.openFolder().then((p) => {
-    if (!p) return;
-    if (state.root) window.ide.win.openWorkspaceWindow(p);
-    else void openWorkspace(p);
+// Titles come from t() — registerAllCommands re-runs on lang-changed so the
+// palette always lists commands in the current language (Map.set overwrites).
+function registerAllCommands(): void {
+  reg("workbench.openFolder", t("cmd.openFolder"), () => {
+    void window.ide.dialog.openFolder().then((p) => {
+      if (!p) return;
+      if (state.root) window.ide.win.openWorkspaceWindow(p);
+      else void openWorkspace(p);
+    });
+  }, "Ctrl+K Ctrl+O");
+  reg("workbench.quickOpen", t("cmd.quickOpen"), () => void openPalette("files"), "Ctrl+P");
+  reg("workbench.commandPalette", t("cmd.commandPalette"), () => void openPalette("commands"), "Ctrl+Shift+P");
+  reg("workbench.toggleTerminal", t("cmd.toggleTerminal"), () => toggleTerminal(), "Ctrl+`");
+  reg("workbench.newTerminal", t("cmd.newTerminal"), () => void createTerminal());
+  reg("workbench.settings", t("cmd.settings"), () => openSettingsDialog(), "Ctrl+,");
+  reg("workbench.zen", t("cmd.zen"), () => toggleZen(), "Ctrl+K Z");
+  reg("view.explorer", t("cmd.viewExplorer"), () => switchView("explorer"), "Ctrl+Shift+E");
+  reg("view.search", t("cmd.viewSearch"), () => switchView("search"), "Ctrl+Shift+F");
+  reg("view.outline", t("cmd.viewOutline"), () => switchView("outline"), "Ctrl+Shift+O");
+  reg("view.git", t("cmd.viewGit"), () => switchView("git"), "Ctrl+Shift+G");
+  reg("view.agent", t("cmd.viewAgent"), () => switchView("agent"), "Ctrl+Shift+A");
+  reg("file.save", t("cmd.fileSave"), () => void saveActive(), "Ctrl+S");
+  reg("file.saveAll", t("cmd.fileSaveAll"), () => void saveAll(), "Ctrl+K S");
+  reg("editor.closeTab", t("cmd.closeTab"), () => void closeActiveTab(), "Ctrl+W");
+  reg("editor.split", t("cmd.split"), () => splitEditor(), "Ctrl+\\");
+  reg("editor.nextTab", t("cmd.nextTab"), () => cycleTab(1), "Ctrl+Tab");
+  reg("editor.prevTab", t("cmd.prevTab"), () => cycleTab(-1), "Ctrl+Shift+Tab");
+  reg("editor.focusGroup1", t("cmd.focusGroup1"), () => focusGroup(0), "Ctrl+1");
+  reg("editor.focusGroup2", t("cmd.focusGroup2"), () => focusGroup(1), "Ctrl+2");
+  reg("editor.wordWrap", t("cmd.wordWrap"), () => toggleWordWrap(), "Alt+Z");
+  reg("editor.zoomIn", t("cmd.zoomIn"), () => zoomFont(1), "Ctrl+=");
+  reg("editor.zoomOut", t("cmd.zoomOut"), () => zoomFont(-1), "Ctrl+-");
+  reg("editor.goToLine", t("cmd.goToLine"), () => goToLine(), "Ctrl+G");
+  reg("editor.find", t("cmd.find"), () => findInFile(), "Ctrl+F");
+  reg("editor.markdownPreview", t("cmd.markdownPreview"), () => void openMarkdownPreview(), "Ctrl+Shift+V");
+  reg("git.branch", t("cmd.gitBranch"), () => void switchBranch());
+  reg("git.refresh", t("cmd.gitRefresh"), () => void refreshGit());
+  reg("agent.interrupt", t("cmd.agentInterrupt"), () => void window.ide.omp.abort(), "Ctrl+Shift+X");
+  reg("agent.newSession", t("cmd.agentNewSession"), () => void window.ide.omp.newSession());
+  reg("agent.restart", t("cmd.agentRestart"), () => void window.ide.omp.restart());
+  reg("agent.history", t("cmd.agentHistory"), () => openSessionHistory());
+  reg("model.switch", t("cmd.modelSwitch"), () => switchModelViaPicker("palette"));
+  reg("model.assignRole", t("cmd.modelAssignRole"), () => assignRoleViaPicker("palette"));
+  reg("model.settings", t("cmd.modelSettings"), () => openModelsDialog());
+  reg("model.apiTester", t("cmd.modelApiTester"), () => openApiTester());
+  reg("thinking.session", t("cmd.thinkingSession"), () => setSessionThinkingViaPicker("palette"));
+  reg("thinking.roleDefault", t("cmd.thinkingRole"), () => openModelsDialog());
+  reg("explorer.reveal", t("cmd.revealExplorer"), () => {
+    const p = activeFilePath();
+    if (p) {
+      switchView("explorer");
+      emit("reveal-in-tree", p);
+    }
   });
-}, "Ctrl+K Ctrl+O");
-reg("workbench.quickOpen", "Go to File…", () => void openPalette("files"), "Ctrl+P");
-reg("workbench.commandPalette", "Show All Commands", () => void openPalette("commands"), "Ctrl+Shift+P");
-reg("workbench.toggleTerminal", "Toggle Terminal", () => toggleTerminal(), "Ctrl+`");
-reg("workbench.newTerminal", "Terminal: New Terminal", () => void createTerminal());
-reg("workbench.settings", "Open Settings", () => openSettingsDialog(), "Ctrl+,");
-reg("workbench.zen", "Toggle Zen Mode", () => toggleZen(), "Ctrl+K Z");
-reg("view.explorer", "View: Explorer", () => switchView("explorer"), "Ctrl+Shift+E");
-reg("view.search", "View: Search", () => switchView("search"), "Ctrl+Shift+F");
-reg("view.outline", "View: Outline", () => switchView("outline"), "Ctrl+Shift+O");
-reg("view.git", "View: Source Control", () => switchView("git"), "Ctrl+Shift+G");
-reg("view.agent", "View: OMP Agent", () => switchView("agent"), "Ctrl+Shift+A");
-reg("file.save", "File: Save", () => void saveActive(), "Ctrl+S");
-reg("file.saveAll", "File: Save All", () => void saveAll(), "Ctrl+K S");
-reg("editor.closeTab", "Close Editor", () => void closeActiveTab(), "Ctrl+W");
-reg("editor.split", "Split Editor Right", () => splitEditor(), "Ctrl+\\");
-reg("editor.nextTab", "Next Editor Tab", () => cycleTab(1), "Ctrl+Tab");
-reg("editor.prevTab", "Previous Editor Tab", () => cycleTab(-1), "Ctrl+Shift+Tab");
-reg("editor.focusGroup1", "Focus First Editor Group", () => focusGroup(0), "Ctrl+1");
-reg("editor.focusGroup2", "Focus Second Editor Group", () => focusGroup(1), "Ctrl+2");
-reg("editor.wordWrap", "Toggle Word Wrap", () => toggleWordWrap(), "Alt+Z");
-reg("editor.zoomIn", "Editor: Zoom In", () => zoomFont(1), "Ctrl+=");
-reg("editor.zoomOut", "Editor: Zoom Out", () => zoomFont(-1), "Ctrl+-");
-reg("editor.goToLine", "Go to Line…", () => goToLine(), "Ctrl+G");
-reg("editor.find", "Find in File", () => findInFile(), "Ctrl+F");
-reg("editor.markdownPreview", "Markdown: Open Preview", () => void openMarkdownPreview(), "Ctrl+Shift+V");
-reg("git.branch", "Git: Switch Branch…", () => void switchBranch());
-reg("git.refresh", "Git: Refresh", () => void refreshGit());
-reg("agent.interrupt", "Agent: Interrupt", () => void window.ide.omp.abort(), "Ctrl+Shift+X");
-reg("agent.newSession", "Agent: New Session", () => void window.ide.omp.newSession());
-reg("agent.restart", "Agent: Restart Process", () => void window.ide.omp.restart());
-reg("agent.history", "Agent: Session History…", () => openSessionHistory());
-reg("model.switch", "Model: Switch…", () => switchModelViaPicker("palette"));
-reg("model.assignRole", "Model: Assign Role…", () => assignRoleViaPicker("palette"));
-reg("model.settings", "Model: Open Settings", () => openModelsDialog());
-reg("model.apiTester", "Model: API Tester…", () => openApiTester());
-reg("thinking.session", "Thinking: Set Level… (this session)", () => setSessionThinkingViaPicker("palette"));
-reg("thinking.roleDefault", "Thinking: Set Role Default…", () => openModelsDialog());
-reg("explorer.reveal", "Reveal Active File in Explorer", () => {
-  const p = activeFilePath();
-  if (p) {
-    switchView("explorer");
-    emit("reveal-in-tree", p);
-  }
-});
+}
+registerAllCommands();
 
 installKeybindings();
 installDialogEscape();
@@ -500,11 +530,11 @@ window.addEventListener("beforeunload", (e) => {
     e.preventDefault();
     e.returnValue = false;
     void choiceDialog({
-      title: "Unsaved changes",
-      message: "You have unsaved changes.",
+      title: t("ui.unsavedTitle"),
+      message: t("ui.unsavedMsg"),
       choices: [
-        { label: "Close Anyway", value: "discard", danger: true },
-        { label: "Save and Close", value: "save" },
+        { label: t("ui.closeAnyway"), value: "discard", danger: true },
+        { label: t("ui.saveAndClose"), value: "save" },
       ],
     }).then(async (choice) => {
       if (choice === null) return; // Cancel aborts the close

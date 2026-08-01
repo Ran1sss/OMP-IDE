@@ -125,7 +125,9 @@
 /* -- agent panel empty state: single slow aurora behind the capability card -- */
 .motion-full .agent-blank:not(.disabled-state) {
   position: relative;
-  overflow: hidden;
+  /* x clips the drifting aurora; y stays scrollable so short panels never
+     slice the hero content (audit clause e) */
+  overflow: hidden auto;
 }
 .motion-full .agent-blank:not(.disabled-state)::before {
   content: "";
@@ -146,7 +148,9 @@
 .motion-full .search-empty,
 .motion-full .cc-empty {
   position: relative;
-  overflow: hidden;
+  /* clip, not hidden: the rotated aurora must not create scrollable overflow
+     (scrollHeight stays == clientHeight — audit clause e stays green) */
+  overflow: clip;
 }
 .motion-full .search-empty::before,
 .motion-full .cc-empty::before {

@@ -124,7 +124,8 @@ export interface GitCommitInfo {
   shortHash: string;
   subject: string;
   author: string;
-  date: string;
+  /** author time, epoch ms — renderer formats per UI locale */
+  at: number;
 }
 
 // ---------------------------------------------------------------- omp agent
@@ -301,6 +302,7 @@ export type RemoteEventKind =
   | "command"
   | "blocked-unauthorized"
   | "watch"
+  | "dialog"
   | "system";
 
 export interface RemoteActivityEvent {
@@ -338,6 +340,8 @@ export interface RemoteChatInfo {
   watched: boolean;
   /** smart listener toggle — requires watched */
   listener: boolean;
+  /** Chat Dialogue: answer status questions from non-paired members (default OFF) */
+  answerMembers: boolean;
   /** bot was removed/kicked from the chat; the log survives */
   left: boolean;
   discoveredAt: number;
@@ -501,8 +505,6 @@ export interface ModelsState {
     capability: ThinkingCapability;
     /** level change queued to the run boundary */
     pending: ThinkingLevel | null;
-    /** one-shot boost armed for the in-flight send; cleared at turn end */
-    boost: ThinkingLevel | null;
   };
   /** auto-swap master toggle + per-role opt-outs */
   autoSwap: {
@@ -869,6 +871,8 @@ export interface IdeApi {
     getWatchState(): Promise<RemoteWatchState>;
     setChatWatched(botId: string, chatId: number, watched: boolean): Promise<void>;
     setChatListener(botId: string, chatId: number, listener: boolean): Promise<{ ok: boolean; error?: string }>;
+    /** Chat Dialogue: per-chat «отвечать участникам» toggle */
+    setChatAnswerMembers(botId: string, chatId: number, enabled: boolean): Promise<void>;
     /** drop a chat from the registry (unwatched or left only); optionally delete its JSONL log */
     removeChat(botId: string, chatId: number, deleteLog: boolean): Promise<{ ok: boolean; error?: string }>;
     /** designate the approver among a bot's paired users */
@@ -905,8 +909,6 @@ export interface IdeApi {
     setRoleThinking(role: ModelRole, level: ThinkingLevel, origin: string): Promise<void>;
     /** session-only override; null clears back to the role default */
     setSessionThinking(level: ThinkingLevel | null, origin: string): Promise<{ pending: boolean }>;
-    /** one-shot boost: raises thinking one level for exactly the next send */
-    boostOnce(origin: string): Promise<{ armed: boolean; level: ThinkingLevel | null; pending: boolean }>;
     getEvents(): Promise<ModelEvent[]>;
     // ---- auto-swap & balance
     /** balance probe endpoint (URL or base-relative path; "" clears) */

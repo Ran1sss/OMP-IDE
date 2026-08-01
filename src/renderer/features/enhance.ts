@@ -10,6 +10,8 @@
 
 import { el } from "../core/dom";
 import { registerCommand } from "../core/commands";
+import { t } from "../core/i18n";
+import { on } from "../core/bus";
 
 let input: HTMLTextAreaElement;
 let composerEl: HTMLElement;
@@ -17,7 +19,9 @@ let wrapEl: HTMLElement;
 let btn: HTMLButtonElement;
 let card: HTMLElement | null = null;
 let inFlight = false;
-let avail: { ok: boolean; reason?: string; model?: string } = { ok: false, reason: "checking…" };
+let avail: { ok: boolean; reason?: string; model?: string } = { ok: false };
+/** false until the first enhanceStatus() answer — tooltip shows «checking» */
+let statusKnown = false;
 
 export function initPromptEnhance(opts: { composer: HTMLElement; input: HTMLTextAreaElement }): void {
   composerEl = opts.composer;
@@ -60,16 +64,27 @@ export function initPromptEnhance(opts: { composer: HTMLElement; input: HTMLText
   void refreshStatus();
   window.ide.models.onState(() => void refreshStatus());
 
+  registerImproveCommand();
+  // live language switch: re-apply the tooltip + palette title; the advisory
+  // card is transient and closes rather than re-rendering stale text
+  on("lang-changed", () => {
+    applyTitle();
+    registerImproveCommand();
+    if (card && !inFlight) closeCard();
+  });
+
+  refreshVisibility();
+}
+
+function registerImproveCommand(): void {
   registerCommand({
     id: "agent.improveDraft",
-    title: "Prompt: Improve draft",
+    title: t("enh.cmdImprove"),
     keybinding: "Ctrl+E",
     category: "Agent",
     allowInInput: true,
     handler: () => void run(),
   });
-
-  refreshVisibility();
 }
 
 /** agent.ts calls this from its send path: sending always closes the card */
@@ -85,12 +100,17 @@ function refreshVisibility(): void {
   btn.style.display = draftLength() >= 8 ? "" : "none";
 }
 
+function applyTitle(): void {
+  btn.title = avail.ok
+    ? t("enh.tipOk")
+    : t("enh.tipUnavailable", statusKnown ? (avail.reason ?? t("enh.unavailableWord")) : t("enh.checking"));
+}
+
 async function refreshStatus(): Promise<void> {
   avail = await window.ide.models.enhanceStatus();
+  statusKnown = true;
   btn.classList.toggle("unavailable", !avail.ok);
-  btn.title = avail.ok
-    ? "Улучшить промпт · Ctrl+E · smol"
-    : `Улучшить промпт — ${avail.reason ?? "недоступно"}`;
+  applyTitle();
 }
 
 async function run(): Promise<void> {
@@ -126,11 +146,11 @@ function closeCard(): void {
 function showCard(text: string, model: string, draftAtRequest: string): void {
   const c = ensureCard();
   c.append(
-    el("div", { class: "ec-head mono", text: `✦ улучшено · smol · ${model}` }),
+    el("div", { class: "ec-head mono", text: t("enh.head", model) }),
     el("div", { class: "ec-body", text }),
     el("div", { class: "ec-actions" },
       el("button", {
-        class: "btn btn-primary ec-btn", text: "Заменить",
+        class: "btn btn-primary ec-btn", text: t("enh.replace"),
         onClick: () => {
           // mention chips live outside the textarea — untouched by design
           input.value = text;
@@ -139,14 +159,14 @@ function showCard(text: string, model: string, draftAtRequest: string): void {
         },
       }),
       el("button", {
-        class: "btn btn-ghost ec-btn", text: "Вставить ниже",
+        class: "btn btn-ghost ec-btn", text: t("enh.insertBelow"),
         onClick: () => {
           input.value = `${input.value.trimEnd() || draftAtRequest.trimEnd()}\n\n${text}`;
           closeCard();
           input.focus();
         },
       }),
-      el("button", { class: "btn btn-ghost ec-btn", text: "Отклонить", onClick: () => closeCard() }),
+      el("button", { class: "btn btn-ghost ec-btn", text: t("enh.dismiss"), onClick: () => closeCard() }),
     ),
   );
 }
@@ -156,8 +176,8 @@ function showError(reason: string): void {
   c.classList.add("error");
   c.append(
     el("div", { class: "ec-err" },
-      el("span", { class: "ec-err-text", text: `✦ не вышло: ${reason}` }),
-      el("button", { class: "btn btn-ghost ec-btn", text: "повторить", onClick: () => { closeCard(); void run(); } }),
+      el("span", { class: "ec-err-text", text: t("enh.failed", reason) }),
+      el("button", { class: "btn btn-ghost ec-btn", text: t("enh.retry"), onClick: () => { closeCard(); void run(); } }),
     ),
   );
 }

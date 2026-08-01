@@ -9,7 +9,7 @@ import { el, clear, svgIcon } from "../core/dom";
 import { I } from "../core/icons";
 import { on, emit } from "../core/bus";
 import { state, normPath, joinPath } from "../core/state";
-import { toast } from "../core/ui";
+import { t as tr } from "../core/i18n";
 
 interface TermTab {
   id: string;
@@ -70,9 +70,8 @@ function renderHeader() {
         el("span", { text: t.name }),
         (() => {
           const b = el("span", {
-            class: "icon-btn",
-            title: "Kill terminal",
-            style: { width: "16px", height: "16px" },
+            class: "icon-btn term-tab-x",
+            title: tr("term.kill"),
             onClick: (e) => {
               e.stopPropagation();
               void killTab(t.id);
@@ -86,7 +85,7 @@ function renderHeader() {
   }
   const addBtn = el("button", {
     class: "icon-btn",
-    title: "New terminal",
+    title: tr("term.new"),
     onClick: () => void createTerminal(),
   });
   addBtn.append(svgIcon(I.plus));
@@ -94,7 +93,7 @@ function renderHeader() {
   headerEl.append(el("span", { style: { flex: "1" } }));
   const hideBtn = el("button", {
     class: "icon-btn",
-    title: "Hide terminal (Ctrl+`)",
+    title: tr("term.hide"),
     onClick: () => toggleTerminal(),
   });
   hideBtn.append(svgIcon(I.chevronDown));
@@ -207,14 +206,14 @@ function markDead(tab: TermTab, exitCode?: number, error?: string) {
   const card = el(
     "div",
     { class: "restart-card" },
-    el("div", { class: "rc-title", text: "Terminal process exited" }),
+    el("div", { class: "rc-title", text: tr("term.exited") }),
     el("div", {
       class: "rc-detail",
-      text: error ?? (exitCode !== undefined ? `exit code ${exitCode}` : "process ended"),
+      text: error ?? (exitCode !== undefined ? tr("term.exitCode", exitCode) : tr("term.ended")),
     }),
     el("button", {
       class: "btn btn-primary",
-      text: "Restart Terminal",
+      text: tr("term.restart"),
       onClick: () => {
         void restartTab(tab);
       },
@@ -301,5 +300,7 @@ export function initTerminal(region: HTMLElement) {
   });
 
   on("relayout", () => fitActiveTerminal());
+  // persistent header: re-render tooltips on language switch
+  on("lang-changed", () => renderHeader());
   window.addEventListener("resize", () => fitActiveTerminal());
 }

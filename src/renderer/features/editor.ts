@@ -12,6 +12,7 @@ import { state, baseName, relPath, languageForPath, imageMime, normPath, noteRec
 import { toast, confirmDialog, choiceDialog, contextMenu, errorText } from "../core/ui";
 import { setMentionDragData } from "./mentions";
 import { fuzzyMatchMulti } from "../core/fuzzy";
+import { t } from "../core/i18n";
 
 // ---------------------------------------------------------------- monaco env
 
@@ -260,7 +261,7 @@ function renderTabs(g: EditorGroup) {
           } catch {}
         },
       },
-      tab.dirty ? el("span", { class: "tab-dirty", title: "Unsaved changes" }) : null,
+      tab.dirty ? el("span", { class: "tab-dirty", title: t("ed.unsavedTooltip") }) : null,
       el("span", { text: tab.title }),
       closeBtn,
     );
@@ -311,7 +312,7 @@ function collapseTabOverflow(g: EditorGroup, makeTabNode: (t: EditorTab) => HTML
   }
   const pill = el("div", {
     class: "tab-overflow",
-    title: `${hidden.length} hidden tab${hidden.length > 1 ? "s" : ""}`,
+    title: t("ed.hiddenTabs", hidden.length),
     onClick: (e) => {
       e.stopPropagation();
       showTabOverflowPopover(g, hidden, pill);
@@ -323,7 +324,7 @@ function collapseTabOverflow(g: EditorGroup, makeTabNode: (t: EditorTab) => HTML
 /** Overflow popover: fuzzy-filterable hidden-tab list; Enter activates, × closes. */
 function showTabOverflowPopover(g: EditorGroup, hidden: EditorTab[], anchor: HTMLElement) {
   document.querySelector(".tab-overflow-pop")?.remove();
-  const input = el("input", { class: "input top-filter", placeholder: "filter tabs…" }) as HTMLInputElement;
+  const input = el("input", { class: "input top-filter", placeholder: t("ed.filterTabs") }) as HTMLInputElement;
   const list = el("div", { class: "top-list" });
   const pop = el("div", { class: "tab-overflow-pop" }, input, list);
   let items: { tab: EditorTab; row: HTMLElement }[] = [];
@@ -337,7 +338,7 @@ function showTabOverflowPopover(g: EditorGroup, hidden: EditorTab[], anchor: HTM
       if (q && !fuzzyMatchMulti(q, tab.title)) continue;
       const x = el("span", {
         class: "top-x",
-        title: "Close",
+        title: t("ed.close"),
         onClick: (e) => {
           e.stopPropagation();
           void closeTab(tab.key, { group: g }).then(() => pop.remove());
@@ -406,16 +407,16 @@ function showTabMenu(g: EditorGroup, tab: EditorTab, x: number, y: number) {
   // item duplicates via the same shared-push path splitEditor uses (same object).
   const other = groups.find((gr) => gr !== g && !gr.tabs.includes(tab)) ?? null;
   contextMenu(x, y, [
-    { label: "Close", key: "Ctrl+W", action: () => void closeTab(tab.key, { group: g }) },
-    { label: "Close Others", action: () => void closeOthers(g, tab.key) },
-    { label: "Close All", action: () => void closeAllInGroup(g) },
+    { label: t("ed.close"), key: "Ctrl+W", action: () => void closeTab(tab.key, { group: g }) },
+    { label: t("ed.closeOthers"), action: () => void closeOthers(g, tab.key) },
+    { label: t("ed.closeAll"), action: () => void closeAllInGroup(g) },
     ...(other
-      ? [{ label: "Duplicate into Other Group", action: () => duplicateIntoGroup(tab, other) }]
+      ? [{ label: t("ed.duplicateOther"), action: () => duplicateIntoGroup(tab, other) }]
       : []),
     { separator: true },
-    { label: "Copy Path", action: () => void navigator.clipboard.writeText(tab.path) },
+    { label: t("ed.copyPath"), action: () => void navigator.clipboard.writeText(tab.path) },
     ...(tab.kind === "file"
-      ? [{ label: "Reveal in Explorer", action: () => revealInExplorer(tab.path) }]
+      ? [{ label: t("ed.revealInExplorer"), action: () => revealInExplorer(tab.path) }]
       : []),
   ]);
 }
@@ -447,9 +448,9 @@ function renderEmpty(host: HTMLElement) {
     el(
       "div",
       { class: "editor-empty" },
-      el("div", { class: "hint-row" }, el("span", { class: "keycap", text: "Ctrl" }), el("span", { class: "keycap", text: "P" }), el("span", { text: "open file" })),
-      el("div", { class: "hint-row" }, el("span", { class: "keycap", text: "Ctrl" }), el("span", { class: "keycap", text: "Shift" }), el("span", { class: "keycap", text: "P" }), el("span", { text: "command palette" })),
-      el("div", { class: "hint-row" }, el("span", { class: "keycap", text: "Ctrl" }), el("span", { class: "keycap", text: "`" }), el("span", { text: "terminal" })),
+      el("div", { class: "hint-row" }, el("span", { class: "keycap", text: "Ctrl" }), el("span", { class: "keycap", text: "P" }), el("span", { text: t("ed.hintOpenFile") })),
+      el("div", { class: "hint-row" }, el("span", { class: "keycap", text: "Ctrl" }), el("span", { class: "keycap", text: "Shift" }), el("span", { class: "keycap", text: "P" }), el("span", { text: t("ed.hintPalette") })),
+      el("div", { class: "hint-row" }, el("span", { class: "keycap", text: "Ctrl" }), el("span", { class: "keycap", text: "`" }), el("span", { text: t("ed.hintTerminal") })),
     ),
   );
 }
@@ -498,8 +499,8 @@ function emitEditorStatus(g: EditorGroup) {
     return;
   }
   const language =
-    tab.kind === "image" ? "Image"
-    : tab.kind === "mdprev" ? "Markdown Preview"
+    tab.kind === "image" ? t("ed.statusImage")
+    : tab.kind === "mdprev" ? t("ed.statusMdPreview")
     : tab.diff?.language ?? "diff";
   emit("editor-status", { path: tab.path, line: null, column: null, language });
 }
@@ -704,7 +705,7 @@ function renderCrumbs(g: EditorGroup, tab: EditorTab | null) {
       el("button", {
         class: i === parts.length - 1 ? "crumb crumb-file" : "crumb",
         text: p,
-        title: "Reveal in Explorer",
+        title: t("ed.revealInExplorer"),
         onClick: () => revealInExplorer(tab.path),
       }),
     );
@@ -780,7 +781,7 @@ async function updateSymbolTrail(g: EditorGroup, tab: EditorTab) {
       el("button", {
         class: "crumb crumb-symbol",
         text: item.text,
-        title: "Siblings…",
+        title: t("ed.siblings"),
         onClick: (e) => {
           const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
           contextMenu(
@@ -939,7 +940,7 @@ export async function openFile(
       g.tabs.push(tab);
       activateTab(g, key);
     } catch (err) {
-      toast(`Cannot open ${baseName(key)}: ${errorText(err)}`, { crit: true });
+      toast(t("ed.cannotOpen", baseName(key), errorText(err)), { crit: true });
     }
     return;
   }
@@ -947,7 +948,7 @@ export async function openFile(
   try {
     const res = await window.ide.fs.readFile(key);
     if (res.binary) {
-      toast(`${baseName(key)} is a binary file`, { crit: false });
+      toast(t("ed.binaryFile", baseName(key)), { crit: false });
       return;
     }
     const model = monaco.editor.createModel(res.content, languageForPath(key), monaco.Uri.file(key));
@@ -968,7 +969,7 @@ export async function openFile(
     revealPosition(pos);
     noteRecentFile(key);
   } catch (err) {
-    toast(`Cannot open ${baseName(key)}: ${errorText(err)}`, { crit: true });
+    toast(t("ed.cannotOpen", baseName(key), errorText(err)), { crit: true });
   }
 }
 
@@ -1016,11 +1017,11 @@ export async function closeTab(key: string, opts: { force?: boolean; group?: Edi
   // Shared across splits: only the LAST view closing can drop unsaved work.
   if (tab.dirty && !opts.force && viewCount(tab) === 1) {
     const choice = await choiceDialog({
-      title: "Unsaved changes",
-      message: `"${tab.title}" has unsaved changes.`,
+      title: t("ed.unsavedTitle"),
+      message: t("ed.unsavedMsg", tab.title),
       choices: [
-        { label: "Close Anyway", value: "discard", danger: true },
-        { label: "Save and Close", value: "save" },
+        { label: t("ed.closeAnyway"), value: "discard", danger: true },
+        { label: t("ed.saveAndClose"), value: "save" },
       ],
     });
     if (choice === null) return false;
@@ -1150,7 +1151,7 @@ function renderSwitcher() {
           commitSwitcher();
         },
       },
-      tab.dirty ? el("span", { class: "tab-dirty", title: "Unsaved changes" }) : null,
+      tab.dirty ? el("span", { class: "tab-dirty", title: t("ed.unsavedTooltip") }) : null,
       el("span", { class: "ts-title", text: tab.title }),
       el("span", { class: "ts-path", text: relPath(tab.path) }),
     );
@@ -1213,7 +1214,7 @@ export function focusGroup(index: number) {
 export async function openMarkdownPreview() {
   const src = activeTab();
   if (!src || src.kind !== "file" || !/\.(md|markdown)$/i.test(src.path)) {
-    toast("Markdown preview: open a .md file first");
+    toast(t("ed.mdPreviewFirst"));
     return;
   }
   const key = `mdprev:${src.key}`;
@@ -1226,7 +1227,7 @@ export async function openMarkdownPreview() {
   const g = focusedGroupObj();
   if (!g) return;
   const tab: EditorTab = {
-    key, kind: "mdprev", path: src.path, title: `Preview: ${src.title}`,
+    key, kind: "mdprev", path: src.path, title: t("ed.previewTitle", src.title),
     preview: src.model?.getValue() ?? "", dirty: false, diskMtime: 0, savedVersionId: 0,
   };
   g.tabs.push(tab);
@@ -1280,7 +1281,7 @@ async function refreshDiffTab(tab: EditorTab) {
   } else {
     try {
       const res = await window.ide.fs.readFile(tab.path);
-      current = res.binary ? "(binary)" : res.content;
+      current = res.binary ? t("ed.binaryContent") : res.content;
     } catch { /* deleted since open: diff against empty */ }
   }
   if (head === tab.diff.original && current === tab.diff.modified) return; // unrelated change: no churn
@@ -1327,7 +1328,7 @@ export async function saveTab(tab: EditorTab): Promise<boolean> {
     void refreshGitGutter(tab);
     return true;
   } catch (err) {
-    toast(`Save failed: ${errorText(err)}`, { crit: true });
+    toast(t("ed.saveFailed", errorText(err)), { crit: true });
     return false;
   }
 }
@@ -1448,7 +1449,7 @@ function removeGroup(g: EditorGroup) {
 /** Ctrl+\: open a second group; the active tab is DUPLICATED into it (shared buffer, two views). */
 export function splitEditor() {
   if (groups.length >= 2) {
-    toast("Two editor groups max");
+    toast(t("ed.twoGroupsMax"));
     return;
   }
   const src = focusedGroupObj();
@@ -1473,7 +1474,7 @@ export function splitEditor() {
 export function toggleWordWrap() {
   wordWrap = !wordWrap;
   for (const g of groups) g.editor?.updateOptions({ wordWrap: wordWrap ? "on" : "off" });
-  toast(`Word wrap ${wordWrap ? "on" : "off"}`);
+  toast(t(wordWrap ? "ed.wordWrapOn" : "ed.wordWrapOff"));
 }
 
 export function zoomFont(delta: number) {
@@ -1563,9 +1564,9 @@ async function reconcileExternalChange(path: string) {
 
   // Dirty buffer: conflict prompt.
   const useDisk = await confirmDialog({
-    title: "File changed on disk",
-    message: `"${tab.title}" was modified outside the editor while you have unsaved changes. Load the disk version and lose your edits?`,
-    confirmLabel: "Load From Disk",
+    title: t("ed.diskChangedTitle"),
+    message: t("ed.diskChangedMsg", tab.title),
+    confirmLabel: t("ed.loadFromDisk"),
     danger: true,
   });
   if (useDisk) {
@@ -1585,7 +1586,7 @@ function handleDeleted(path: string) {
   const first = findTab(key);
   if (!first) return;
   if (first.tab.dirty) {
-    toast(`${first.tab.title} was deleted on disk — buffer kept`, { crit: true });
+    toast(t("ed.deletedKept", first.tab.title), { crit: true });
     return;
   }
   // close every split view of the file (force path never awaits — mutations are sync)
@@ -1625,6 +1626,16 @@ export function initEditorArea(container: HTMLElement) {
   on("user-saved", (path) => {
     void refreshMarkdownPreview(path);
     refreshDiffTabs(path);
+  });
+  // persistent surfaces: tab strip tooltips, empty-state hints, crumbs, status kind labels
+  on("lang-changed", () => {
+    for (const g of groups) {
+      renderTabs(g);
+      const tab = g.active ? g.tabs.find((tb) => tb.key === g.active) ?? null : null;
+      if (!tab) renderEmpty(g.hostEl);
+      else renderCrumbs(g, tab);
+      emitEditorStatus(g);
+    }
   });
 
   window.addEventListener("resize", relayoutEditors);

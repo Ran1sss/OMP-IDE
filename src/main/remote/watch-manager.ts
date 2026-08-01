@@ -32,6 +32,7 @@ import {
 } from "./watch-store";
 import { appendChatLog, readChatLogPage, chatLogPath, deleteChatLog } from "./chat-log";
 import { evaluateTranscript, oneshotAvailable, smolSelector } from "./oneshot";
+import { routeIntent, answerQuestion } from "./dialogue";
 import { tg, tgLangFor, type TgLang } from "./tg-i18n";
 import { reportOneshotError } from "../models/manager";
 import { escapeMd } from "./format";
@@ -55,7 +56,7 @@ interface ChatRuntimeState {
 /** host services the watch layer borrows from RemoteManager */
 export interface WatchHost {
   runtime(botId: string): BotRuntime | undefined;
-  log(botId: string, sender: string, detail: string): void;
+  log(botId: string, sender: string, detail: string, kind?: "watch" | "dialog" | "blocked-unauthorized"): void;
 }
 
 export class WatchManager {
@@ -177,14 +178,21 @@ export class WatchManager {
     chat.messageCount++;
     saveWatchStore();
 
-    // 2. fast path — deterministic, no model; edits never re-propose
+    // 2. addressed / explicit-task path — `omp:` stays a deterministic task
+    //    marker; mentions and replies-to-bot route through the Chat Dialogue
+    //    intent router (question ≠ task). Edits never re-propose or re-answer.
     if (!gm.edit && !chat.proposedIds.includes(gm.messageId)) {
       const trimmed = gm.text.trim();
-      const prefixed = trimmed.toLowerCase().startsWith(TASK_PREFIX);
-      if (gm.mentionsBot || gm.replyToBot || prefixed) {
-        const headline = prefixed ? trimmed.slice(TASK_PREFIX.length).trim() : trimmed;
-        if (headline && !trimmed.startsWith("/")) {
-          this.propose(botId, chat, gm.messageId, gm.author, gm.text, headline, gm.mentionsBot ? "mention" : gm.replyToBot ? "reply" : "prefix");
+      if (trimmed && !trimmed.startsWith("/")) {
+        if (trimmed.toLowerCase().startsWith(TASK_PREFIX)) {
+          const headline = trimmed.slice(TASK_PREFIX.length).trim();
+          if (headline) {
+            this.propose(botId, chat, gm.messageId, gm.author, gm.text, headline, "prefix");
+            this.pushWatchState();
+            return;
+          }
+        } else if (gm.mentionsBot || gm.replyToBot) {
+          void this.routeAddressed(botId, gm, gm.mentionsBot ? "mention" : "reply");
           this.pushWatchState();
           return;
         }
@@ -215,6 +223,71 @@ export class WatchManager {
     const res = this.decide(id, verb === "do", `@${username}`);
     ack(res.ok ? (verb === "do" ? "Started" : "Skipped") : res.decidedBy ? `Already decided by ${res.decidedBy}` : "No longer pending");
     return true;
+  }
+
+  // ================================================== chat dialogue (addressed messages)
+
+  /** pairing is the identity check (spec §2) */
+  private isPaired(botId: string, userId: number): boolean {
+    const bot = loadStore().bots.find((b) => b.id === botId);
+    return !!bot?.paired.some((u) => u.telegramId === userId);
+  }
+
+  /** fixed-string locale for a group member: paired → stored code, else script of their message */
+  private memberLang(botId: string, userId: number, sample: string): TgLang {
+    const bot = loadStore().bots.find((b) => b.id === botId);
+    const paired = bot?.paired.find((u) => u.telegramId === userId);
+    if (paired) return tgLangFor(paired.languageCode);
+    return /[А-Яа-яЁё]/.test(sample) ? "ru" : "en";
+  }
+
+  /**
+   * An addressed group message (mention / reply-to-bot): classify first
+   * (spec §2 — question ≠ task), then answer / propose / both / ignore.
+   * The approval gate NEVER weakens: a task from a group member is always
+   * a proposal, and classification errors fall back to pre-dialogue
+   * behavior (propose as-is).
+   */
+  private async routeAddressed(botId: string, gm: GroupMessage, source: "mention" | "reply"): Promise<void> {
+    const botUsername = loadStore().bots.find((b) => b.id === botId)?.username;
+    const context = readChatLogPage(botId, gm.chatId, undefined, 5)
+      .reverse()
+      .map((e) => `${e.author}: ${e.text.slice(0, 150)}`);
+    const verdict = await routeIntent(gm.text, context, botUsername);
+    const chat = findChat(botId, gm.chatId);
+    if (!chat || this.disposed) return;
+
+    if (verdict.intent === "error") {
+      this.host.log(botId, "system", `intent routing failed — proposing as-is: ${verdict.error.slice(0, 100)}`);
+      this.propose(botId, chat, gm.messageId, gm.author, gm.text, gm.text.trim().slice(0, 200), source);
+      this.pushWatchState();
+      return;
+    }
+    if (verdict.intent === "other") return; // group noise → silence (spec §2)
+
+    if (verdict.intent === "task" || verdict.intent === "mixed") {
+      const headline = verdict.intent === "mixed" ? verdict.taskLine : gm.text.trim().slice(0, 200);
+      this.propose(botId, chat, gm.messageId, gm.author, gm.text, headline, source);
+    }
+    if (verdict.intent === "question" || verdict.intent === "mixed") {
+      const allowed = this.isPaired(botId, gm.authorId) || !!chat.answerMembers;
+      if (!allowed) {
+        // silent to the chat; visible to the operator (acceptance 7)
+        this.host.log(botId, `@${gm.author}`, `dialog blocked (member answers off): ${gm.text.slice(0, 90)}`, "blocked-unauthorized");
+      } else {
+        const res = await answerQuestion({ botId, chatId: gm.chatId, question: gm.text, asker: gm.author, isGroup: true });
+        const rt = this.host.runtime(botId);
+        const cur = findChat(botId, gm.chatId);
+        if (res.ok) {
+          rt?.sendMd(gm.chatId, escapeMd(res.answer));
+          this.host.log(botId, `@${gm.author}`, `#${cur?.title ?? gm.chatTitle} «${gm.text.slice(0, 70)}» → ${res.answer.slice(0, 90)}`, "dialog");
+        } else {
+          rt?.sendMd(gm.chatId, escapeMd(tg(this.memberLang(botId, gm.authorId, gm.text)).dialogFailed));
+          this.host.log(botId, "system", `dialog answer failed: ${res.error.slice(0, 120)}`);
+        }
+      }
+    }
+    this.pushWatchState();
   }
 
   // ================================================== listener batching
@@ -509,6 +582,16 @@ export class WatchManager {
     return { ok: true };
   }
 
+  /** Chat Dialogue: «отвечать участникам» — read-only answers for non-paired members */
+  setChatAnswerMembers(botId: string, chatId: number, enabled: boolean): void {
+    const chat = findChat(botId, chatId);
+    if (!chat || chat.left) return;
+    chat.answerMembers = enabled;
+    saveWatchStore();
+    this.host.log(botId, "system", `member answers ${enabled ? "on" : "off"} in "${chat.title}"`);
+    this.pushWatchState();
+  }
+
   /**
    * Drop a chat card from the registry. Guarded to inactive chats (left or
    * unwatched) — actively watched chats must be unwatched first so a stray
@@ -594,6 +677,7 @@ export class WatchManager {
               : "",
           watched: c.watched,
           listener: c.listener,
+          answerMembers: !!c.answerMembers,
           left: c.left,
           discoveredAt: c.discoveredAt,
           messageCount: c.messageCount,

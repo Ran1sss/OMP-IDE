@@ -393,6 +393,8 @@
   background: var(--gold-15);
 }
 .feed-row.blocked .fr-kind { color: var(--crit); background: var(--crit-15); }
+/* Chat Dialogue exchanges: the operator sees what the bot said on their behalf */
+.feed-row.dialog .fr-kind { color: var(--power); background: var(--power-15); }
 .feed-row .fr-sender { font-family: var(--font-mono); font-size: 10.5px; color: var(--text-mid); flex-shrink: 0; }
 .feed-row .fr-detail { overflow: hidden; text-overflow: ellipsis; }
 .feed-row .fr-bot { margin-left: auto; font-size: 10px; color: var(--text-low); flex-shrink: 0; }
@@ -458,7 +460,8 @@
 
 .wc-meta { display: flex; align-items: center; gap: 10px; font-size: 10.5px; color: var(--text-low); }
 .wc-meta .mono { color: var(--text-mid); }
-.wc-viewlog { padding: 1px 8px; font-size: 10.5px; white-space: nowrap; flex-shrink: 0; }
+/* hit-size law (audit d): reads small, taps at ≥22px */
+.wc-viewlog { padding: 4px 8px; min-height: 22px; font-size: 10.5px; white-space: nowrap; flex-shrink: 0; }
 /* log path: MIDDLE ellipsis — head shrinks with ellipsis, tail stays whole */
 .wc-logpath {
   font-size: 9.5px;

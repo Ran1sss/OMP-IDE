@@ -115,7 +115,6 @@ export interface ThinkingControl {
   describe(): {
     effective: ThinkingLevel;
     override: ThinkingLevel | null;
-    boost: ThinkingLevel | null;
     capability: string;
   };
   setSession(level: string, origin: string): { ok: boolean; pending?: boolean; error?: string };

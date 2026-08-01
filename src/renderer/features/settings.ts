@@ -1,6 +1,7 @@
 /** Minimal settings UI over the JSON store. */
 
 import { el } from "../core/dom";
+import { on } from "../core/bus";
 import { state } from "../core/state";
 import { toast } from "../core/ui";
 import { refreshCrumbs } from "./editor";
@@ -10,61 +11,70 @@ import type { Settings } from "../../shared/types";
 
 let settingsClose: (() => void) | null = null;
 
-export function openSettingsDialog(): void {
+/** raw field snapshot — carries unsaved edits across a live language switch */
+interface SettingsDraft {
+  accent: string; font: string; shell: string; omp: string; stall: string;
+  crumb: string; switcher: string; motion: string; glass: string; lang: string;
+}
+
+export function openSettingsDialog(initial?: SettingsDraft): void {
   // singleton: re-invoking closes the existing dialog first
   settingsClose?.();
   const overlay = el("div", { class: "overlay centered" });
+  let offLang: (() => void) | null = null;
   const close = () => {
+    offLang?.();
+    offLang = null;
     if (settingsClose === close) settingsClose = null;
     overlay.classList.remove("visible");
     setTimeout(() => overlay.remove(), 170);
   };
   settingsClose = close;
 
-  const accentInput = el("input", { class: "input mono", value: state.settings.accent }) as HTMLInputElement;
-  const fontInput = el("input", { class: "input mono", type: "number", value: String(state.settings.fontSize) }) as HTMLInputElement;
-  const shellInput = el("input", { class: "input mono", value: state.settings.terminalShell, placeholder: "powershell.exe (default)" }) as HTMLInputElement;
-  const ompInput = el("input", { class: "input mono", value: state.settings.ompPath, placeholder: "resolved from PATH" }) as HTMLInputElement;
-  const stallInput = el("input", { class: "input mono", type: "number", value: String(state.settings.stallSeconds) }) as HTMLInputElement;
+  const accentInput = el("input", { class: "input mono", value: initial?.accent ?? state.settings.accent }) as HTMLInputElement;
+  const fontInput = el("input", { class: "input mono", type: "number", value: initial?.font ?? String(state.settings.fontSize) }) as HTMLInputElement;
+  const shellInput = el("input", { class: "input mono", value: initial?.shell ?? state.settings.terminalShell, placeholder: t("set.shellPh") }) as HTMLInputElement;
+  const ompInput = el("input", { class: "input mono", value: initial?.omp ?? state.settings.ompPath, placeholder: t("set.ompPh") }) as HTMLInputElement;
+  const stallInput = el("input", { class: "input mono", type: "number", value: initial?.stall ?? String(state.settings.stallSeconds) }) as HTMLInputElement;
   const crumbSelect = el("select", { class: "input" }) as HTMLSelectElement;
   for (const [value, label] of [
-    ["auto", "Auto — only when a symbol trail can show"],
-    ["on", "On — always"],
-    ["off", "Off"],
+    ["auto", t("set.crumbAuto")],
+    ["on", t("set.crumbOn")],
+    ["off", t("set.crumbOff")],
   ] as const) {
     const opt = el("option", { text: label }) as HTMLOptionElement;
     opt.value = value;
     crumbSelect.append(opt);
   }
-  crumbSelect.value = state.settings.breadcrumbs;
+  crumbSelect.value = initial?.crumb ?? state.settings.breadcrumbs;
 
   const switcherSelect = el("select", { class: "input" }) as HTMLSelectElement;
   for (const [value, label] of [
-    ["mru", "Most recently used (hold Ctrl for switcher)"],
-    ["strip", "Tab-strip order (plain cycle)"],
+    ["mru", t("set.switcherMru")],
+    ["strip", t("set.switcherStrip")],
   ] as const) {
     switcherSelect.append(el("option", { value, text: label }));
   }
-  switcherSelect.value = state.settings.tabSwitcher;
+  switcherSelect.value = initial?.switcher ?? state.settings.tabSwitcher;
 
   const motionSelect = el("select", { class: "input" }) as HTMLSelectElement;
   for (const [value, label] of [
-    ["full", "Full — events + ambient atmosphere"],
-    ["events", "Events — Kinetic Reactor only, no ambient"],
-    ["minimal", "Minimal — color snaps, no movement"],
+    ["full", t("set.motionFull")],
+    ["events", t("set.motionEvents")],
+    ["minimal", t("set.motionMinimal")],
   ] as const) {
     motionSelect.append(el("option", { value, text: label }));
   }
-  motionSelect.value = state.settings.motion;
+  motionSelect.value = initial?.motion ?? state.settings.motion;
 
   const glassSelect = el("select", { class: "input" }) as HTMLSelectElement;
   for (const [value, label] of [
-    ["off", "Glass — floating layers blur (default)"],
-    ["on", "Reduce transparency — opaque surfaces"],
+    ["off", t("set.glassOff")],
+    ["on", t("set.glassOn")],
   ] as const) {
     glassSelect.append(el("option", { value, text: label }));
   }
-  glassSelect.value = state.settings.reduceTransparency ? "on" : "off";
+  glassSelect.value = initial?.glass ?? (state.settings.reduceTransparency ? "on" : "off");
 
   // UI language (remote-fix 4): global, default = OS locale
   const langSelect = el("select", { class: "input" }) as HTMLSelectElement;
@@ -75,7 +85,7 @@ export function openSettingsDialog(): void {
   ] as const) {
     langSelect.append(el("option", { value, text: label }));
   }
-  langSelect.value = state.settings.uiLang ?? "auto";
+  langSelect.value = initial?.lang ?? state.settings.uiLang ?? "auto";
 
   const save = async () => {
     const stallRaw = parseInt(stallInput.value, 10);
@@ -96,10 +106,12 @@ export function openSettingsDialog(): void {
     state.settings = await window.ide.store.setSettings(patch);
     applyAccent(state.settings.accent);
     applyMotion(state.settings.motion, state.settings.reduceTransparency);
+    // close BEFORE applyLang: lang-changed would otherwise re-open the dialog
+    // through the live-rebuild subscription (save = the dialog is done)
+    close();
     applyLang(resolveLang(state.settings.uiLang));
     refreshCrumbs();
-    toast("Settings saved");
-    close();
+    toast(t("set.saved"));
   };
 
   const field = (label: string, input: HTMLElement, note?: string) =>
@@ -114,26 +126,26 @@ export function openSettingsDialog(): void {
   const dialog = el(
     "div",
     { class: "dialog", style: { minWidth: "440px" } },
-    el("h2", { text: "Settings" }),
+    el("h2", { text: t("chrome.settings") }),
     el(
       "div",
       { class: "settings-form" },
-      field("Theme accent (agent color)", accentInput, "Hex color; drives the energy palette"),
-      field("Editor font size", fontInput, "9–28 px, also Ctrl+= / Ctrl+-"),
-      field("Terminal shell", shellInput, "Full path to shell executable; blank = system default"),
-      field("omp binary path", ompInput, "Blank = resolve from PATH. Restart the agent after changing."),
-      field("Agent stall warning (seconds)", stallInput, "Nudge card when the model streams nothing. 0 = off, minimum 5. Default 20."),
-      field("Breadcrumbs", crumbSelect, "Auto hides the bar when only the file path would show (non-TS/JS files)."),
-      field("Ctrl+Tab order", switcherSelect, "MRU shows a switcher while Ctrl is held (2-tab groups always plain-cycle)."),
-      field("Motion", motionSelect, "Ambient nebulae pause on blur/battery; OS reduced-motion demotes Full to Events."),
-      field("Transparency", glassSelect, "Reduce = every glass surface goes opaque. Auto-engages when Motion is Minimal."),
+      field(t("set.accent"), accentInput, t("set.accentHint")),
+      field(t("set.fontSize"), fontInput, t("set.fontSizeHint")),
+      field(t("set.shell"), shellInput, t("set.shellHint")),
+      field(t("set.ompPath"), ompInput, t("set.ompHint")),
+      field(t("set.stall"), stallInput, t("set.stallHint")),
+      field(t("set.crumbs"), crumbSelect, t("set.crumbsHint")),
+      field(t("set.tabOrder"), switcherSelect, t("set.tabOrderHint")),
+      field(t("set.motion"), motionSelect, t("set.motionHint")),
+      field(t("set.transparency"), glassSelect, t("set.transparencyHint")),
       field(t("set.language"), langSelect, ""),
     ),
     el(
       "div",
       { class: "dialog-actions" },
-      el("button", { class: "btn", text: "Cancel", onClick: close }),
-      el("button", { class: "btn btn-primary", text: "Save", onClick: () => void save() }),
+      el("button", { class: "btn", text: t("ui.cancel"), onClick: close }),
+      el("button", { class: "btn btn-primary", text: t("ui.save"), onClick: () => void save() }),
     ),
   );
   overlay.append(dialog);
@@ -144,6 +156,18 @@ export function openSettingsDialog(): void {
     if (e.key === "Escape") close();
   });
   document.body.append(overlay);
+  // live language switch (e.g. from the Remote header selector) rebuilds the
+  // open dialog in the new language, carrying unsaved edits (audit Part B)
+  offLang = on("lang-changed", () => {
+    const draft: SettingsDraft = {
+      accent: accentInput.value, font: fontInput.value, shell: shellInput.value,
+      omp: ompInput.value, stall: stallInput.value, crumb: crumbSelect.value,
+      switcher: switcherSelect.value, motion: motionSelect.value,
+      glass: glassSelect.value, lang: langSelect.value,
+    };
+    close();
+    openSettingsDialog(draft);
+  });
   accentInput.focus();
   requestAnimationFrame(() => overlay.classList.add("visible"));
 }

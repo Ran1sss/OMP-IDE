@@ -435,6 +435,10 @@
 .term-tab.active { background: var(--bg-1); border-color: var(--energy); color: var(--text-hi); }
 .term-tab .term-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--energy); opacity: 0.7; }
 .term-tab.dead .term-dot { background: var(--crit); }
+/* hit-size law (audit d): the ✕ keeps a ≥20px hit box inside the 24px pill;
+   negative margin keeps the pill visually compact */
+.term-tab .term-tab-x { width: 20px; height: 20px; margin: -3px -4px -3px -2px; }
+.term-tab .term-tab-x svg { width: 11px; height: 11px; }
 .term-body { flex: 1; min-height: 0; position: relative; }
 .term-body .term-mount { position: absolute; inset: 0; padding: 4px 0 4px 8px; }
 .term-body .term-mount.hidden { display: none; }
@@ -547,7 +551,7 @@
 .sb-island {
   display: flex;
   align-items: center;
-  gap: 2px;
+  gap: 8px; /* spacing law (audit A.5): tokens never sit closer than the gap */
   height: 22px;
   padding: 0 4px;
   background: var(--glass-bg);

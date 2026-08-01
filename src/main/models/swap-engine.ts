@@ -4,7 +4,7 @@
  * Invariants (never violated):
  *  - same model id — no candidate ⇒ no swap, existing recovery flow fires;
  *  - same effective thinking level — levels are role-bound in this build
- *    (role default + session override + boost live outside profiles), so a
+ *    (role default + session override live outside profiles), so a
  *    profile rewrite cannot disturb the resolver; each SWAP log entry records
  *    the level as proof.
  *

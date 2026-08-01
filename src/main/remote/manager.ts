@@ -56,6 +56,7 @@ import {
   sanitizeOutbound,
   TG_LIMIT,
 } from "./format";
+import { routeIntent, answerQuestion, registerDialogueTracker } from "./dialogue";
 
 const appStartedAt = Date.now();
 
@@ -94,9 +95,9 @@ class RemoteManager implements BotDelegate {
   /** chat-watch layer (group listening, proposals) — deletable with the module */
   readonly watch = new WatchManager({
     runtime: (botId) => this.runtimes.get(botId),
-    log: (botId, sender, detail) => {
+    log: (botId, sender, detail, kind) => {
       const bot = loadStore().bots.find((b) => b.id === botId);
-      this.log(botId, bot?.username ?? botId, sender, "watch", detail);
+      this.log(botId, bot?.username ?? botId, sender, kind ?? "watch", detail);
     },
   });
 
@@ -104,6 +105,8 @@ class RemoteManager implements BotDelegate {
 
   async init(): Promise<void> {
     this.tracker.attach();
+    // Chat Dialogue: the composer borrows the tracker's diffstat/elapsed/result
+    registerDialogueTracker(this.tracker);
     this.bridge.onStatus(() => this.markDigestDirty());
     this.bridge.onEvent((e) => this.onAgentEvent(e));
     this.bridge.onUiRequest((req) => this.onAgentQuestion(req));
@@ -163,6 +166,7 @@ class RemoteManager implements BotDelegate {
   async dispose(): Promise<void> {
     registerSwapRemoteNotifier(null);
     registerTeamGateNotifier(null);
+    registerDialogueTracker(null);
     this.watch.dispose();
     // Flush a final broadcast if a task is mid-flight.
     const st = this.bridge.getStatus();
@@ -500,11 +504,6 @@ class RemoteManager implements BotDelegate {
       return;
     }
 
-    if (!this.bridge.getRoot()) {
-      rt.sendMd(msg.chatId, escapeMd("No workspace open in OMP IDE."));
-      return;
-    }
-
     const status = this.bridge.getStatus();
     const state = status?.state ?? "idle";
 
@@ -529,14 +528,54 @@ class RemoteManager implements BotDelegate {
       return;
     }
 
-    const running = state === "thinking" || state === "tool";
-    const ok = this.bridge.prompt(msg.text, { username: msg.username, botName: bot.name });
+    // Chat Dialogue (spec addendum): a plain paired-DM message is classified
+    // BEFORE anything executes — question ≠ task. Deterministic pre-checks
+    // short-circuit the obvious, so the common task message pays no latency.
+    void this.routeDm(botId, rt, bot, msg);
+  }
+
+  /** classify a paired-DM message, then answer / run / nudge / both */
+  private async routeDm(botId: string, rt: BotRuntime, bot: StoredBot, msg: InboundMessage): Promise<void> {
+    const verdict = await routeIntent(msg.text, [], bot.username);
+    const lang = tgLangFor(msg.languageCode);
+    if (verdict.intent === "other") {
+      // one-line nudge (spec §2) — never a task, never silence in a paired DM
+      rt.sendMd(msg.chatId, escapeMd(tg(lang).dialogNudge));
+      this.log(botId, bot.username, `@${msg.username}`, "dialog", `nudge: ${msg.text.slice(0, 80)}`);
+      return;
+    }
+    if (verdict.intent === "question" || verdict.intent === "mixed") {
+      const res = await answerQuestion({ botId, chatId: msg.chatId, question: msg.text, asker: msg.username, isGroup: false });
+      if (res.ok) {
+        rt.sendMd(msg.chatId, escapeMd(res.answer));
+        this.log(botId, bot.username, `@${msg.username}`, "dialog", `«${msg.text.slice(0, 70)}» → ${res.answer.slice(0, 90)}`);
+      } else {
+        rt.sendMd(msg.chatId, escapeMd(tg(lang).dialogFailed));
+        this.log(botId, bot.username, "system", "dialog", `answer failed: ${res.error.slice(0, 120)}`);
+      }
+    }
+    if (verdict.intent === "error")
+      this.log(botId, bot.username, "system", "system", `intent routing failed — treating as task: ${verdict.error.slice(0, 100)}`);
+    if (verdict.intent === "task" || verdict.intent === "mixed" || verdict.intent === "error") {
+      this.runDmTask(botId, rt, bot, msg, verdict.intent === "mixed" ? verdict.taskLine : msg.text);
+    }
+  }
+
+  /** the pre-dialogue task path, verbatim: prompt / steer + logging + echo */
+  private runDmTask(botId: string, rt: BotRuntime, bot: StoredBot, msg: InboundMessage, text: string): void {
+    if (!this.bridge.getRoot()) {
+      rt.sendMd(msg.chatId, escapeMd("No workspace open in OMP IDE."));
+      return;
+    }
+    const st = this.bridge.getStatus();
+    const running = st?.state === "thinking" || st?.state === "tool";
+    const ok = this.bridge.prompt(text, { username: msg.username, botName: bot.name });
     if (!ok) {
       rt.sendMd(msg.chatId, escapeMd("Agent is not running in OMP IDE."));
       return;
     }
-    this.log(botId, bot.username, `@${msg.username}`, running ? "steer" : "task", msg.text.slice(0, 120));
-    this.echoToOthers(botId, msg, running ? "steer" : "task");
+    this.log(botId, bot.username, `@${msg.username}`, running ? "steer" : "task", text.slice(0, 120));
+    this.echoToOthers(botId, { ...msg, text }, running ? "steer" : "task");
   }
 
   onCallback(botId: string, cb: InboundCallback): void {
@@ -741,7 +780,6 @@ class RemoteManager implements BotDelegate {
           const lines = [
             `level: ${d.effective}`,
             d.override ? `session override: ${d.override}` : "",
-            d.boost ? `boost armed: ${d.boost} (one send)` : "",
             `capability: ${d.capability}`,
           ].filter(Boolean);
           rt.sendMd(msg.chatId, "```\n" + lines.join("\n").replace(/[`\\]/g, (c) => `\\${c}`) + "\n```");
@@ -1170,6 +1208,9 @@ export function registerRemoteHandlers(ipc: IpcMain): void {
   );
   ipc.handle("remote:setChatListener", async (_e, botId: string, chatId: number, listener: boolean) =>
     m.watch.setChatListener(botId, chatId, listener),
+  );
+  ipc.handle("remote:setChatAnswerMembers", async (_e, botId: string, chatId: number, enabled: boolean) =>
+    m.watch.setChatAnswerMembers(botId, chatId, enabled),
   );
   ipc.handle("remote:removeChat", async (_e, botId: string, chatId: number, deleteLog: boolean) =>
     m.watch.removeChat(botId, chatId, deleteLog),

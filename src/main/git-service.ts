@@ -160,14 +160,14 @@ export function registerGitHandlers(ipc: IpcMain) {
       const out = await git(root, [
         "log",
         `-${Math.max(1, Math.min(limit, 200))}`,
-        "--pretty=format:%H%x00%h%x00%s%x00%an%x00%ar",
+        "--pretty=format:%H%x00%h%x00%s%x00%an%x00%at",
       ]);
       return out
         .split("\n")
         .filter(Boolean)
         .map((line) => {
-          const [hash, shortHash, subject, author, date] = line.split("\u0000");
-          return { hash, shortHash, subject, author, date };
+          const [hash, shortHash, subject, author, at] = line.split("\u0000");
+          return { hash, shortHash, subject, author, at: (parseInt(at, 10) || 0) * 1000 };
         });
     } catch {
       return [];

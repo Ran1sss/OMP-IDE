@@ -7,57 +7,63 @@
 
 import { marked } from "marked";
 import { el, clear } from "../core/dom";
+import { on } from "../core/bus";
 import { state } from "../core/state";
 import { toast, errorText } from "../core/ui";
 import type { OmpSessionMeta, OmpSessionEntry } from "../../shared/types";
 import { stripTeamMarkers } from "./team";
+import { t } from "../core/i18n";
 
 let historyClose: (() => void) | null = null;
 
 /** calendar-day label; midnight boundaries, not rolling 24h windows */
-function dayLabel(t: number): string {
-  const d = new Date(t);
+function dayLabel(ts: number): string {
+  const d = new Date(ts);
   const startOf = (x: Date) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
   const diffDays = Math.round((startOf(new Date()) - startOf(d)) / 86_400_000);
-  if (diffDays === 0) return "Today";
-  if (diffDays === 1) return "Yesterday";
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  if (diffDays === 0) return t("hist.today");
+  if (diffDays === 1) return t("hist.yesterday");
+  return t("hist.dayDate", ts);
 }
 
-function timeLabel(t: number): string {
-  const d = new Date(t);
+function timeLabel(ts: number): string {
+  const d = new Date(ts);
   const hhmm = `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
-  return `${dayLabel(t).toLowerCase()} ${hhmm}`;
+  return `${dayLabel(ts).toLowerCase()} ${hhmm}`;
 }
 
 export function openSessionHistory(): void {
   if (!state.root) {
-    toast("Open a workspace first");
+    toast(t("hist.openWorkspaceFirst"));
     return;
   }
   historyClose?.();
   const overlay = el("div", { class: "overlay centered" });
   const close = () => {
     if (historyClose === close) historyClose = null;
+    offLang();
     overlay.classList.remove("visible");
     setTimeout(() => overlay.remove(), 170);
   };
   historyClose = close;
 
-  const head = el("div", { class: "hd-head" }, el("h2", { text: "Session History" }));
+  const titleEl = el("h2", { text: t("hist.title") });
+  const head = el("div", { class: "hd-head" }, titleEl);
   const filterInput = el("input", {
     class: "input hd-filter",
-    placeholder: "Filter sessions… (title, prompt, model)",
+    placeholder: t("hist.filterPlaceholder"),
   }) as HTMLInputElement;
   const body = el("div", { class: "hd-scroll" });
-  const backBtn = el("button", { class: "btn", text: "Back", style: { display: "none" }, onClick: () => void renderList() });
+  const backBtn = el("button", { class: "btn", text: t("hist.back"), style: { display: "none" }, onClick: () => void renderList() });
+  const closeBtn = el("button", { class: "btn", text: t("hist.close"), onClick: close });
+  const dialogActions = el("div", { class: "dialog-actions" }, backBtn, el("span", { style: { flex: "1" } }), closeBtn);
   const dialog = el(
     "div",
     { class: "dialog history-dialog" },
     head,
     filterInput,
     body,
-    el("div", { class: "dialog-actions" }, backBtn, el("span", { style: { flex: "1" } }), el("button", { class: "btn", text: "Close", onClick: close })),
+    dialogActions,
   );
   overlay.append(dialog);
   overlay.addEventListener("mousedown", (e) => {
@@ -65,6 +71,15 @@ export function openSessionHistory(): void {
   });
   overlay.addEventListener("keydown", (e) => {
     if (e.key === "Escape") close();
+  });
+  // dialog persists while open: re-apply fixed strings on language switch;
+  // list view re-renders so day headers (Today/Yesterday) follow the locale
+  const offLang = on("lang-changed", () => {
+    titleEl.textContent = t("hist.title");
+    filterInput.placeholder = t("hist.filterPlaceholder");
+    backBtn.textContent = t("hist.back");
+    closeBtn.textContent = t("hist.close");
+    if (backBtn.style.display === "none") applyFilter();
   });
   let allSessions: OmpSessionMeta[] = [];
   const applyFilter = () => {
@@ -93,7 +108,7 @@ export function openSessionHistory(): void {
     backBtn.style.display = "none";
     filterInput.style.display = "";
     clear(body);
-    body.append(el("div", { class: "dimmer", text: "Loading…", style: { padding: "12px" } }));
+    body.append(el("div", { class: "dimmer", text: t("hist.loading"), style: { padding: "12px" } }));
     allSessions = await window.ide.omp.listSessions(state.root!);
     applyFilter();
     if (allSessions.length) filterInput.focus();
@@ -107,14 +122,14 @@ export function openSessionHistory(): void {
         el(
           "div",
           { class: "hd-empty" },
-          el("div", { text: "No previous sessions for this workspace." }),
-          el("div", { class: "dimmer", text: "Conversations appear here after the agent has run at least once." }),
+          el("div", { text: t("hist.emptyTitle") }),
+          el("div", { class: "dimmer", text: t("hist.emptyHint") }),
         ),
       );
       return;
     }
     if (!sessions.length) {
-      body.append(el("div", { class: "hd-empty" }, el("div", { text: `No sessions match "${q}".` })));
+      body.append(el("div", { class: "hd-empty" }, el("div", { text: t("hist.noFilterMatch", q) })));
       return;
     }
     // rows group under dim day headers; row meta then shows time only
@@ -130,7 +145,7 @@ export function openSessionHistory(): void {
   }
 
   function sessionRow(s: OmpSessionMeta): HTMLElement {
-    const label = s.title || s.firstPrompt || "(no prompt)";
+    const label = s.title || s.firstPrompt || t("hist.noPrompt");
     const d = new Date(s.startedAt);
     const hhmm = `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
     return el(
@@ -141,7 +156,7 @@ export function openSessionHistory(): void {
         el("div", { class: "hd-meta" },
           el("span", { class: "mono", text: hhmm }),
           s.model ? el("span", { class: "hd-model", text: s.model.split("/").pop() ?? s.model }) : null,
-          el("span", { class: "dimmer mono", text: `${s.sizeKb} KB` }),
+          el("span", { class: "dimmer mono", text: t("hist.sizeKb", s.sizeKb) }),
         ),
       ),
     );
@@ -150,21 +165,21 @@ export function openSessionHistory(): void {
   async function renderTranscript(s: OmpSessionMeta, query = "") {
     filterInput.style.display = "none";
     clear(body);
-    body.append(el("div", { class: "dimmer", text: "Loading…", style: { padding: "12px" } }));
+    body.append(el("div", { class: "dimmer", text: t("hist.loading"), style: { padding: "12px" } }));
     let entries: OmpSessionEntry[];
     try {
       entries = await window.ide.omp.readSession(s.file);
     } catch (err) {
       clear(body);
-      body.append(el("div", { class: "hd-empty crit", text: `Can't read session: ${errorText(err)}` }));
+      body.append(el("div", { class: "hd-empty crit", text: t("hist.readError", errorText(err)) }));
       backBtn.style.display = "";
       return;
     }
     clear(body);
     backBtn.style.display = "";
-    body.append(el("div", { class: "hd-banner", text: `read-only · ${timeLabel(s.startedAt)}` }));
+    body.append(el("div", { class: "hd-banner", text: t("hist.readOnly", timeLabel(s.startedAt)) }));
     if (!entries.length) {
-      body.append(el("div", { class: "hd-empty", text: "This session has no messages." }));
+      body.append(el("div", { class: "hd-empty", text: t("hist.noMessages") }));
       return;
     }
     // A-2 follow-through: when the list was filtered, land on the first
@@ -190,7 +205,7 @@ export function openSessionHistory(): void {
       } else if (e.kind === "tool") {
         node = el("div", { class: "hd-tool mono", text: `⚙ ${e.name}` });
       } else if (e.kind === "model") {
-        node = el("div", { class: "turn-marker", text: `· model: ${e.model} ·` });
+        node = el("div", { class: "turn-marker", text: t("hist.modelMarker", e.model) });
       } else {
         node = el("div", { class: "turn-marker", text: `· ${e.text} ·` });
       }

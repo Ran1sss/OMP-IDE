@@ -10,8 +10,9 @@
 
 import { marked } from "marked";
 import { el, clear } from "../core/dom";
-import { emit } from "../core/bus";
+import { emit, on } from "../core/bus";
 import { toast, confirmDialog, formDialog, inputDialog } from "../core/ui";
+import { t } from "../core/i18n";
 import type { TeamAgent, TeamFeedEntry, TeamRunState, TeamSlice, TeamTimelineEntry } from "../../shared/types";
 
 let panelEl: HTMLElement;
@@ -22,7 +23,6 @@ let toggleBtn: HTMLElement | null = null;
 /** Team toggle armed: the NEXT send becomes a team goal */
 let armed = false;
 let run: TeamRunState | null = null;
-let defaultPlaceholder = "";
 
 /** Read-only view of the live run for glance surfaces (agent NOW zone). */
 export function teamRun(): TeamRunState | null {
@@ -81,16 +81,16 @@ export function stripTeamMarkers(text: string): string {
 export function createTeamToggle(): HTMLElement {
   toggleBtn = el("button", {
     class: "team-toggle",
-    title: "Team mode: the next message becomes a team goal (deliberate → approve → build together)",
-    text: "TEAM",
+    title: t("team.toggleTip"),
+    text: t("team.title"),
     onClick: () => {
       if (run && run.phase !== "done" && run.phase !== "stopped" && run.phase !== "stalled") {
-        toast("A team run is active — stop or finish it first");
+        toast(t("team.runActiveToast"));
         return;
       }
       armed = !armed;
       toggleBtn!.classList.toggle("armed", armed);
-      if (inputEl) inputEl.placeholder = armed ? "Give the team ONE goal…" : defaultPlaceholder;
+      if (inputEl) inputEl.placeholder = armed ? t("team.goalPlaceholder") : t("agent.placeholder");
     },
   });
   return toggleBtn;
@@ -107,7 +107,7 @@ export function teamConsumesPrompt(message: string): boolean {
       return true;
     }
     if (run.phase === "gate") {
-      toast("Approve or discard the plan first");
+      toast(t("team.approveFirstToast"));
       return true;
     }
     if (run.phase === "execute" || run.phase === "verify") {
@@ -123,7 +123,7 @@ export function teamConsumesPrompt(message: string): boolean {
   armed = false;
   toggleBtn?.classList.remove("armed");
   void window.ide.team.start(message).then((r) => {
-    if (!r.ok) toast(r.error ?? "Failed to start the team run", { crit: true });
+    if (!r.ok) toast(r.error ?? t("team.startFailed"), { crit: true });
   });
   return true;
 }
@@ -133,7 +133,6 @@ export function teamConsumesPrompt(message: string): boolean {
 export function initTeamSurface(opts: { panel: HTMLElement; input: HTMLTextAreaElement }): void {
   panelEl = opts.panel;
   inputEl = opts.input;
-  defaultPlaceholder = inputEl.placeholder;
   surfaceEl = el("div", { class: "team-surface", style: { display: "none" } });
   // between the agent head and the chat (chat stays as the unified timeline)
   const chat = panelEl.querySelector(".agent-chat");
@@ -142,6 +141,21 @@ export function initTeamSurface(opts: { panel: HTMLElement; input: HTMLTextAreaE
 
   window.ide.team.onState((s) => applyState(s));
   void window.ide.team.getState().then((s) => applyState(s));
+
+  // live language switch: rebuild the whole persistent surface (board, feed,
+  // journal — their fixed strings re-apply); on-demand dialogs rebuild on open
+  on("lang-changed", () => {
+    if (toggleBtn) {
+      toggleBtn.title = t("team.toggleTip");
+      toggleBtn.textContent = t("team.title");
+    }
+    if (run) {
+      feedRunId = ""; // forces render() to clear + re-render from scratch
+      applyState(run);
+    } else if (armed && inputEl) {
+      inputEl.placeholder = t("team.goalPlaceholder");
+    }
+  });
 }
 
 function applyState(s: TeamRunState | null): void {
@@ -157,14 +171,14 @@ function applyState(s: TeamRunState | null): void {
     prevAgentState = {};
     clearInterval(elapsedTimer);
     elapsedTimer = undefined;
-    if (inputEl && !armed) inputEl.placeholder = defaultPlaceholder;
+    if (inputEl && !armed) inputEl.placeholder = t("agent.placeholder");
     return;
   }
   if (inputEl) {
     inputEl.placeholder =
-      s.phase === "probe" || s.phase === "deliberate" ? "note to planners…" :
-      s.phase === "execute" || s.phase === "verify" ? "steer the team… (@Name targets one worker)" :
-      defaultPlaceholder;
+      s.phase === "probe" || s.phase === "deliberate" ? t("team.notePlanners") :
+      s.phase === "execute" || s.phase === "verify" ? t("team.steerPlaceholder") :
+      t("agent.placeholder");
   }
   render();
 }
@@ -173,7 +187,7 @@ function applyState(s: TeamRunState | null): void {
 
 function fmtElapsed(sinceMs: number): string {
   const s = Math.max(0, Math.floor((Date.now() - sinceMs) / 1000));
-  return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`;
+  return s < 60 ? t("team.elapsedSec", s) : t("team.elapsedMinSec", Math.floor(s / 60), s % 60);
 }
 
 /** longest-path layering for the DAG (layer 0 = roots) */
@@ -213,6 +227,32 @@ const ORB_BY_STATE: Record<string, string> = {
   failed: "dead",
 };
 
+/** displayed agent-state word — the state values themselves stay protocol ids */
+function agentStateLabel(st: string): string {
+  switch (st) {
+    case "waking": return t("team.stWaking");
+    case "deliberating": return t("team.stDeliberating");
+    case "working": return t("team.stWorking");
+    case "sleeping": return t("team.stSleeping");
+    case "done": return t("team.stDone");
+    case "failed": return t("team.stFailed");
+    case "throttled": return t("team.stThrottled");
+    default: return st;
+  }
+}
+
+/** displayed slice-state word (detail popover chip) */
+function sliceStateLabel(st: string): string {
+  switch (st) {
+    case "pending": return t("team.stPending");
+    case "active": return t("team.stActive");
+    case "done": return t("team.stDone");
+    case "failed": return t("team.stFailed");
+    case "replanned": return t("team.stReplanned");
+    default: return st;
+  }
+}
+
 // ---------------------------------------------------------------- rendering
 
 function render(): void {
@@ -251,17 +291,17 @@ function render(): void {
 function renderHead(head: HTMLElement, r: TeamRunState): void {
   clear(head);
   const phaseLabel: Record<string, string> = {
-    probe: "probing capability",
-    deliberate: `deliberating · round ${Math.max(1, r.round)}/${r.maxRounds}`,
-    gate: "plan awaiting approval",
-    execute: "building",
-    verify: "verifying",
-    done: "complete",
-    stopped: "stopped",
-    stalled: "stalled",
+    probe: t("team.phaseProbe"),
+    deliberate: t("team.phaseDeliberate", Math.max(1, r.round), r.maxRounds),
+    gate: t("team.phaseGate"),
+    execute: t("team.phaseExecute"),
+    verify: t("team.phaseVerify"),
+    done: t("team.phaseDone"),
+    stopped: t("team.phaseStopped"),
+    stalled: t("team.phaseStalled"),
   };
   head.append(
-    el("span", { class: "th-title", text: "TEAM" }),
+    el("span", { class: "th-title", text: t("team.title") }),
     el("span", { class: "th-phase mono", text: phaseLabel[r.phase] ?? r.phase }),
   );
   // honesty badge: the LIVE mechanism, never a generic label (crew-rail §2)
@@ -274,31 +314,29 @@ function renderHead(head: HTMLElement, r: TeamRunState): void {
     let label: string | null = null;
     let soloTint = false;
     if (m.kind === "solo") {
-      label = `solo: ${m.reason ?? "sequential"}`;
+      label = t("team.mechSolo", m.reason ?? t("team.mechSoloDefault"));
       soloTint = true;
     } else if (m.active >= 2) {
-      label = m.throttled > 0 ? `parallel ×${m.active} (${m.throttled} rate-limited)` : `parallel ×${m.active}`;
+      label = m.throttled > 0 ? t("team.mechParallelThrottled", m.active, m.throttled) : t("team.mechParallel", m.active);
     } else if (m.active === 1) {
-      label = `solo (${m.singleReason ?? "1 slice ready"})`;
+      label = t("team.mechSoloOne", m.singleReason ?? t("team.mechOneSliceReady"));
     }
     if (label) {
       head.append(el("span", {
         class: `th-mech mono${soloTint ? " solo" : ""}`,
-        title: m.kind === "solo"
-          ? "Process spawning unavailable — the lead session executes sequentially."
-          : "Computed from live worker processes (cap 4, starts staggered ≥2s) — never from the plan's theoretical width.",
+        title: m.kind === "solo" ? t("team.mechSoloTip") : t("team.mechParallelTip"),
         text: label,
       }));
     }
   } else if (r.solo && (r.phase === "probe" || r.phase === "deliberate" || r.phase === "gate")) {
-    head.append(el("span", { class: "th-mech mono", title: "Subagent probe failed — execution will use process-level parallelism (one omp per worker).", text: "process-parallel on approve" }));
+    head.append(el("span", { class: "th-mech mono", title: t("team.processParallelTip"), text: t("team.processParallel") }));
   }
   head.append(
     el("span", { class: "th-goal", title: r.goal, text: r.goal }),
     el("span", { style: { flex: "1" } }),
     r.phase === "done" || r.phase === "stopped" || r.phase === "stalled"
-      ? el("button", { class: "btn btn-ghost th-btn", text: "Dismiss", onClick: () => void window.ide.team.clear() })
-      : el("button", { class: "btn btn-danger th-btn", text: "Stop team", onClick: () => void window.ide.team.stop() }),
+      ? el("button", { class: "btn btn-ghost th-btn", text: t("team.dismiss"), onClick: () => void window.ide.team.clear() })
+      : el("button", { class: "btn btn-danger th-btn", text: t("team.stopTeam"), onClick: () => void window.ide.team.stop() }),
   );
 }
 
@@ -338,17 +376,17 @@ function agentCard(a: TeamAgent): HTMLElement {
       el("span", { class: `orb ${ORB_BY_STATE[a.state] ?? "idle"}` }),
     ),
     el("div", { class: "tc-row tc-meta" },
-      el("span", { class: "tc-chip mono", text: a.state }),
+      el("span", { class: "tc-chip mono", text: agentStateLabel(a.state) }),
       a.kind === "worker" && a.slice && (a.state === "working" || a.state === "waking")
-        ? el("span", { class: "mono dim", text: `slice ${a.slice}` }) : null,
+        ? el("span", { class: "mono dim", text: t("team.sliceN", a.slice) }) : null,
       a.state === "working" || a.state === "deliberating"
         ? el("span", { class: "mono dim tc-elapsed", dataset: { since: String(a.sinceMs) }, text: fmtElapsed(a.sinceMs) }) : null,
     ),
     a.state === "sleeping" && a.waitingFor?.length
-      ? el("div", { class: "tc-wait dim", text: `waiting for ${a.waitingFor.join(", ")}` })
+      ? el("div", { class: "tc-wait dim", text: t("team.waitingFor", a.waitingFor.join(", ")) })
       : null,
     a.kind === "worker"
-      ? el("div", { class: "tc-files dim mono", text: `${a.filesTouched} file${a.filesTouched === 1 ? "" : "s"} touched` })
+      ? el("div", { class: "tc-files dim mono", text: t("team.filesTouchedN", a.filesTouched) })
       : null,
   );
   return card;
@@ -360,12 +398,12 @@ function renderGate(body: HTMLElement, r: TeamRunState): void {
   clear(body);
   resetFeedUi();
   const stats = planStats(r.slices);
-  const summary = `${r.slices.length} slice${r.slices.length === 1 ? "" : "s"} · ${stats.tracks} parallel track${stats.tracks === 1 ? "" : "s"} · est. ${stats.contracts} contract${stats.contracts === 1 ? "" : "s"}`;
+  const summary = t("team.planSummary", r.slices.length, stats.tracks, stats.contracts);
 
   let graphMode = body.dataset.graph === "1";
   const viewBtn = el("button", {
     class: "btn btn-ghost th-btn",
-    text: graphMode ? "List view" : "Graph view",
+    text: graphMode ? t("team.listView") : t("team.graphView"),
     onClick: () => {
       body.dataset.graph = graphMode ? "" : "1";
       render();
@@ -392,21 +430,21 @@ function renderGate(body: HTMLElement, r: TeamRunState): void {
   gate.append(
     el("div", { class: "tg-actions" },
       el("button", {
-        class: "btn btn-ghost", text: "Add slice…",
+        class: "btn btn-ghost", text: t("team.addSliceBtn"),
         onClick: () => void addSliceDialog(),
       }),
       el("span", { style: { flex: "1" } }),
       el("button", {
-        class: "btn btn-ghost", text: "Discard",
+        class: "btn btn-ghost", text: t("team.discard"),
         onClick: () => {
-          void confirmDialog({ title: "Discard plan", message: "Drop the converged plan and return to a plain prompt?", confirmLabel: "Discard", danger: true })
+          void confirmDialog({ title: t("team.discardPlanTitle"), message: t("team.discardPlanMsg"), confirmLabel: t("team.discard"), danger: true })
             .then((ok) => { if (ok) void window.ide.team.discard(); });
         },
       }),
       el("button", {
-        class: "btn btn-primary", text: "Approve & run",
+        class: "btn btn-primary", text: t("team.approveRun"),
         onClick: () => void window.ide.team.approve().then((res) => {
-          if (!res.ok) toast(res.error ?? "Approval failed", { crit: true });
+          if (!res.ok) toast(res.error ?? t("team.approveFailed"), { crit: true });
         }),
       }),
     ),
@@ -420,34 +458,34 @@ function gateSliceRow(s: TeamSlice, r: TeamRunState): HTMLElement {
     el("div", { class: "tg-main" },
       el("div", { class: "tg-title", text: s.title }),
       el("div", { class: "tg-scope dim", text: s.scope }),
-      s.contract ? el("div", { class: "tg-contract mono dim", text: `contract: ${s.contract}` }) : null,
+      s.contract ? el("div", { class: "tg-contract mono dim", text: t("team.contractLbl", s.contract) }) : null,
     ),
     el("span", { class: "tg-deps mono dim" },
-      el("span", { text: s.deps.length ? `← ${s.deps.join(", ")}` : "root" }),
+      el("span", { text: s.deps.length ? `← ${s.deps.join(", ")}` : t("team.rootDep") }),
       // auto-added serialization edges are visible at the gate with their reason
       s.autoDeps?.length
         ? el("span", {
             class: "tg-auto",
-            title: `serialized: write-sets overlap with ${s.autoDeps.join(", ")} (both touch the same file)`,
-            text: " ⛓ auto",
+            title: t("team.autoDepTip", s.autoDeps.join(", ")),
+            text: t("team.autoTag"),
           })
         : null,
     ),
     el("span", { class: "tg-worker mono", text: s.worker }),
     el("button", {
-      class: "btn btn-ghost tg-btn", text: "Edit",
+      class: "btn btn-ghost tg-btn", text: t("team.edit"),
       onClick: () => void editSliceDialog(s),
     }),
     el("button", {
-      class: "btn btn-ghost tg-btn", text: "Deps",
-      title: "Edit dependencies (cycles rejected)",
+      class: "btn btn-ghost tg-btn", text: t("team.deps"),
+      title: t("team.depsTip"),
       onClick: () => void editDepsDialog(s, r),
     }),
     el("button", {
       class: "btn btn-ghost tg-btn tg-del", text: "✕",
-      title: "Delete slice",
+      title: t("team.deleteSliceTip"),
       onClick: () => void window.ide.team.deleteSlice(s.id).then((res) => {
-        if (!res.ok) toast(res.error ?? "Cannot delete", { crit: true });
+        if (!res.ok) toast(res.error ?? t("team.deleteRejected"), { crit: true });
       }),
     }),
   );
@@ -455,45 +493,45 @@ function gateSliceRow(s: TeamSlice, r: TeamRunState): HTMLElement {
 
 async function editSliceDialog(s: TeamSlice): Promise<void> {
   const values = await formDialog({
-    title: `Edit slice ${s.id}`,
+    title: t("team.editSliceTitle", s.id),
     fields: [
-      { key: "title", label: "Title", value: s.title },
-      { key: "scope", label: "Scope (one line)", value: s.scope },
+      { key: "title", label: t("team.fldTitle"), value: s.title },
+      { key: "scope", label: t("team.fldScope"), value: s.scope },
     ],
-    confirmLabel: "Save",
+    confirmLabel: t("team.save"),
   });
   if (!values) return;
   const res = await window.ide.team.editSlice(s.id, { title: values.title, scope: values.scope });
-  if (!res.ok) toast(res.error ?? "Edit rejected", { crit: true });
+  if (!res.ok) toast(res.error ?? t("team.editRejected"), { crit: true });
 }
 
 async function editDepsDialog(s: TeamSlice, r: TeamRunState): Promise<void> {
   const others = r.slices.filter((x) => x.id !== s.id).map((x) => x.id).join(", ");
   const raw = await inputDialog({
-    title: `Dependencies of ${s.id}`,
-    message: `Comma-separated slice ids (available: ${others || "none"}). A cycle is rejected.`,
+    title: t("team.depsOfTitle", s.id),
+    message: t("team.depsMsg", others || t("team.none")),
     value: s.deps.join(", "),
   });
   if (raw === null) return;
   const deps = raw.split(",").map((x) => x.trim()).filter(Boolean);
   const res = await window.ide.team.setDeps(s.id, deps);
-  if (!res.ok) toast(res.error ?? "Edge rejected", { crit: true });
+  if (!res.ok) toast(res.error ?? t("team.edgeRejected"), { crit: true });
 }
 
 async function addSliceDialog(): Promise<void> {
   const values = await formDialog({
-    title: "Add slice",
+    title: t("team.addSliceTitle"),
     fields: [
-      { key: "title", label: "Title" },
-      { key: "scope", label: "Scope (one line)" },
-      { key: "deps", label: "Dependencies (comma-separated ids, or -)" },
+      { key: "title", label: t("team.fldTitle") },
+      { key: "scope", label: t("team.fldScope") },
+      { key: "deps", label: t("team.fldDeps") },
     ],
-    confirmLabel: "Add",
+    confirmLabel: t("team.add"),
   });
   if (!values) return;
   const deps = values.deps.replace(/^-$/, "").split(",").map((x) => x.trim()).filter(Boolean);
   const res = await window.ide.team.addSlice({ title: values.title, scope: values.scope, deps });
-  if (!res.ok) toast(res.error ?? "Slice rejected", { crit: true });
+  if (!res.ok) toast(res.error ?? t("team.sliceRejected"), { crit: true });
 }
 
 // ---- DAG
@@ -583,19 +621,19 @@ function showSliceDetail(s: TeamSlice): void {
     el("div", { class: "slice-detail materialize" },
       el("div", { class: "sd-head" },
         el("span", { class: "mono", text: `${s.id} · ${s.title}` }),
-        el("span", { class: `tc-chip mono st-${s.state}`, text: s.state }),
+        el("span", { class: `tc-chip mono st-${s.state}`, text: sliceStateLabel(s.state) }),
         el("span", { class: "mono dim", text: `+${s.add} −${s.del}` }),
         el("span", { style: { flex: "1" } }),
         el("button", { class: "btn btn-ghost th-btn", text: "✕", onClick: (e) => (e.currentTarget as HTMLElement).closest(".slice-detail")?.remove() }),
       ),
       // node popover anatomy (crew-rail §3): owner / deps / contract / diffstat / hand-off
       el("div", { class: "sd-meta mono dim" },
-        el("span", { text: `owner: ${s.worker}` }),
-        el("span", { text: s.deps.length ? `deps: ${s.deps.join(", ")}${s.autoDeps?.length ? ` (⛓ auto: ${s.autoDeps.join(", ")})` : ""}` : "deps: none (root)" }),
-        s.contract ? el("span", { text: `contract: ${s.contract}` }) : null,
-        s.files?.length ? el("span", { text: `files: ${s.files.join(", ")}` }) : null,
+        el("span", { text: t("team.ownerLbl", s.worker) }),
+        el("span", { text: s.deps.length ? t("team.depsLbl", `${s.deps.join(", ")}${s.autoDeps?.length ? t("team.autoSuffix", s.autoDeps.join(", ")) : ""}`) : t("team.depsNone") }),
+        s.contract ? el("span", { text: t("team.contractLbl", s.contract) }) : null,
+        s.files?.length ? el("span", { text: t("team.filesLbl", s.files.join(", ")) }) : null,
       ),
-      el("div", { class: "sd-body dim", text: s.handoff ?? "No hand-off note yet — the finisher writes it when the slice completes." }),
+      el("div", { class: "sd-body dim", text: s.handoff ?? t("team.noHandoff") }),
     ),
   );
 }
@@ -614,7 +652,7 @@ function crewChip(a: TeamAgent, r: TeamRunState): HTMLElement {
     "div",
     {
       class: `rchip st-${a.state}${woke ? " materialize" : ""}${expandedChip === a.name ? " pinned" : ""}${timelineFilter === a.name ? " filtered" : ""}`,
-      title: a.slice ? `${a.name} · slice ${a.slice}` : a.name,
+      title: a.slice ? `${a.name} · ${t("team.sliceN", a.slice)}` : a.name,
       onClick: () => {
         expandedChip = expandedChip === a.name ? null : a.name;
         render();
@@ -623,7 +661,7 @@ function crewChip(a: TeamAgent, r: TeamRunState): HTMLElement {
     el("span", { class: "sigil mono", text: a.glyph }),
     el("div", { class: "rc-txt" },
       el("div", { class: "rc-nm mono", text: a.name }),
-      el("div", { class: `rc-stt mono st-${a.state}`, text: a.state }),
+      el("div", { class: `rc-stt mono st-${a.state}`, text: agentStateLabel(a.state) }),
     ),
   );
   return chip;
@@ -637,7 +675,7 @@ function crewExpanded(a: TeamAgent, r: TeamRunState): HTMLElement {
     "div",
     {
       class: `rexp st-${a.state}${streaming && a.state === "working" ? " streaming" : ""}${timelineFilter === a.name ? " filtered" : ""}`,
-      title: "click: filter the timeline to this worker",
+      title: t("team.filterTlTip"),
       onClick: () => {
         timelineFilter = timelineFilter === a.name ? null : a.name;
         render();
@@ -645,14 +683,14 @@ function crewExpanded(a: TeamAgent, r: TeamRunState): HTMLElement {
     },
     el("span", { class: "sigil big mono", text: a.glyph }),
     el("div", { class: "rx-info" },
-      el("div", { class: "rx-t mono", text: `${a.name}${a.slice ? ` · slice ${a.slice}` : ""}` }),
-      el("div", { class: "rx-s", text: a.state === "throttled" ? "rate-limited — backing off" : (s ? s.title : a.lastActivity ?? "") }),
+      el("div", { class: "rx-t mono", text: `${a.name}${a.slice ? ` · ${t("team.sliceN", a.slice)}` : ""}` }),
+      el("div", { class: "rx-s", text: a.state === "throttled" ? t("team.rateLimited") : (s ? s.title : a.lastActivity ?? "") }),
       el("div", { class: "rx-prog" }, el("i")),
     ),
     el("div", { class: "rx-files mono" },
-      el("div", {}, el("b", { text: String(a.filesTouched) }), ` file${a.filesTouched === 1 ? "" : "s"} touched`),
+      el("div", {}, el("b", { text: String(a.filesTouched) }), ` ${t("team.filesTouchedWord", a.filesTouched)}`),
       el("div", {}, el("b", { text: `+${a.add ?? 0} −${a.del ?? 0}` })),
-      el("div", { class: "tc-elapsed", dataset: { since: String(a.sinceMs) } }, fmtElapsed(a.sinceMs) + " on slice"),
+      el("div", { class: "tc-elapsed", dataset: { since: String(a.sinceMs) } }, t("team.onSlice", fmtElapsed(a.sinceMs))),
     ),
   );
   return card;
@@ -667,13 +705,13 @@ function crewReadonly(a: TeamAgent, r: TeamRunState): HTMLElement {
     { class: `rexp ro st-${a.state}` },
     el("span", { class: "sigil big mono", text: a.glyph }),
     el("div", { class: "rx-info" },
-      el("div", { class: "rx-t mono", text: `${a.name} · ${a.state}` }),
+      el("div", { class: "rx-t mono", text: `${a.name} · ${agentStateLabel(a.state)}` }),
       a.state === "sleeping" && a.waitingFor?.length
-        ? el("div", { class: "rx-wait mono", text: `ждёт ${a.waitingFor.join(", ")}` })
-        : el("div", { class: "rx-s", text: a.lastActivity ?? (lastHandoff ? lastHandoff.slice(0, 160) : "no activity yet") }),
+        ? el("div", { class: "rx-wait mono", text: t("team.waitingFor", a.waitingFor.join(", ")) })
+        : el("div", { class: "rx-s", text: a.lastActivity ?? (lastHandoff ? lastHandoff.slice(0, 160) : t("team.noActivity")) }),
     ),
     el("div", { class: "rx-files mono" },
-      el("div", {}, el("b", { text: String(a.filesTouched) }), ` file${a.filesTouched === 1 ? "" : "s"}`),
+      el("div", {}, el("b", { text: String(a.filesTouched) }), ` ${t("team.filesWord", a.filesTouched)}`),
       el("div", {}, el("b", { text: `+${a.add ?? 0} −${a.del ?? 0}` })),
     ),
   );
@@ -697,11 +735,11 @@ function pipelineStrip(r: TeamRunState): HTMLElement {
       rowEl.append(
         el("span", {
           class: `pnode st-${s.state}`,
-          title: `SLICE ${s.id} · ${s.title}${s.autoDeps?.length ? " · ⛓ auto-serialized (write-sets overlap)" : ""}`,
+          title: `${t("team.slicePfx")}${s.id} · ${s.title}${s.autoDeps?.length ? t("team.autoSerialized") : ""}`,
           onClick: (e) => { e.stopPropagation(); showSliceDetail(s); },
         },
           el("b", {},
-            el("span", { class: "pfx", text: "SLICE " }),
+            el("span", { class: "pfx", text: t("team.slicePfx") }),
             el("span", { text: `${s.id}${s.autoDeps?.length ? " ⛓" : ""}` }),
           ),
           el("span", { class: "ptitle", text: s.title.slice(0, 22) }),
@@ -754,7 +792,7 @@ function renderBoard(body: HTMLElement, r: TeamRunState): void {
   clear(tl);
   const entries = (r.timeline ?? []).filter((e) => !timelineFilter || e.worker === timelineFilter);
   if (entries.length) {
-    tl.append(el("div", { class: "ctl-head mono", text: `TIMELINE${timelineFilter ? ` · ${timelineFilter}` : ""} (${entries.length})` }));
+    tl.append(el("div", { class: "ctl-head mono", text: timelineFilter ? t("team.timelineHeadFiltered", timelineFilter, entries.length) : t("team.timelineHead", entries.length) }));
     const timelineRow = (e: TeamTimelineEntry, nested = false): HTMLElement =>
       el("div", { class: `ctl-row mono${nested ? " nested" : ""}` },
         el("span", { class: "ctl-sigil", text: e.glyph }),
@@ -782,7 +820,7 @@ function renderBoard(body: HTMLElement, r: TeamRunState): void {
       const dur = Math.max(1, Math.round((g[g.length - 1].at - g[0].at) / 1000));
       tl.append(el("div", {
         class: `ctl-row ctl-group mono${open ? " open" : ""}`,
-        title: open ? "Свернуть группу" : `${g.length} вызовов — развернуть`,
+        title: open ? t("team.collapseGroup") : t("team.expandGroup", g.length),
         onClick: () => {
           if (open) expandedGroups.delete(key);
           else expandedGroups.add(key);
@@ -793,7 +831,7 @@ function renderBoard(body: HTMLElement, r: TeamRunState): void {
         el("span", { class: "ctl-worker", text: g[0].worker }),
         el("span", { class: "ctl-tool", text: tools }),
         el("span", { class: "ctl-sum", text: g[g.length - 1].summary }),
-        el("span", { class: "ctl-at dim", text: `${dur}s` }),
+        el("span", { class: "ctl-at dim", text: t("team.elapsedSec", dur) }),
         el("span", { class: "ctl-chev dim", text: open ? "▾" : "▸" }),
       ));
       if (open) for (const e of g) tl.append(timelineRow(e, true));
@@ -809,19 +847,19 @@ function renderBoard(body: HTMLElement, r: TeamRunState): void {
     const call = r.needsCall;
     extras.append(
       el("div", { class: "needs-call materialize" },
-        el("div", { class: "nc-title", text: `Slice ${call.sliceId} failed twice — needs your call` }),
+        el("div", { class: "nc-title", text: t("team.needsCallTitle", call.sliceId) }),
         el("div", { class: "nc-error mono dim", text: call.error }),
         el("div", { class: "nc-actions" },
-          el("button", { class: "btn btn-primary", text: "Retry", onClick: () => void window.ide.team.needsCall("retry") }),
+          el("button", { class: "btn btn-primary", text: t("team.retry"), onClick: () => void window.ide.team.needsCall("retry") }),
           el("button", {
-            class: "btn", text: "Edit slice…",
+            class: "btn", text: t("team.editSliceBtn"),
             onClick: () => {
               const s = r.slices.find((x) => x.id === call.sliceId);
-              void inputDialog({ title: `Rescope slice ${call.sliceId}`, message: "New scope for the retry:", value: s?.scope ?? "" })
+              void inputDialog({ title: t("team.rescopeTitle", call.sliceId), message: t("team.rescopeMsg"), value: s?.scope ?? "" })
                 .then((scope) => { if (scope !== null) void window.ide.team.needsCall("retry", scope); });
             },
           }),
-          el("button", { class: "btn btn-danger", text: "Abort team run", onClick: () => void window.ide.team.needsCall("abort") }),
+          el("button", { class: "btn btn-danger", text: t("team.abortRun"), onClick: () => void window.ide.team.needsCall("abort") }),
         ),
       ),
     );
@@ -831,7 +869,7 @@ function renderBoard(body: HTMLElement, r: TeamRunState): void {
     const rep = el("div", { class: "team-report materialize md" });
     rep.innerHTML = marked.parse(r.report, { async: false });
     extras.append(
-      el("div", { class: "tr-head mono", text: "TEAM REPORT" }),
+      el("div", { class: "tr-head mono", text: t("team.reportHead") }),
       rep,
     );
   }
@@ -845,18 +883,18 @@ function renderStalled(body: HTMLElement, r: TeamRunState): void {
   resetFeedUi();
   body.append(
     el("div", { class: "team-stalled materialize" },
-      el("div", { class: "ts-title", text: r.didNotSurvive ? "This team run did not survive the restart" : "The team run stalled" }),
+      el("div", { class: "ts-title", text: r.didNotSurvive ? t("team.didNotSurvive") : t("team.stalledTitle") }),
       el("div", { class: "dim", text: r.didNotSurvive
-        ? "Team runs do not resume across app restarts. Below is the last known state from before the app closed."
-        : "The agent turn ended without completing the protocol. You can restart the run with the same goal." }),
+        ? t("team.didNotSurviveMsg")
+        : t("team.stalledMsg") }),
       el("div", { class: "ts-goal mono", text: r.goal }),
       r.slices.length ? renderDag(r.slices, { clickable: false }) : null,
       el("div", { class: "tg-actions" },
-        el("button", { class: "btn btn-ghost", text: "Dismiss", onClick: () => void window.ide.team.clear() }),
+        el("button", { class: "btn btn-ghost", text: t("team.dismiss"), onClick: () => void window.ide.team.clear() }),
         el("button", {
-          class: "btn btn-primary", text: "Restart team run",
+          class: "btn btn-primary", text: t("team.restartRun"),
           onClick: () => void window.ide.team.restartRun().then((res) => {
-            if (!res.ok) toast(res.error ?? "Restart failed", { crit: true });
+            if (!res.ok) toast(res.error ?? t("team.restartFailed"), { crit: true });
           }),
         }),
       ),
@@ -885,7 +923,7 @@ function journalRow(f: TeamFeedEntry): HTMLElement {
       el("span", { class: "tj-glyph mono", text: "◇" }),
       el("span", {
         class: "tj-text tj-link",
-        text: `план из ${n} слайс${n === 1 ? "а" : "ов"} — открыть`,
+        text: t("team.planOfSlices", n),
         onClick: () => surfaceEl.scrollTo({ top: 0, behavior: "smooth" }),
       }),
       el("span", { class: "tj-at mono dim", text: at }),
@@ -903,17 +941,17 @@ function ensureJournal(): void {
   journalRows = el("div", { class: "tj-rows" });
   const toggle = el("button", {
     class: "tj-toggle",
-    text: journalExpanded ? "свернуть" : "показать все",
+    text: journalExpanded ? t("team.collapse") : t("team.showAll"),
     onClick: () => {
       journalExpanded = !journalExpanded;
       journalEl?.classList.toggle("expanded", journalExpanded);
-      toggle.textContent = journalExpanded ? "свернуть" : "показать все";
+      toggle.textContent = journalExpanded ? t("team.collapse") : t("team.showAll");
     },
   });
   toggle.style.display = "none";
   journalEl = el("div", { class: `team-journal${journalExpanded ? " expanded" : ""}` },
     el("div", { class: "tj-head mono" },
-      el("span", { class: "tj-title", text: "журнал команды" }),
+      el("span", { class: "tj-title", text: t("team.journal") }),
       el("span", { class: "tj-count dim", text: "" }),
       el("span", { style: { flex: "1" } }),
       toggle,

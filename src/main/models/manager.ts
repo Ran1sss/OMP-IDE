@@ -83,10 +83,6 @@ class ModelsManager {
   private sessionThinking: ThinkingLevel | null = null;
   /** thinking level change queued to the run boundary */
   private pendingThinking: ThinkingLevel | null = null;
-  /** one-shot boost level; wins over override, cleared after exactly one send */
-  private boostThinking: ThinkingLevel | null = null;
-  /** a send has consumed the armed boost; clear it at the next run boundary */
-  private boostConsumed = false;
   /** capability of active model per omp catalog; refreshed on model change */
   private activeCapability: ThinkCapability = "unknown";
   /** live snapshot of OMP's profile registry (reconciled from models.yml) */
@@ -154,8 +150,6 @@ class ModelsManager {
     onNewSession(() => {
       this.sessionThinking = null;
       this.pendingThinking = null;
-      this.boostThinking = null;
-      this.boostConsumed = false;
       void this.applyThinking("new-session");
       this.pushState();
     });
@@ -171,25 +165,14 @@ class ModelsManager {
         this.pendingSwitch = null;
         void this.requestSwitch(sw.selector, "queued");
       }
-      let boostExpired = false;
-      if (s.state === "idle" && this.boostConsumed) {
-        this.boostConsumed = false;
-        this.boostThinking = null;
-        boostExpired = true;
-        this.log("THINK", "boost expired (one send done)", "boost");
-        this.pushState();
-      }
       if (s.state === "idle" && this.pendingThinking !== null) {
         this.pendingThinking = null;
         void this.applyThinking("queued");
-      } else if (boostExpired) {
-        void this.applyThinking("boost-expired");
       }
       if (s.state === "idle") void this.refreshUsage();
     });
     this.bridge.onEvent((e) => {
       if (e.kind === "user-message") this.usage.requests++;
-      if (e.kind === "user-message" && this.boostThinking !== null) this.boostConsumed = true;
       if (e.kind === "agent-end") void this.refreshUsage();
       if (e.kind === "turn-error") {
         void this.swap.onProviderError(e.provider, e.modelId, e.status, e.message, "turn");
@@ -233,7 +216,6 @@ class ModelsManager {
       describe: () => ({
         effective: this.effectiveThinking(),
         override: this.sessionThinking,
-        boost: this.boostThinking,
         capability: this.activeCapability,
       }),
       setSession: (level, origin) => {
@@ -504,9 +486,9 @@ class ModelsManager {
     ];
   }
 
-  /** the one resolver: effective = boost ?? session override ?? default-role level */
+  /** the one resolver: effective = session override ?? default-role level */
   private effectiveThinking(): ThinkingLevel {
-    return this.boostThinking ?? this.sessionThinking ?? loadModelsStore().thinkingRoles.default;
+    return this.sessionThinking ?? loadModelsStore().thinkingRoles.default;
   }
 
   getState(): ModelsState {
@@ -526,7 +508,6 @@ class ModelsManager {
         effective: this.effectiveThinking(),
         capability: this.activeCapability,
         pending: this.pendingThinking,
-        boost: this.boostThinking,
       },
       autoSwap: {
         enabled: store.autoSwapEnabled,
@@ -607,28 +588,6 @@ class ModelsManager {
     const pending = this.queueOrApplyThinking(origin);
     this.pushState();
     return { pending };
-  }
-
-  /** one-shot boost: one level up from the current base, for exactly one send */
-  boostOnce(origin: string): { armed: boolean; level: ThinkingLevel | null; pending: boolean } {
-    if (this.activeCapability === "no-thinking") return { armed: false, level: null, pending: false };
-    if (this.boostThinking !== null) {
-      this.boostThinking = null;
-      this.log("THINK", "boost disarmed", origin);
-      const pending = this.queueOrApplyThinking(origin);
-      this.pushState();
-      return { armed: false, level: null, pending };
-    }
-    const base = this.sessionThinking ?? loadModelsStore().thinkingRoles.default;
-    const idx = THINKING_LEVELS.indexOf(base);
-    const boosted = THINKING_LEVELS[Math.min(idx + 1, THINKING_LEVELS.length - 1)];
-    if (boosted === base) return { armed: false, level: base, pending: false };
-    this.boostThinking = boosted;
-    this.boostConsumed = false;
-    this.log("THINK", `boost armed → ${boosted} (one send)`, origin);
-    const pending = this.queueOrApplyThinking(origin);
-    this.pushState();
-    return { armed: true, level: boosted, pending };
   }
 
   /** mid-run changes queue to the boundary — never yank a live turn */
@@ -1186,7 +1145,6 @@ export function registerModelsHandlers(ipc: IpcMain): void {
   ipc.handle("models:switchModel", async (_e, selector: string, origin: string) => m.switchModel(selector, origin));
   ipc.handle("models:setRoleThinking", async (_e, role: ModelRole, level: ThinkingLevel, origin: string) => m.setRoleThinking(role, level, origin));
   ipc.handle("models:setSessionThinking", async (_e, level: ThinkingLevel | null, origin: string) => m.setSessionThinking(level, origin));
-  ipc.handle("models:boostOnce", async (_e, origin: string) => m.boostOnce(origin));
   ipc.handle("models:getEvents", async () => m.getEvents());
   ipc.handle("models:enhance", async (_e, draft: string, origin: string) => m.enhance(draft, origin));
   ipc.handle("models:enhanceStatus", async () => m.enhanceStatus());

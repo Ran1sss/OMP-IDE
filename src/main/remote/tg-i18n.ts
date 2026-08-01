@@ -27,6 +27,10 @@ interface TgStrings {
   alreadyPaired: string;
   unknownCommand: string;
   help: string;
+  /** Chat Dialogue: paired-DM nudge for noise/greetings */
+  dialogNudge: string;
+  /** Chat Dialogue: honest one-liner when the answer oneshot fails */
+  dialogFailed: string;
 }
 
 const RU: TgStrings = {
@@ -58,6 +62,8 @@ const RU: TgStrings = {
     "",
     "Пульт работает, только пока OMP IDE запущена на компьютере.",
   ].join("\n"),
+  dialogNudge: "Я на связи — спросите о статусе или дайте задачу.",
+  dialogFailed: "Не смог собрать ответ (модель недоступна) — попробуйте ещё раз.",
 };
 
 const EN: TgStrings = {
@@ -89,6 +95,8 @@ const EN: TgStrings = {
     "",
     "Remote works only while OMP IDE runs on the desktop.",
   ].join("\n"),
+  dialogNudge: "I'm here — ask about the status or send a task.",
+  dialogFailed: "Couldn't compose an answer (model unavailable) — try again.",
 };
 
 export function tg(lang: TgLang): TgStrings {
