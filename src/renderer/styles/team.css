@@ -320,3 +320,191 @@
 
 /* chat bubbles whose whole content was protocol markers collapse */
 .chat-agent.md-empty { display: none; }
+
+/* ================= Crew Rail (crew-rail spec §3, lab v1) ================= */
+
+/* -- the rail: chips wrap, never scroll horizontally -- */
+.rail { display: flex; gap: 8px; align-items: stretch; flex-wrap: wrap; padding: 8px 10px 0; }
+.rchip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--bg-1);
+  border: 1px solid var(--line);
+  border-radius: var(--r-m);
+  padding: 6px 10px;
+  cursor: pointer;
+  transition: border-color var(--t-fast) var(--ease-swift), transform var(--t-fast) var(--ease-swift), opacity var(--t-med) var(--ease-swift);
+}
+.rchip:hover { border-color: var(--line-bright); transform: translateY(-2px); }
+.rchip.filtered, .rchip.pinned { border-color: var(--power); box-shadow: 0 0 0 1px var(--power-40); }
+.sigil {
+  width: 26px; height: 26px;
+  border-radius: 10px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  color: var(--energy);
+  background: var(--energy-15);
+  border: 1px solid var(--energy-25);
+  flex-shrink: 0;
+  position: relative;
+}
+.sigil.big { width: 46px; height: 46px; font-size: 20px; }
+.rc-nm { font-size: 13px; font-weight: 600; color: var(--text-hi); }
+.rc-stt { font-size: 10.5px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-low); }
+/* chip states (lab): working pulses, sleeping dims, done blue+check, failed crit full-opacity, throttled flare */
+.rchip.st-working .sigil { animation: sigil-pulse var(--t-sigil-pulse) var(--ease-swift) infinite; }
+.rchip.st-working .rc-stt { color: var(--energy); }
+@keyframes sigil-pulse {
+  0%, 100% { box-shadow: 0 0 0 rgba(52, 224, 247, 0); }
+  50%      { box-shadow: 0 0 16px var(--energy-60); }
+}
+.rchip.st-sleeping { opacity: 0.45; }
+.rchip.st-sleeping .sigil { color: var(--text-low); background: var(--bg-2); border-color: var(--line); animation: none; }
+.rchip.st-waking { animation: team-materialize var(--t-med) var(--ease-swift); }
+.rchip.st-waking .rc-stt { color: var(--energy); }
+.rchip.st-done .sigil { color: var(--energy-dim); background: rgba(42, 167, 184, 0.08); border-color: rgba(42, 167, 184, 0.3); }
+.rchip.st-done .sigil::after {
+  content: "✓";
+  position: absolute;
+  bottom: -4px; right: -4px;
+  width: 13px; height: 13px;
+  border-radius: 50%;
+  background: var(--energy-dim);
+  color: var(--void);
+  font-size: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+}
+.rchip.st-done .rc-stt { color: var(--energy-dim); }
+.rchip.st-failed .sigil { color: var(--crit); background: var(--crit-15); border-color: var(--crit-40); }
+.rchip.st-failed .rc-stt { color: var(--crit); }
+.rchip.st-throttled .rc-stt { color: var(--flare); }
+.rchip.st-throttled .sigil { color: var(--flare); background: var(--flare-15); border-color: var(--flare-40); }
+.rchip.st-deliberating .sigil { animation: sigil-pulse calc(var(--t-sigil-pulse) * 2) var(--ease-swift) infinite; }
+
+/* -- expanded worker cards: stacked, seam on the left while streaming -- */
+.rexps { display: flex; flex-direction: column; gap: 8px; padding: 8px 10px 0; }
+.rexp {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  background: var(--bg-1);
+  border: 1px solid var(--energy-25);
+  border-radius: var(--r-m);
+  padding: 12px 14px;
+  position: relative;
+  overflow: hidden;
+  cursor: pointer;
+}
+.rexp.ro { border-color: var(--line); cursor: default; }
+.rexp.st-throttled { border-color: var(--flare-40); }
+.rexp.filtered { box-shadow: 0 0 0 1px var(--power-40); }
+.rexp::before {
+  content: "";
+  position: absolute;
+  left: 0; top: 0; bottom: 0;
+  width: 2px;
+  background: var(--line);
+}
+.rexp.streaming::before {
+  background: linear-gradient(180deg, transparent, var(--energy), transparent);
+  background-size: 100% 300%;
+  animation: seam-drift var(--t-crew-seam) linear infinite;
+}
+.rx-info { flex: 1; min-width: 0; }
+.rx-t { font-size: 13.5px; font-weight: 600; color: var(--text-hi); }
+.rx-s { font-size: 11.5px; color: var(--text-mid); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rexp.st-throttled .rx-s { color: var(--flare); }
+.rx-wait { font-size: 11px; color: var(--gold); margin-top: 2px; }
+/* indeterminate progress: shimmer, never a fake percentage */
+.rx-prog { height: 4px; background: var(--bg-2); border-radius: 2px; margin-top: 8px; overflow: hidden; }
+.rx-prog i {
+  display: block;
+  height: 100%;
+  width: 40%;
+  border-radius: 2px;
+  background: linear-gradient(90deg, transparent, var(--energy-60), transparent);
+  animation: prog-slide 2s var(--ease-swift) infinite;
+}
+@keyframes prog-slide {
+  from { transform: translateX(-100%); }
+  to   { transform: translateX(350%); }
+}
+.rexp.ro .rx-prog, .rexp.st-throttled .rx-prog i { display: none; }
+.rx-files { font-size: 10.5px; color: var(--text-low); text-align: right; line-height: 1.7; flex-shrink: 0; font-variant-numeric: tabular-nums; }
+.rx-files b { color: var(--energy); font-weight: 600; }
+
+/* -- pipeline strip: rows with elbow wrap; the edge INTO an active node flows -- */
+.pipe-host { padding: 10px 10px 0; }
+.pipe { display: flex; flex-direction: column; gap: 6px; }
+.pipe-row { display: flex; align-items: center; flex-wrap: wrap; gap: 0; row-gap: 6px; }
+.pnode {
+  display: inline-flex;
+  flex-direction: column;
+  background: var(--bg-1);
+  border: 1px solid var(--line);
+  border-radius: var(--r-s);
+  padding: 6px 12px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-mid);
+  cursor: pointer;
+  transition: border-color var(--t-fast) var(--ease-swift), box-shadow var(--t-fast) var(--ease-swift);
+}
+.pnode b { font-size: 9px; color: var(--text-low); letter-spacing: 0.1em; font-weight: 700; }
+.pnode.st-done { border-color: rgba(42, 167, 184, 0.4); color: var(--energy-dim); }
+.pnode.st-done b { color: var(--energy-dim); }
+.pnode.st-active { border-color: var(--energy); color: var(--text-hi); box-shadow: 0 0 18px -6px var(--energy-60); }
+.pnode.st-active b { color: var(--energy); }
+.pnode.st-failed { border-color: var(--crit); color: var(--crit); }
+.pnode.st-replanned { border-color: var(--flare-40); border-style: dashed; }
+.pedge { width: 26px; height: 1.5px; background: var(--line); flex-shrink: 0; }
+.pedge.elbow { width: 14px; margin-left: 12px; border-left: 1.5px solid var(--line); height: 10px; background: transparent; border-bottom: 1.5px solid var(--line); border-bottom-left-radius: 6px; }
+.pedge.flow {
+  background: linear-gradient(90deg, var(--line) 0%, var(--energy) 50%, var(--line) 100%);
+  background-size: 200% 100%;
+  animation: edge-flow var(--t-edge-flow) linear infinite;
+}
+.pedge.elbow.flow {
+  background: transparent;
+  border-color: var(--energy-60);
+}
+@keyframes edge-flow {
+  from { background-position: 200% 0; }
+  to   { background-position: 0 0; }
+}
+
+/* -- shared attributed timeline -- */
+.crew-tl { max-height: 150px; overflow-y: auto; margin: 8px 10px 0; border: 1px solid var(--line); border-radius: var(--r-s); padding: 6px 8px; }
+.ctl-head { font-size: 9.5px; letter-spacing: 0.1em; color: var(--text-low); margin-bottom: 4px; }
+.ctl-row { display: flex; gap: 7px; font-size: 10.5px; color: var(--text-mid); align-items: baseline; padding: 1px 0; }
+.ctl-sigil { color: var(--energy); flex-shrink: 0; }
+.ctl-worker { color: var(--text-hi); flex-shrink: 0; }
+.ctl-tool { color: var(--energy); flex-shrink: 0; }
+.ctl-sum { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+.ctl-at { flex-shrink: 0; font-size: 9.5px; }
+
+/* -- head mechanism badge -- */
+.th-mech {
+  font-size: 9.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 2px 8px;
+  border-radius: var(--r-s);
+  color: var(--energy);
+  border: 1px solid var(--energy-25);
+  background: var(--energy-15);
+  flex-shrink: 0;
+}
+.th-mech.solo { color: var(--flare); border-color: var(--flare-40); background: var(--flare-15); }
+
+/* gate: auto-serialization marker */
+.tg-auto { color: var(--flare); cursor: help; }
+
+/* slice-detail meta row */
+.sd-meta { display: flex; flex-direction: column; gap: 2px; padding: 6px 10px 0; font-size: 10.5px; }

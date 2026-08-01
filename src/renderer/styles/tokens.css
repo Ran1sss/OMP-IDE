@@ -54,7 +54,10 @@
   --t-grain: 1200ms;      /* film-grain step shift */
   --t-shimmer: 1000ms;    /* hover shimmer, one pass */
 
-  /* one shared SVG-noise asset — every grain surface reuses this, no copies */
+  /* Crew Rail (crew-rail lab) */
+  --t-sigil-pulse: 1400ms;/* working chip sigil glow */
+  --t-crew-seam: 3000ms;  /* expanded-card left seam drift */
+  --t-edge-flow: 1600ms;  /* pipeline edge flow into active slices */
   --grain-url: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2'/%3E%3CfeColorMatrix values='0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0.04 0'/%3E%3C/filter%3E%3Crect width='120' height='120' filter='url(%23n)'/%3E%3C/svg%3E");
 
   /* Derived alpha channels (kept here so no component invents its own) */

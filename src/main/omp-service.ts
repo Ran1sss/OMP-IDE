@@ -100,6 +100,11 @@ export function setOmpChildEnv(env: Record<string, string>): void {
   extraChildEnv = env;
 }
 
+/** merged env for ANY omp child (worker pool spawns its own processes) */
+export function getOmpChildEnv(): Record<string, string> {
+  return { ...extraChildEnv };
+}
+
 /**
  * Cross-module thinking control. The models module registers an implementation
  * on init; the remote module consumes it if present (/think). Keeping the

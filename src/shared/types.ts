@@ -629,7 +629,7 @@ export type TeamPhase =
   /** agent turn ended mid-run without protocol completion — resumable by the user, never auto */
   | "stalled";
 
-export type TeamAgentState = "deliberating" | "working" | "sleeping" | "waking" | "done" | "failed";
+export type TeamAgentState = "deliberating" | "working" | "sleeping" | "waking" | "done" | "failed" | "throttled";
 
 export interface TeamAgent {
   name: string;
@@ -643,6 +643,11 @@ export interface TeamAgent {
   /** epoch ms of the last state flip — elapsed-on-slice ticker */
   sinceMs: number;
   filesTouched: number;
+  /** cumulative diffstat across this worker's finished slices */
+  add?: number;
+  del?: number;
+  /** last activity line (read-only chip card) */
+  lastActivity?: string;
 }
 
 export type TeamSliceState = "pending" | "active" | "done" | "failed" | "replanned";
@@ -659,6 +664,20 @@ export interface TeamSlice {
   handoff?: string;
   add: number;
   del: number;
+  /** planned write-set (files this slice owns); drives disjoint-files validation */
+  files?: string[];
+  /** dep ids auto-added by the orchestrator because write-sets overlap ("serialized: both touch X") */
+  autoDeps?: string[];
+}
+
+/** one attributed tool call in the shared team timeline */
+export interface TeamTimelineEntry {
+  worker: string;
+  glyph: string;
+  tool: string;
+  summary: string;
+  sliceId?: string;
+  at: number;
 }
 
 export interface TeamFeedEntry {
@@ -669,18 +688,33 @@ export interface TeamFeedEntry {
   kind: "argument" | "note" | "system";
 }
 
+/** live execution mechanism — the honesty badge states it verbatim (crew-rail §2) */
+export interface TeamMechanism {
+  kind: "parallel" | "solo";
+  /** concurrent worker processes right now (parallel) */
+  active: number;
+  /** workers currently paused by rate-limit */
+  throttled: number;
+  /** solo: the actual reason ("omp not found", "probe: …") — never generic */
+  reason?: string;
+}
+
 export interface TeamRunState {
   runId: string;
   goal: string;
   phase: TeamPhase;
   /** capability probe failed → single agent plays the roles sequentially */
   solo: boolean;
+  /** live mechanism readout for the panel-header badge */
+  mechanism?: TeamMechanism;
   round: number;
   maxRounds: number;
   agents: TeamAgent[];
   slices: TeamSlice[];
   planSummary: string;
   feed: TeamFeedEntry[];
+  /** shared attributed timeline (every worker's tool calls, interleaved) */
+  timeline?: TeamTimelineEntry[];
   /** two failures on one slice → paused, waiting for the user's call */
   needsCall: { sliceId: string; error: string } | null;
   /** "IDE" | "@username via Telegram" once approved */

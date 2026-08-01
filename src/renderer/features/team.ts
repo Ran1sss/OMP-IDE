@@ -246,8 +246,20 @@ function renderHead(head: HTMLElement, r: TeamRunState): void {
     el("span", { class: "th-title", text: "TEAM" }),
     el("span", { class: "th-phase mono", text: phaseLabel[r.phase] ?? r.phase }),
   );
-  if (r.solo) {
-    head.append(el("span", { class: "th-solo mono", title: "Subagent probe failed — one agent plays the roles sequentially. Same pipeline, honest labels.", text: "solo fallback" }));
+  // honesty badge: the LIVE mechanism, never a generic label (crew-rail §2)
+  if (r.mechanism) {
+    const m = r.mechanism;
+    const label =
+      m.kind === "solo" ? `solo: ${m.reason ?? "sequential"}` :
+      m.throttled > 0 ? `parallel ×${m.active} (${m.throttled} rate-limited)` :
+      `parallel ×${m.active}`;
+    head.append(el("span", {
+      class: `th-mech mono${m.kind === "solo" ? " solo" : ""}`,
+      title: m.kind === "solo" ? "Process spawning unavailable — the lead session executes sequentially." : "One omp process per active worker (cap 4, starts staggered ≥2s).",
+      text: label,
+    }));
+  } else if (r.solo && (r.phase === "probe" || r.phase === "deliberate" || r.phase === "gate")) {
+    head.append(el("span", { class: "th-mech mono", title: "Subagent probe failed — execution will use process-level parallelism (one omp per worker).", text: "process-parallel on approve" }));
   }
   head.append(
     el("span", { class: "th-goal", title: r.goal, text: r.goal }),
@@ -380,7 +392,17 @@ function gateSliceRow(s: TeamSlice, r: TeamRunState): HTMLElement {
       el("div", { class: "tg-scope dim", text: s.scope }),
       s.contract ? el("div", { class: "tg-contract mono dim", text: `contract: ${s.contract}` }) : null,
     ),
-    el("span", { class: "tg-deps mono dim", text: s.deps.length ? `← ${s.deps.join(", ")}` : "root" }),
+    el("span", { class: "tg-deps mono dim" },
+      el("span", { text: s.deps.length ? `← ${s.deps.join(", ")}` : "root" }),
+      // auto-added serialization edges are visible at the gate with their reason
+      s.autoDeps?.length
+        ? el("span", {
+            class: "tg-auto",
+            title: `serialized: write-sets overlap with ${s.autoDeps.join(", ")} (both touch the same file)`,
+            text: " ⛓ auto",
+          })
+        : null,
+    ),
     el("span", { class: "tg-worker mono", text: s.worker }),
     el("button", {
       class: "btn btn-ghost tg-btn", text: "Edit",
@@ -536,12 +558,126 @@ function showSliceDetail(s: TeamSlice): void {
         el("span", { style: { flex: "1" } }),
         el("button", { class: "btn btn-ghost th-btn", text: "✕", onClick: (e) => (e.currentTarget as HTMLElement).closest(".slice-detail")?.remove() }),
       ),
+      // node popover anatomy (crew-rail §3): owner / deps / contract / diffstat / hand-off
+      el("div", { class: "sd-meta mono dim" },
+        el("span", { text: `owner: ${s.worker}` }),
+        el("span", { text: s.deps.length ? `deps: ${s.deps.join(", ")}${s.autoDeps?.length ? ` (⛓ auto: ${s.autoDeps.join(", ")})` : ""}` : "deps: none (root)" }),
+        s.contract ? el("span", { text: `contract: ${s.contract}` }) : null,
+        s.files?.length ? el("span", { text: `files: ${s.files.join(", ")}` }) : null,
+      ),
       el("div", { class: "sd-body dim", text: s.handoff ?? "No hand-off note yet — the finisher writes it when the slice completes." }),
     ),
   );
 }
 
-// ---- execution board
+// ---- execution board — Crew Rail (crew-rail spec §3, lab variant 1)
+
+/** chip-expanded read-only toggles + timeline filter (session-scoped UI state) */
+let expandedChip: string | null = null;
+let timelineFilter: string | null = null;
+
+function crewChip(a: TeamAgent, r: TeamRunState): HTMLElement {
+  const prev = prevAgentState[a.name];
+  const woke = (prev === "sleeping") && (a.state === "waking" || a.state === "working");
+  prevAgentState[a.name] = a.state;
+  const chip = el(
+    "div",
+    {
+      class: `rchip st-${a.state}${woke ? " materialize" : ""}${expandedChip === a.name ? " pinned" : ""}${timelineFilter === a.name ? " filtered" : ""}`,
+      title: a.slice ? `${a.name} · slice ${a.slice}` : a.name,
+      onClick: () => {
+        expandedChip = expandedChip === a.name ? null : a.name;
+        render();
+      },
+    },
+    el("span", { class: "sigil mono", text: a.glyph }),
+    el("div", { class: "rc-txt" },
+      el("div", { class: "rc-nm mono", text: a.name }),
+      el("div", { class: `rc-stt mono st-${a.state}`, text: a.state }),
+    ),
+  );
+  return chip;
+}
+
+/** expanded live card for a currently-working agent (one per worker, stacked) */
+function crewExpanded(a: TeamAgent, r: TeamRunState): HTMLElement {
+  const s = a.slice ? r.slices.find((x) => x.id === a.slice) : undefined;
+  const streaming = a.state === "working" || a.state === "throttled";
+  const card = el(
+    "div",
+    {
+      class: `rexp st-${a.state}${streaming && a.state === "working" ? " streaming" : ""}${timelineFilter === a.name ? " filtered" : ""}`,
+      title: "click: filter the timeline to this worker",
+      onClick: () => {
+        timelineFilter = timelineFilter === a.name ? null : a.name;
+        render();
+      },
+    },
+    el("span", { class: "sigil big mono", text: a.glyph }),
+    el("div", { class: "rx-info" },
+      el("div", { class: "rx-t mono", text: `${a.name}${a.slice ? ` · slice ${a.slice}` : ""}` }),
+      el("div", { class: "rx-s", text: a.state === "throttled" ? "rate-limited — backing off" : (s ? s.title : a.lastActivity ?? "") }),
+      el("div", { class: "rx-prog" }, el("i")),
+    ),
+    el("div", { class: "rx-files mono" },
+      el("div", {}, el("b", { text: String(a.filesTouched) }), ` file${a.filesTouched === 1 ? "" : "s"} touched`),
+      el("div", {}, el("b", { text: `+${a.add ?? 0} −${a.del ?? 0}` })),
+      el("div", { class: "tc-elapsed", dataset: { since: String(a.sinceMs) } }, fmtElapsed(a.sinceMs) + " on slice"),
+    ),
+  );
+  return card;
+}
+
+/** read-only card for a clicked sleeping/done/failed chip */
+function crewReadonly(a: TeamAgent, r: TeamRunState): HTMLElement {
+  const doneSlices = r.slices.filter((x) => x.worker === a.name && x.state === "done");
+  const lastHandoff = doneSlices[doneSlices.length - 1]?.handoff;
+  return el(
+    "div",
+    { class: `rexp ro st-${a.state}` },
+    el("span", { class: "sigil big mono", text: a.glyph }),
+    el("div", { class: "rx-info" },
+      el("div", { class: "rx-t mono", text: `${a.name} · ${a.state}` }),
+      a.state === "sleeping" && a.waitingFor?.length
+        ? el("div", { class: "rx-wait mono", text: `ждёт ${a.waitingFor.join(", ")}` })
+        : el("div", { class: "rx-s", text: a.lastActivity ?? (lastHandoff ? lastHandoff.slice(0, 160) : "no activity yet") }),
+    ),
+    el("div", { class: "rx-files mono" },
+      el("div", {}, el("b", { text: String(a.filesTouched) }), ` file${a.filesTouched === 1 ? "" : "s"}`),
+      el("div", {}, el("b", { text: `+${a.add ?? 0} −${a.del ?? 0}` })),
+    ),
+  );
+}
+
+/** pipeline strip: layered nodes with elbow wrap; the edge INTO an active slice flows */
+function pipelineStrip(r: TeamRunState): HTMLElement {
+  const layers = layerSlices(r.slices);
+  const maxLayer = Math.max(0, ...layers.values());
+  const rows: TeamSlice[][] = [];
+  for (let l = 0; l <= maxLayer; l++) rows.push(r.slices.filter((s) => layers.get(s.id) === l));
+  const strip = el("div", { class: "pipe" });
+  rows.forEach((row, li) => {
+    const rowEl = el("div", { class: "pipe-row" });
+    row.forEach((s, i) => {
+      if (i > 0 || li > 0) {
+        // the edge INTO this node: flows while the node is active
+        const flows = s.state === "active";
+        rowEl.append(el("span", { class: `pedge${flows ? " flow" : ""}${i === 0 ? " elbow" : ""}` }));
+      }
+      rowEl.append(
+        el("span", {
+          class: `pnode st-${s.state}`,
+          onClick: (e) => { e.stopPropagation(); showSliceDetail(s); },
+        },
+          el("b", { text: `SLICE ${s.id}${s.autoDeps?.length ? " ⛓" : ""}` }),
+          el("span", { text: s.title.slice(0, 22) }),
+        ),
+      );
+    });
+    strip.append(rowEl);
+  });
+  return strip;
+}
 
 function renderBoard(body: HTMLElement, r: TeamRunState): void {
   let board = body.querySelector(".team-board") as HTMLElement | null;
@@ -554,40 +690,48 @@ function renderBoard(body: HTMLElement, r: TeamRunState): void {
     body.append(board);
   }
 
-  let cards = board.querySelector(".tb-cards") as HTMLElement | null;
-  if (!cards) { cards = el("div", { class: "tb-cards" }); board.append(cards); }
-  clear(cards);
-  for (const a of r.agents.filter((x) => x.kind === "worker")) cards.append(agentCard(a));
-  if (!r.agents.some((x) => x.kind === "worker")) {
-    for (const a of r.agents) cards.append(agentCard(a));
+  const workers = r.agents.filter((x) => x.kind === "worker");
+  const crew = workers.length ? workers : r.agents;
+
+  // the rail: one chip per crew member, wraps, never scrolls horizontally
+  let rail = board.querySelector(".rail") as HTMLElement | null;
+  if (!rail) { rail = el("div", { class: "rail" }); board.append(rail); }
+  clear(rail);
+  for (const a of crew) rail.append(crewChip(a, r));
+
+  // expanded cards: every WORKING agent expands (true parallelism = several at once);
+  // throttled stays expanded (flare); a clicked chip pins a read-only card
+  let exps = board.querySelector(".rexps") as HTMLElement | null;
+  if (!exps) { exps = el("div", { class: "rexps" }); board.append(exps); }
+  clear(exps);
+  for (const a of crew) {
+    if (a.state === "working" || a.state === "throttled") exps.append(crewExpanded(a, r));
+    else if (expandedChip === a.name) exps.append(crewReadonly(a, r));
   }
 
-  // wake pulse: deps of slices actively worked by a just-woken worker
-  const pulseDeps: string[] = [];
-  for (const a of r.agents) {
-    if (a.kind !== "worker" || !a.slice) continue;
-    if (a.state === "waking" || (a.state === "working" && prevAgentState[a.name] === "waking")) {
-      const s = r.slices.find((x) => x.id === a.slice);
-      if (s) pulseDeps.push(...s.deps);
+  // pipeline strip (replaces the DAG boxes + A–E tab row)
+  let pipeHost = board.querySelector(".pipe-host") as HTMLElement | null;
+  if (!pipeHost) { pipeHost = el("div", { class: "pipe-host" }); board.append(pipeHost); }
+  clear(pipeHost);
+  pipeHost.append(pipelineStrip(r));
+
+  // shared attributed timeline (filterable by clicking an expanded card)
+  let tl = board.querySelector(".crew-tl") as HTMLElement | null;
+  if (!tl) { tl = el("div", { class: "crew-tl" }); board.append(tl); }
+  clear(tl);
+  const entries = (r.timeline ?? []).filter((e) => !timelineFilter || e.worker === timelineFilter);
+  if (entries.length) {
+    tl.append(el("div", { class: "ctl-head mono", text: `TIMELINE${timelineFilter ? ` · ${timelineFilter}` : ""} (${entries.length})` }));
+    for (const e of entries.slice(-40)) {
+      tl.append(el("div", { class: "ctl-row mono" },
+        el("span", { class: "ctl-sigil", text: e.glyph }),
+        el("span", { class: "ctl-worker", text: e.worker }),
+        el("span", { class: "ctl-tool", text: e.tool }),
+        el("span", { class: "ctl-sum", text: e.summary }),
+        el("span", { class: "ctl-at dim", text: new Date(e.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }) }),
+      ));
     }
-  }
-
-  let dagHost = board.querySelector(".tb-dag") as HTMLElement | null;
-  if (!dagHost) { dagHost = el("div", { class: "tb-dag" }); board.append(dagHost); }
-  clear(dagHost);
-  dagHost.append(renderDag(r.slices, { clickable: true, pulseDeps }));
-
-  // slice strip replaces the todo strip while the team runs (same language)
-  let strip = board.querySelector(".tb-strip") as HTMLElement | null;
-  if (!strip) { strip = el("div", { class: "tb-strip" }); board.append(strip); }
-  clear(strip);
-  for (const s of r.slices) {
-    strip.append(el("span", {
-      class: `tb-slice mono st-${s.state}`,
-      title: `${s.title} — ${s.scope}${s.handoff ? `\n\n${s.handoff}` : ""}`,
-      text: `${s.id}${s.state === "done" ? " ✓" : s.state === "failed" ? " ✕" : ""}`,
-      onClick: () => showSliceDetail(s),
-    }));
+    tl.scrollTop = tl.scrollHeight;
   }
 
   let extras = board.querySelector(".tb-extras") as HTMLElement | null;

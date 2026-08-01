@@ -8,8 +8,11 @@ import type {
   TeamFeedEntry,
   TeamRunState,
   TeamSlice,
+  TeamTimelineEntry,
 } from "../../shared/types";
-import { getAgentBridge, onNewSession, type AgentBridge } from "../omp-service";
+import { getAgentBridge, onNewSession, whichOmp, type AgentBridge } from "../omp-service";
+import { currentOmpPath } from "../store-service";
+import { startWorker, killWorker, killAllWorkers, steerWorker, liveWorkerCount, liveWorkerPids } from "./worker-pool";
 
 /**
  * Team Mode orchestration adapter (spec: omp-ide-agent-team-prompt.md).
@@ -169,9 +172,39 @@ function normalizeSlices(raw: unknown): TeamSlice[] {
       handoff: typeof r.handoff === "string" ? r.handoff : undefined,
       add: typeof r.add === "number" ? r.add : 0,
       del: typeof r.del === "number" ? r.del : 0,
+      files: Array.isArray(r.files) ? r.files.filter((f): f is string => typeof f === "string").slice(0, 40) : undefined,
     });
   }
   return out;
+}
+
+/**
+ * Disjoint-files discipline (crew-rail §2): planned write-sets assign file
+ * ownership per slice; overlapping slices are forced onto a dependency edge
+ * (serialized) at plan validation. The auto-added edge is marked in autoDeps
+ * so the gate renders it with its tooltip. Deterministic direction: the later
+ * slice (by array order) serializes AFTER the earlier one.
+ */
+function serializeOverlaps(slices: TeamSlice[]): void {
+  const norm = (f: string) => f.replace(/\\/g, "/").replace(/^\.\//, "").toLowerCase();
+  for (let i = 0; i < slices.length; i++) {
+    const a = slices[i];
+    if (!a.files?.length) continue;
+    const aset = new Set(a.files.map(norm));
+    for (let j = i + 1; j < slices.length; j++) {
+      const b = slices[j];
+      if (!b.files?.length) continue;
+      const shared = b.files.filter((f) => aset.has(norm(f)));
+      if (!shared.length) continue;
+      // already ordered? (either direction, direct edge) — nothing to add
+      if (b.deps.includes(a.id) || a.deps.includes(b.id)) continue;
+      const next = slices.map((s) => (s.id === b.id ? { ...s, deps: [...s.deps, a.id] } : s));
+      if (hasCycle(next)) continue; // ordering exists transitively the other way
+      b.deps = [...b.deps, a.id];
+      b.autoDeps = [...(b.autoDeps ?? []), a.id];
+      sysNote(`serialized ${a.id} → ${b.id}: both touch ${shared[0]}`);
+    }
+  }
 }
 
 // -------------------------------------------------- marker event application
@@ -237,18 +270,24 @@ function applyMarker(raw: string): void {
         break;
       }
       run.slices = slices;
+      // deterministic sigils from the ordered glyph set (crew-rail §3): the
+      // model may propose glyphs, but assignment is ours — stable + unique
       run.planSummary = typeof ev.summary === "string" ? ev.summary : "";
+      serializeOverlaps(run.slices);
       const workers = Array.isArray(ev.workers) ? ev.workers : [];
+      const SIGILS = ["◆", "▲", "●", "■", "◇", "✚"];
       const workerAgents: TeamAgent[] = workers
         .filter((w): w is { name: string; glyph?: string } => !!w && typeof (w as Record<string, unknown>).name === "string")
         .slice(0, 6)
-        .map((w) => ({
+        .map((w, i) => ({
           name: w.name,
-          glyph: typeof w.glyph === "string" && w.glyph ? w.glyph.slice(0, 2) : "●",
+          glyph: SIGILS[i % SIGILS.length],
           kind: "worker" as const,
           state: "sleeping" as const,
           sinceMs: Date.now(),
           filesTouched: 0,
+          add: 0,
+          del: 0,
         }));
       for (const p of run.agents) if (p.kind === "planner") p.state = "done";
       run.agents = [...run.agents.filter((a) => a.kind === "planner"), ...workerAgents];
@@ -414,7 +453,9 @@ function onAgentEvent(e: OmpEvent): void {
       } else if (run.phase === "probe" || run.phase === "deliberate") {
         run.phase = "stalled";
         sysNote("the deliberation turn ended without a converged plan — run stalled");
-      } else if ((run.phase === "execute" || run.phase === "verify") && !run.needsCall) {
+      } else if ((run.phase === "execute" || run.phase === "verify") && !run.needsCall && !poolActive) {
+        // pool mode: the LEAD session ending a turn is normal — workers run in
+        // their own processes; only the lead-orchestrated path can stall here
         run.phase = "stalled";
         sysNote("the execution turn ended without a report — run stalled");
       }
@@ -450,7 +491,8 @@ function protocolBlock(): string {
     `  ${MARKER} {"ev":"say","who":"Vex","text":"one argument"}`,
     `  ${MARKER} {"ev":"round","n":2}`,
     `  ${MARKER} {"ev":"converged","forced":false}`,
-    `  ${MARKER} {"ev":"plan","summary":"one line","workers":[{"name":"Kilo","glyph":"●"}],"slices":[{"id":"A","title":"...","scope":"one line","worker":"Kilo","deps":[],"contract":"types/files/signatures fixed before fan-out"}]}`,
+    `  ${MARKER} {"ev":"plan","summary":"one line","workers":[{"name":"Kilo","glyph":"●"}],"slices":[{"id":"A","title":"...","scope":"one line","worker":"Kilo","deps":[],"contract":"types/files/signatures fixed before fan-out","files":["src/a.ts","src/b.ts"]}]}`,
+    "  (files = the slice's planned write-set — REQUIRED; the IDE serializes slices whose write-sets overlap)",
     `  ${MARKER} {"ev":"worker","name":"Kilo","state":"working|sleeping|waking|done|failed","slice":"A","waitingFor":["B","C"]}`,
     `  ${MARKER} {"ev":"slice","id":"A","state":"active|done|failed","handoff":"one paragraph: what changed, where, what to watch for","add":12,"del":3,"error":"on failure"}`,
     `  ${MARKER} {"ev":"replan","slices":[FULL updated slice array],"note":"what changed and why"}`,
@@ -513,6 +555,259 @@ function executionPrompt(r: TeamRunState): string {
   ].join("\n");
 }
 
+// -------------------------------------------------- process-level parallelism
+//
+// Mechanism ladder (crew-rail §2):
+//  1. Harness-native subagents — probed in deliberation as before. DIAGNOSIS
+//     (2026-07-30, time-boxed per spec): spawns via the task tool create job
+//     entries but produce ZERO model turns in this environment; hub wait
+//     times out with no reply. Root cause sits inside the harness's subagent
+//     scheduler (no requests ever reach a provider — confirmed via provider
+//     logs), not in IDE config; no in-config fix exists on our side. The
+//     probe therefore realistically lands on `ok:false` here.
+//  2. Process-level parallelism (below) — one `omp --mode rpc` child per
+//     active worker, cap 4, staggered ≥2s. The IDE-side orchestrator routes
+//     lifecycle: start when runnable, collect hand-off, wake dependents.
+//     Built unconditionally; THE guaranteed path.
+//  3. Solo sequential — only if even process spawning fails (omp missing);
+//     the badge then states the actual reason.
+
+/** pool executor active for the current run's execute phase */
+let poolActive = false;
+/** consecutive failure count per slice id (two → needs-call) */
+const failCounts = new Map<string, number>();
+/** per-slice live diffstat accumulated from worker tool calls */
+const sliceRunStats = new Map<string, { add: number; del: number }>();
+
+function timelinePush(entry: TeamTimelineEntry): void {
+  if (!run) return;
+  run.timeline = run.timeline ?? [];
+  run.timeline.push(entry);
+  if (run.timeline.length > 300) run.timeline.splice(0, run.timeline.length - 300);
+}
+
+function updateMechanism(): void {
+  if (!run || !poolActive) return;
+  const throttled = run.agents.filter((a) => a.state === "throttled").length;
+  run.mechanism = { kind: "parallel", active: liveWorkerCount(), throttled };
+}
+
+function workerPrompt(r: TeamRunState, s: TeamSlice): string {
+  const contracts = r.slices
+    .filter((x) => x.contract)
+    .map((x) => `  ${x.id}: ${x.contract}`)
+    .join("\n");
+  const handoffs = r.slices
+    .filter((x) => s.deps.includes(x.id) && x.handoff)
+    .map((x) => `  — ${x.id} (${x.title}): ${x.handoff}`)
+    .join("\n");
+  return [
+    `[TEAM WORKER] You are worker "${s.worker}" on a crew executing a user-approved plan. You own slice ${s.id} and ONLY slice ${s.id}.`,
+    "",
+    `GOAL (whole team):\n${r.goal}`,
+    "",
+    `PLAN (context — other slices belong to other workers):\n${r.slices.map((x) => `  ${x.id} [${x.worker}] ${x.title}${x.deps.length ? ` (deps: ${x.deps.join(",")})` : ""}`).join("\n")}`,
+    "",
+    `YOUR SLICE ${s.id}: ${s.title}`,
+    `SCOPE: ${s.scope}`,
+    s.files?.length ? `PLANNED WRITE-SET (stay inside it): ${s.files.join(", ")}` : "",
+    contracts ? `FIXED CONTRACTS (do NOT renegotiate):\n${contracts}` : "",
+    handoffs ? `HAND-OFF NOTES from completed dependencies (build on them):\n${handoffs}` : "",
+    "",
+    "RULES:",
+    "- Execute exactly your slice; do not touch files owned by other slices.",
+    "- Verify your own work (run/exercise what you changed) before finishing.",
+    "- END with a final message that STARTS with \"HANDOFF:\" — one paragraph: what changed, where, what to watch for.",
+  ].filter(Boolean).join("\n");
+}
+
+function launchSlice(s: TeamSlice): void {
+  const r = run!;
+  const agent = r.agents.find((a) => a.name === s.worker && a.kind === "worker");
+  // wake moment: chip materialize (waking) → working on confirmed spawn
+  if (agent) {
+    agent.state = "waking";
+    agent.slice = s.id;
+    agent.waitingFor = undefined;
+    agent.sinceMs = Date.now();
+  }
+  s.state = "active";
+  sliceRunStats.set(s.id, { add: 0, del: 0 });
+  pushState();
+
+  void startWorker({
+    name: s.worker,
+    root: bridge!.getRoot() ?? process.cwd(),
+    prompt: workerPrompt(r, s),
+    events: {
+      onToolCall(call) {
+        if (!run) return;
+        const a = run.agents.find((x) => x.name === s.worker);
+        if (a) a.lastActivity = `${call.tool} ${call.summary}`.slice(0, 120);
+        if (call.editPath) {
+          const stats = sliceRunStats.get(s.id);
+          if (stats) {
+            stats.add += call.add ?? 0;
+            stats.del += call.del ?? 0;
+          }
+          if (a) {
+            a.filesTouched++;
+            a.add = (a.add ?? 0) + (call.add ?? 0);
+            a.del = (a.del ?? 0) + (call.del ?? 0);
+          }
+        }
+        timelinePush({ worker: s.worker, glyph: a?.glyph ?? "●", tool: call.tool, summary: call.summary, sliceId: s.id, at: call.at });
+        pushState();
+      },
+      onThrottled(detail) {
+        if (!run) return;
+        const a = run.agents.find((x) => x.name === s.worker);
+        if (a) { a.state = "throttled"; a.sinceMs = Date.now(); }
+        sysNote(`${s.worker} throttled (rate limit): ${detail}`);
+        updateMechanism();
+        pushState();
+      },
+      onResumed() {
+        if (!run) return;
+        const a = run.agents.find((x) => x.name === s.worker);
+        if (a) { a.state = "working"; a.sinceMs = Date.now(); }
+        sysNote(`${s.worker} resumed after backoff`);
+        updateMechanism();
+        pushState();
+      },
+      onText() { /* worker prose is not relayed 1:1 — the hand-off lands at exit */ },
+      onExit(result) {
+        onWorkerExit(s.id, result.ok, result.text, result.error, result.aborted);
+      },
+    },
+  }).then((res) => {
+    if (!run) return;
+    const a = run.agents.find((x) => x.name === s.worker);
+    if (res.ok) {
+      if (a && a.state === "waking") { a.state = "working"; a.sinceMs = Date.now(); }
+    } else {
+      if (a) a.state = "failed";
+      s.state = "failed";
+      sysNote(`${s.worker} failed to start: ${res.error}`);
+    }
+    updateMechanism();
+    pushState();
+  });
+}
+
+function onWorkerExit(sliceId: string, ok: boolean, text: string, error?: string, aborted?: boolean): void {
+  if (!run || !poolActive) return;
+  const s = run.slices.find((x) => x.id === sliceId);
+  const a = s ? run.agents.find((x) => x.name === s.worker) : undefined;
+  if (!s) return;
+  if (aborted) return; // stop flow owns the board state
+
+  if (ok) {
+    const stats = sliceRunStats.get(s.id) ?? { add: 0, del: 0 };
+    s.state = "done";
+    s.add += stats.add;
+    s.del += stats.del;
+    const m = /HANDOFF:\s*([\s\S]+)/i.exec(text);
+    s.handoff = (m ? m[1] : text).trim().slice(0, 1200) || "(no hand-off note)";
+    failCounts.delete(s.id);
+    if (a) {
+      const more = run.slices.some((x) => x.worker === a.name && (x.state === "pending" || x.state === "active"));
+      a.state = more ? "sleeping" : "done";
+      a.slice = undefined;
+      a.sinceMs = Date.now();
+      a.lastActivity = `slice ${s.id} done`;
+    }
+    sysNote(`slice ${s.id} done — ${s.worker} handed off (+${s.add} −${s.del})`);
+  } else {
+    const n = (failCounts.get(s.id) ?? 0) + 1;
+    failCounts.set(s.id, n);
+    if (n >= 2) {
+      s.state = "failed";
+      if (a) { a.state = "failed"; a.sinceMs = Date.now(); }
+      run.needsCall = { sliceId: s.id, error: (error ?? "worker failed twice").slice(0, 600) };
+      sysNote(`slice ${s.id} failed twice — needs your call`);
+      updateMechanism();
+      pushState();
+      return;
+    }
+    s.state = "pending"; // one visible retry
+    if (a) { a.state = "sleeping"; a.slice = undefined; a.sinceMs = Date.now(); }
+    sysNote(`slice ${s.id} failed (${(error ?? "unknown").slice(0, 160)}) — retrying`);
+  }
+  updateMechanism();
+  scheduleSlices();
+}
+
+/** Core scheduler: start every runnable slice (deps done, owner free, cap 4). */
+function scheduleSlices(): void {
+  if (!run || run.phase !== "execute" || !poolActive || run.needsCall) {
+    pushState();
+    return;
+  }
+  const busy = new Set(
+    run.agents.filter((a) => a.kind === "worker" && (a.state === "working" || a.state === "waking" || a.state === "throttled")).map((a) => a.name),
+  );
+  for (const s of run.slices) {
+    if (s.state !== "pending") continue;
+    if (liveWorkerCount() >= 4) break;
+    const depsDone = s.deps.every((d) => run!.slices.find((x) => x.id === d)?.state === "done");
+    if (!depsDone || busy.has(s.worker)) continue;
+    busy.add(s.worker);
+    launchSlice(s);
+  }
+  // sleeping bookkeeping: idle workers with future slices show what they wait for
+  for (const a of run.agents) {
+    if (a.kind !== "worker" || a.state !== "sleeping") continue;
+    const nextSlice = run.slices.find((x) => x.worker === a.name && x.state === "pending");
+    a.waitingFor = nextSlice ? nextSlice.deps.filter((d) => run!.slices.find((x) => x.id === d)?.state !== "done") : undefined;
+  }
+  updateMechanism();
+  if (run.slices.every((x) => x.state === "done")) {
+    finishParallelRun();
+    return;
+  }
+  pushState();
+}
+
+function finishParallelRun(): void {
+  if (!run) return;
+  poolActive = false;
+  const last = run.slices[run.slices.length - 1];
+  run.report = [
+    "## Team report (process-parallel run)",
+    "",
+    ...run.slices.map((s) => `**${s.id} · ${s.title}** — ${s.worker}, +${s.add} −${s.del}\n${s.handoff ?? ""}`),
+    "",
+    `Verification: ${last?.handoff ?? "see final slice hand-off"}`,
+  ].join("\n");
+  run.phase = "done";
+  for (const a of run.agents) if (a.state !== "failed") a.state = "done";
+  run.mechanism = { kind: "parallel", active: 0, throttled: 0 };
+  sysNote("run complete — team report assembled from worker hand-offs");
+  pushState();
+}
+
+/** Mechanism ladder entry: called from approve() when the probe failed. */
+async function beginParallelExecution(): Promise<void> {
+  const r = run!;
+  const bin = await whichOmp(currentOmpPath());
+  if (!bin) {
+    // rung 3 — honest solo with the ACTUAL reason
+    r.mechanism = { kind: "solo", active: 1, throttled: 0, reason: "omp not found" };
+    sysNote("solo: omp not found — the lead session executes sequentially");
+    bridge!.prompt(executionPrompt(r));
+    pushState();
+    return;
+  }
+  poolActive = true;
+  failCounts.clear();
+  sliceRunStats.clear();
+  r.timeline = [];
+  r.mechanism = { kind: "parallel", active: 0, throttled: 0 };
+  sysNote("execution: process-level parallelism (one omp per active worker, cap 4, ≥2s stagger)");
+  scheduleSlices();
+}
+
 // -------------------------------------------------- public actions
 
 function startRun(goal: string): { ok: boolean; error?: string } {
@@ -556,7 +851,16 @@ function approve(via: string): { ok: boolean; error?: string } {
   run.phase = "execute";
   run.needsCall = null;
   sysNote(`plan approved via ${via} — building`);
-  bridge!.prompt(executionPrompt(run));
+  if (run.solo) {
+    // rung 1 passed earlier (probe ok): the lead session runs the crew itself
+    // via harness subagents… except probe-ok is the rare case; solo=true means
+    // the probe FAILED → rung 2: process-level parallelism (unconditional).
+    void beginParallelExecution();
+  } else {
+    // harness-native subagents confirmed working — the lead session orchestrates
+    run.mechanism = { kind: "parallel", active: 0, throttled: 0 };
+    bridge!.prompt(executionPrompt(run));
+  }
   pushState();
   return { ok: true };
 }
@@ -588,7 +892,18 @@ function steer(text: string, target?: string): boolean {
     message = `[team note]: ${t}`;
     feed({ author: "you", text: t, kind: "note" });
   }
-  const ok = bridge!.prompt(message);
+  // pool mode: targeted steering reaches the worker's own process; team notes
+  // land in every live worker
+  let ok: boolean;
+  if (poolActive) {
+    ok = target
+      ? steerWorker(target, message)
+      : run.agents.filter((a) => a.kind === "worker" && (a.state === "working" || a.state === "throttled"))
+          .map((a) => steerWorker(a.name, message))
+          .some(Boolean);
+  } else {
+    ok = bridge!.prompt(message);
+  }
   pushState();
   return ok;
 }
@@ -668,6 +983,15 @@ function needsCallDecision(choice: "retry" | "abort", editedScope?: string): voi
   const s = run.slices.find((x) => x.id === call.sliceId);
   if (editedScope !== undefined && s) s.scope = editedScope.trim();
   sysNote(editedScope !== undefined ? `slice ${call.sliceId} rescoped — retrying` : `retrying slice ${call.sliceId}`);
+  if (poolActive && s) {
+    // reset the failure ledger for a fresh pair of attempts and reschedule
+    failCounts.delete(s.id);
+    s.state = "pending";
+    const a = run.agents.find((x) => x.name === s.worker);
+    if (a && a.state === "failed") { a.state = "sleeping"; a.sinceMs = Date.now(); }
+    scheduleSlices();
+    return;
+  }
   bridge!.prompt(
     `[team gate] ${editedScope !== undefined ? `Slice ${call.sliceId} was rescoped to: ${editedScope.trim()}. ` : ""}Retry slice ${call.sliceId} now. Resume the state protocol from where you paused.`,
   );
@@ -678,13 +1002,21 @@ function stopRun(): void {
   if (!run || !LIVE_PHASE[run.phase]) return;
   // the abort round-trip lands as agent-end{aborted} which freezes the board;
   // flip phase immediately so a dead process can't leave a zombie run
-  bridge!.abort();
+  if (poolActive) {
+    poolActive = false;
+    killAllWorkers();
+    if (run.mechanism) run.mechanism = { ...run.mechanism, active: 0 };
+  } else {
+    bridge!.abort();
+  }
   run.phase = "stopped";
   sysNote("run interrupted — board frozen in its last state");
   pushState();
 }
 
 function clearRun(): void {
+  poolActive = false;
+  killAllWorkers();
   run = null;
   pushState();
 }
@@ -709,9 +1041,10 @@ export function registerTeamHandlers(ipc: IpcMain): void {
   bridge.onEvent(onAgentEvent);
   onNewSession(() => {
     if (run && LIVE_PHASE[run.phase]) {
+      poolActive = false;
+      killAllWorkers();
       run.phase = "stopped";
       sysNote("new agent session — team run ended");
-      pushState();
     }
   });
 
@@ -733,5 +1066,6 @@ export function registerTeamHandlers(ipc: IpcMain): void {
 }
 
 export function disposeTeam(): void {
+  killAllWorkers(); // no orphaned omp children on app quit
   persist(); // a live run at quit stays on disk → restart-honesty notice
 }
