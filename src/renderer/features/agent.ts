@@ -700,11 +700,21 @@ function handleEvent(e: OmpEvent) {
       if (e.aborted) {
         chatEl.append(el("div", { class: "turn-marker", text: "· turn interrupted ·" }));
         if (nearBottom()) scrollBottom();
+      } else if (!gotTurnData) {
+        // HTTP 200 with ZERO content (no text/thinking/tool events): a broken
+        // proxy upstream answers "stop" with an empty completion. Without a
+        // visible trace this reads as "the IDE ate my reply" (user report).
+        chatEl.append(el("div", { class: "turn-marker crit", text: t("agent.emptyTurn") }));
+        if (nearBottom()) scrollBottom();
       }
       // NOW zone: idle summary line = last agent text, one line
       {
         const last = [...chatEl.querySelectorAll(".chat-agent")].pop()?.textContent ?? "";
-        lastResultLine = e.aborted ? t("agent.interrupted") : last.trim().split("\n")[0].slice(0, 80);
+        lastResultLine = e.aborted
+          ? t("agent.interrupted")
+          : !gotTurnData
+            ? t("agent.emptyTurnShort")
+            : last.trim().split("\n")[0].slice(0, 80);
         nowLive = null;
         renderNow();
       }

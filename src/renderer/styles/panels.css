@@ -906,6 +906,8 @@
   color: var(--text-low);
   user-select: none;
 }
+/* empty-reply variant: a fault, not housekeeping — flare, wraps on narrow panels */
+.turn-marker.crit { color: var(--flare); white-space: normal; padding: 0 12px; }
 
 /* agent disabled / empty states.
    The blank NEVER scrolls itself: `clip` contains the ambient layers (grain,
