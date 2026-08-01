@@ -140,12 +140,43 @@
 .tf-text { color: var(--text-mid); white-space: pre-wrap; word-break: break-word; }
 .tf-note .tf-author { color: var(--power); }
 .tf-note .tf-text { color: var(--text-hi); }
-.tf-sys {
-  text-align: center;
-  font: 500 10px var(--font-mono);
-  letter-spacing: 0.06em;
-  padding: 2px 0;
+/* «журнал команды» — ONE compact milestone block growing in place
+   (crew-design §3: zero centered dot-lines in the chat) */
+.team-journal {
+  border: 1px solid var(--line);
+  border-radius: var(--r-s);
+  background: var(--bg-1);
+  padding: 4px 8px 6px;
 }
+.tj-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 9.5px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-low);
+  padding: 2px 0 4px;
+}
+.tj-count { font-size: 9.5px; }
+.tj-toggle {
+  border: none;
+  background: none;
+  color: var(--power);
+  font: 500 10px var(--font-ui);
+  cursor: pointer;
+  padding: 0;
+}
+.tj-toggle:hover { text-decoration: underline; }
+.tj-rows { display: flex; flex-direction: column; gap: 2px; }
+/* collapsed: only the last 3 milestone rows stay visible */
+.team-journal:not(.expanded) .tj-rows .tj-row:not(:nth-last-child(-n+3)) { display: none; }
+.tj-row { display: flex; align-items: baseline; gap: 7px; font-size: 11px; line-height: 1.5; }
+.tj-glyph { color: var(--energy); flex-shrink: 0; width: 10px; text-align: center; }
+.tj-text { color: var(--text-mid); flex: 1; min-width: 0; }
+.tj-link { color: var(--power); cursor: pointer; }
+.tj-link:hover { text-decoration: underline; }
+.tj-at { font-size: 9.5px; flex-shrink: 0; }
 
 /* ---------- plan gate ---------- */
 .team-gate { display: flex; flex-direction: column; gap: 10px; padding: 12px; }
@@ -300,13 +331,6 @@
 }
 .team-report code { font-family: var(--font-mono); font-size: 11px; }
 
-.tb-frozen {
-  text-align: center;
-  font: 500 10px var(--font-mono);
-  letter-spacing: 0.06em;
-  padding: 8px 0 12px;
-}
-
 /* ---------- stalled / restart honesty ---------- */
 .team-stalled {
   display: flex;
@@ -439,8 +463,11 @@
 .rx-files { font-size: 10.5px; color: var(--text-low); text-align: right; line-height: 1.7; flex-shrink: 0; font-variant-numeric: tabular-nums; }
 .rx-files b { color: var(--energy); font-weight: 600; }
 
-/* -- pipeline strip: rows with elbow wrap; the edge INTO an active node flows -- */
-.pipe-host { padding: 10px 10px 0; }
+/* -- pipeline strip: rows with elbow wrap; the edge INTO an active node flows.
+   The strip reserves its own vertical space (normal flow, clipped) and nodes
+   shrink label-first: full → `SLICE C` → letter-only chip with tooltip
+   (crew-design §3 «pipeline fit») -- */
+.pipe-host { padding: 10px 10px 0; container-type: inline-size; container-name: pipe; overflow: hidden; }
 .pipe { display: flex; flex-direction: column; gap: 6px; }
 .pipe-row { display: flex; align-items: center; flex-wrap: wrap; gap: 0; row-gap: 6px; }
 .pnode {
@@ -456,7 +483,19 @@
   cursor: pointer;
   transition: border-color var(--t-fast) var(--ease-swift), box-shadow var(--t-fast) var(--ease-swift);
 }
-.pnode b { font-size: 9px; color: var(--text-low); letter-spacing: 0.1em; font-weight: 700; }
+.pnode b { display: flex; font-size: 9px; color: var(--text-low); letter-spacing: 0.1em; font-weight: 700; white-space: nowrap; }
+.pnode .ptitle { max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* shrink ladder: mid width drops the title, tight width drops the `SLICE ` prefix */
+@container pipe (max-width: 480px) {
+  .pnode .ptitle { display: none; }
+  .pnode { padding: 5px 10px; }
+}
+@container pipe (max-width: 340px) {
+  .pnode .pfx { display: none; }
+  .pnode { padding: 4px 9px; font-size: 10px; }
+  .pnode b { font-size: 10px; }
+  .pedge { width: 14px; }
+}
 .pnode.st-done { border-color: rgba(42, 167, 184, 0.4); color: var(--energy-dim); }
 .pnode.st-done b { color: var(--energy-dim); }
 .pnode.st-active { border-color: var(--energy); color: var(--text-hi); box-shadow: 0 0 18px -6px var(--energy-60); }
@@ -483,6 +522,12 @@
 .crew-tl { max-height: 150px; overflow-y: auto; margin: 8px 10px 0; border: 1px solid var(--line); border-radius: var(--r-s); padding: 6px 8px; }
 .ctl-head { font-size: 9.5px; letter-spacing: 0.1em; color: var(--text-low); margin-bottom: 4px; }
 .ctl-row { display: flex; gap: 7px; font-size: 10.5px; color: var(--text-mid); align-items: baseline; padding: 1px 0; }
+/* ledger grouping: one expandable row for 2+ consecutive same-worker calls */
+.ctl-group { cursor: pointer; border-radius: var(--r-s); }
+.ctl-group:hover { background: var(--bg-2); }
+.ctl-group .ctl-tool { color: var(--text-hi); }
+.ctl-row.nested { padding-left: 18px; opacity: 0.8; }
+.ctl-chev { flex-shrink: 0; font-size: 9px; }
 .ctl-sigil { color: var(--energy); flex-shrink: 0; }
 .ctl-worker { color: var(--text-hi); flex-shrink: 0; }
 .ctl-tool { color: var(--energy); flex-shrink: 0; }

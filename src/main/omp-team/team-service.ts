@@ -80,6 +80,47 @@ export function registerTeamGateNotifier(
   gateNotifier = fn;
 }
 
+/** run-completion packet for the ONE final Telegram answer (message economy) */
+export interface TeamEndPacket {
+  goal: string;
+  report: string;
+  slices: { id: string; title: string; add: number; del: number; files?: string[] }[];
+  elapsedMs: number;
+}
+
+/** remote end notifier — fired exactly once per run, when it completes */
+let endNotifier: ((packet: TeamEndPacket) => void) | null = null;
+
+export function registerTeamEndNotifier(fn: ((packet: TeamEndPacket) => void) | null): void {
+  endNotifier = fn;
+}
+
+function fireEndNotifier(): void {
+  if (!run || !endNotifier) return;
+  endNotifier({
+    goal: run.goal,
+    report: run.report ?? "",
+    slices: run.slices.map((s) => ({ id: s.id, title: s.title, add: s.add, del: s.del, ...(s.files ? { files: s.files } : {}) })),
+    elapsedMs: Date.now() - (run.feed[0]?.at ?? Date.now()),
+  });
+}
+
+/** read-only: a team run is mid-flight (Telegram treats the whole run as ONE task) */
+export function isTeamRunActive(): boolean {
+  return !!run && run.phase !== "done" && run.phase !== "stopped" && run.phase !== "stalled";
+}
+
+/** read-only live-state slice for the Telegram digest (never plan/summary prose) */
+export function teamDigestData(): { phase: string; active: string[]; done: number; total: number } | null {
+  if (!isTeamRunActive()) return null;
+  return {
+    phase: run!.phase,
+    active: run!.slices.filter((s) => s.state === "active").map((s) => `slice ${s.id}`),
+    done: run!.slices.filter((s) => s.state === "done").length,
+    total: run!.slices.length,
+  };
+}
+
 // -------------------------------------------------- persistence (restart honesty)
 
 function persistPath(): string {
@@ -372,6 +413,7 @@ function applyMarker(raw: string): void {
       run.phase = "done";
       for (const a of run.agents) if (a.state !== "failed") a.state = "done";
       sysNote("run complete — team report delivered");
+      fireEndNotifier();
       break;
     }
     default:
@@ -526,6 +568,7 @@ function deliberationPrompt(goal: string): string {
     "- Slices are small and independently verifiable; cross-slice contracts (types, file boundaries, API signatures) are FIXED in the contract field before any fan-out. Max 6 workers.",
     "- The FINAL slice is always a verification slice: exercise the built thing against the goal (run it, drive it, test it).",
     "- Emit the plan event, then END YOUR TURN IMMEDIATELY. Execute NOTHING — no file edits, no build commands. The user approves or edits the plan in the IDE; execution starts only when an approval message arrives.",
+    "- Do NOT restate the plan in prose — the IDE renders it from the plan event; that event line is the only place the full plan appears.",
   ].join("\n");
 }
 
@@ -589,7 +632,22 @@ function timelinePush(entry: TeamTimelineEntry): void {
 function updateMechanism(): void {
   if (!run || !poolActive) return;
   const throttled = run.agents.filter((a) => a.state === "throttled").length;
-  run.mechanism = { kind: "parallel", active: liveWorkerCount(), throttled };
+  const live = liveWorkerCount();
+  // badge truthfulness (crew-design §3): with exactly one live worker the
+  // renderer shows `solo (reason)` — compute the honest reason here, from
+  // the live process table + slice graph, never from the plan's width
+  let singleReason: string | undefined;
+  if (live === 1) {
+    const done = new Set(run.slices.filter((s) => s.state === "done").map((s) => s.id));
+    const pending = run.slices.filter((s) => s.state === "pending");
+    const ready = pending.filter((s) => s.deps.every((d) => done.has(d))).length;
+    singleReason =
+      throttled > 0 ? "rate-limit" :
+      ready > 0 ? "staggered start" :
+      pending.length > 0 ? "deps" :
+      "1 slice ready";
+  }
+  run.mechanism = { kind: "parallel", active: live, throttled, ...(singleReason ? { singleReason } : {}) };
 }
 
 function workerPrompt(r: TeamRunState, s: TeamSlice): string {
@@ -784,6 +842,7 @@ function finishParallelRun(): void {
   for (const a of run.agents) if (a.state !== "failed") a.state = "done";
   run.mechanism = { kind: "parallel", active: 0, throttled: 0 };
   sysNote("run complete — team report assembled from worker hand-offs");
+  fireEndNotifier();
   pushState();
 }
 

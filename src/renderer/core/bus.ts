@@ -28,6 +28,8 @@ export interface BusEvents {
   "seed-search": string;
   /** the consumer-visible active tab changed (focused group id + active key; same-tab re-mounts filtered at the source) */
   "active-tab-changed": void;
+  /** the team run state changed (any push) — glance surfaces re-read teamRun() */
+  "team-state": void;
 }
 
 type Handler<T> = (payload: T) => void;

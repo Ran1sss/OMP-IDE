@@ -33,16 +33,26 @@ import { BotRuntime, type BotDelegate, type InboundMessage, type InboundCallback
 import { WatchManager } from "./watch-manager";
 import { agentForUrl, currentProxyAgent, validateProxyUrl } from "./proxy";
 import { registerSwapRemoteNotifier } from "../models/swap-engine";
-import { registerTeamGateNotifier, approveTeamFromRemote } from "../omp-team/team-service";
+import {
+  registerTeamGateNotifier,
+  registerTeamEndNotifier,
+  approveTeamFromRemote,
+  isTeamRunActive,
+  teamDigestData,
+} from "../omp-team/team-service";
 import { SessionTracker } from "./session-tracker";
 import {
   escapeMd,
   mdToTelegram,
   chunkText,
   renderDigest,
+  renderTeamDigest,
   renderTodoLines,
   renderDiffstat,
+  diffstatLine,
   formatElapsed,
+  formatElapsedRu,
+  sanitizeOutbound,
   TG_LIMIT,
 } from "./format";
 
@@ -70,6 +80,8 @@ class RemoteManager implements BotDelegate {
   private digests = new Map<string, DigestSlot>();
   private digestTimer: NodeJS.Timeout | null = null;
   private digestDirty = false;
+  /** a Team run is ONE Telegram task: digests/summaries span its lead turns */
+  private teamTaskActive = false;
   private currentUi: BridgeUiRequest | null = null;
   /** pending /stop and /new confirmations by callback token */
   private confirms = new Map<string, { kind: "stop" | "new"; username: string }>();
@@ -102,22 +114,42 @@ class RemoteManager implements BotDelegate {
     this.startDigestTimer();
     // auto-swap loudness: swaps and low-balance crossings reach Telegram too
     registerSwapRemoteNotifier((text) => {
-      for (const t of this.targets()) t.runtime.sendMd(t.chatId, escapeMd(text));
+      for (const t of this.targets()) t.runtime.sendMd(t.chatId, escapeMd(sanitizeOutbound(text)));
     });
-    // Team plan gate: the converged plan reaches the phone with [Approve]
-    // [Open in IDE] — first decision wins with the IDE button.
+    // Team plan gate: compact human summary — goal one line + short slice
+    // bullets (message economy §4); the full technical plan lives behind
+    // [Open in IDE]. First decision wins with the IDE button.
     registerTeamGateNotifier((packet) => {
       const kb = new InlineKeyboard()
         .text("Approve", `team:${packet.runId}`)
         .text("Open in IDE", "team:open");
       const lines = [
-        `🧩 Team plan ready${packet.solo ? " (solo fallback)" : ""}`,
-        `goal: ${packet.goal.slice(0, 200)}`,
-        packet.summary,
-        "",
-        ...packet.slices.map((s) => `${s.id}: ${s.title}${s.deps.length ? ` ← ${s.deps.join(",")}` : ""} · ${s.worker}`),
-      ].filter(Boolean);
+        `📋 ${sanitizeOutbound(packet.goal).split("\n")[0].slice(0, 180)}`,
+        ...packet.slices.map((s) => `• ${s.title.slice(0, 90)}`),
+      ];
       for (const t of this.targets()) t.runtime.sendMd(t.chatId, escapeMd(lines.join("\n")), kb);
+    });
+    // Team run completion: THE one final answer — report text (already prose,
+    // sanitized) + one inline diffstat line + elapsed. Never a separate meta
+    // message (message economy §2).
+    registerTeamEndNotifier((p) => {
+      this.teamTaskActive = false;
+      const stats = p.slices
+        .filter((s) => s.add > 0 || s.del > 0)
+        .map((s) => `${s.files?.[0]?.split("/").pop() ?? `slice ${s.id}`} +${s.add} −${s.del}`)
+        .join(" · ");
+      const meta = [stats, `⏱ ${formatElapsedRu(p.elapsedMs)}`].filter(Boolean).join(" · ");
+      const body = sanitizeOutbound(p.report).trim();
+      const text = (body ? mdToTelegram(body) + "\n\n" : "") + escapeMd(meta);
+      const chunks = chunkText(text, TG_LIMIT - 100);
+      for (const t of this.targets()) {
+        if (chunks.length > 2) {
+          t.runtime.sendMd(t.chatId, escapeMd(`✅ Готово — полный отчёт во вложении.\n${meta}`));
+          t.runtime.sendDocument(t.chatId, "team-report.md", body);
+        } else {
+          for (const c of chunks) t.runtime.sendMd(t.chatId, c);
+        }
+      }
     });
   }
 
@@ -796,17 +828,29 @@ class RemoteManager implements BotDelegate {
   /** mirror an inbound remote message to the other remotes */
   private echoToOthers(botId: string, msg: InboundMessage, kind: "task" | "steer" | "answer"): void {
     const glyph = kind === "task" ? "▷" : kind === "steer" ? "↪" : "✎";
-    this.broadcastMd(escapeMd(`${glyph} @${msg.username}: ${msg.text.slice(0, 500)}`), botId, msg.chatId);
+    this.broadcastMd(escapeMd(`${glyph} @${msg.username}: ${sanitizeOutbound(msg.text).slice(0, 500)}`), botId, msg.chatId);
   }
 
   private onAgentEvent(e: { kind: string }): void {
     if (e.kind === "agent-start") {
-      // new digest message per task
-      this.digests.clear();
+      // message economy §1: one digest message per TASK. A team run spans
+      // several lead turns — only the FIRST turn opens a fresh digest.
+      if (isTeamRunActive()) {
+        if (!this.teamTaskActive) {
+          this.teamTaskActive = true;
+          this.digests.clear();
+        }
+      } else {
+        this.teamTaskActive = false;
+        this.digests.clear();
+      }
       this.markDigestDirty();
     } else if (e.kind === "agent-end") {
       this.currentUi = null;
-      void this.sendCompletionSummary();
+      // message economy §2: during a team run intermediate lead turns end
+      // (deliberation → gate) — no summary; the ONE final answer arrives
+      // via the team end notifier. Narration/standalone-elapsed sends die here.
+      if (!this.teamTaskActive) void this.sendCompletionSummary();
     } else if (e.kind === "tool-start" || e.kind === "tool-end" || e.kind === "todos") {
       this.markDigestDirty();
     }
@@ -823,7 +867,7 @@ class RemoteManager implements BotDelegate {
       this.lastStatusState = st.state;
       if (st.state === "dead" && prev !== "" && prev !== "dead") {
         const kb = new InlineKeyboard().text("Restart session", "restart");
-        const detail = st.detail ? `\n${st.detail.slice(-400)}` : "";
+        const detail = st.detail ? `\n${sanitizeOutbound(st.detail).slice(-400)}` : "";
         for (const t of this.targets()) {
           t.runtime.sendMd(t.chatId, escapeMd(`⚠ Agent process died.${detail}`), kb);
         }
@@ -838,19 +882,27 @@ class RemoteManager implements BotDelegate {
   }
 
   private async flushDigests(): Promise<void> {
-    if (!this.digestDirty) return;
-    this.digestDirty = false;
-    const st = this.bridge.getStatus();
-    if (!st || (st.state !== "thinking" && st.state !== "tool" && st.state !== "awaiting-input")) return;
-    const totals = this.tracker.totals();
-    const text = renderDigest({
-      status: st,
-      phases: this.bridge.getTodoPhases(),
-      filesTouched: totals.files,
-      add: totals.add,
-      del: totals.del,
-      remotes: this.targets().length,
-    });
+    // team runs: the digest mirrors live team state (workers run in their own
+    // processes — lead status alone would go stale); recomputed every tick,
+    // edits deduped via lastText
+    const team = teamDigestData();
+    let text: string | null = null;
+    if (team) {
+      text = renderTeamDigest(team);
+    } else {
+      if (!this.digestDirty) return;
+      this.digestDirty = false;
+      const st = this.bridge.getStatus();
+      if (!st || (st.state !== "thinking" && st.state !== "tool" && st.state !== "awaiting-input")) return;
+      const totals = this.tracker.totals();
+      text = renderDigest({
+        status: st,
+        phases: this.bridge.getTodoPhases(),
+        filesTouched: totals.files,
+        add: totals.add,
+        del: totals.del,
+      });
+    }
     for (const t of this.targets()) {
       const key = `${t.bot.id}:${t.chatId}`;
       const slot = this.digests.get(key);
@@ -867,29 +919,22 @@ class RemoteManager implements BotDelegate {
   private async sendCompletionSummary(): Promise<void> {
     const targets = this.targets();
     if (!targets.length) return;
-    const final = this.tracker.lastFinalText.trim();
-    const stats = this.tracker.stats();
-    const phases = this.bridge.getTodoPhases();
-    let done = 0, total = 0;
-    for (const p of phases) for (const t of p.tasks) { total++; if (t.status === "completed") done++; }
-
-    const meta: string[] = [];
-    if (stats.length) meta.push(renderDiffstat(stats));
-    if (total) meta.push(`todo: ${done}/${total} done`);
-    meta.push(`elapsed: ${formatElapsed(this.tracker.elapsedMs)}`);
-    const metaBlock = "```\n" + meta.join("\n").replace(/[`\\]/g, (c) => `\\${c}`) + "\n```";
-
-    const body = final ? mdToTelegram(final) : escapeMd("(no final message)");
+    const final = sanitizeOutbound(this.tracker.lastFinalText).trim();
+    // message economy §2: ONE final answer — text + one inline diffstat line
+    // + elapsed. Never a separate telemetry/meta message.
+    const meta = [diffstatLine(this.tracker.stats()), `⏱ ${formatElapsedRu(this.tracker.elapsedMs)}`]
+      .filter(Boolean)
+      .join(" · ");
+    const body = (final ? mdToTelegram(final) : escapeMd("(нет финального ответа)")) + "\n\n" + escapeMd(meta);
     const chunks = chunkText(body, TG_LIMIT - 100);
 
     for (const t of targets) {
       if (chunks.length > 2) {
-        t.runtime.sendMd(t.chatId, escapeMd("✅ Task finished — full answer attached."));
+        t.runtime.sendMd(t.chatId, escapeMd(`✅ Готово — полный ответ во вложении.\n${meta}`));
         t.runtime.sendDocument(t.chatId, "result.md", final);
       } else {
         for (const c of chunks) t.runtime.sendMd(t.chatId, c);
       }
-      t.runtime.sendMd(t.chatId, metaBlock);
     }
   }
 
@@ -905,7 +950,7 @@ class RemoteManager implements BotDelegate {
     }
     const parts = [
       `❓ ${req.title ?? "Agent asks"}`,
-      req.message ?? "",
+      sanitizeOutbound(req.message ?? ""),
       req.method === "input" || req.method === "editor" ? "(reply with a plain message)" : "",
     ].filter(Boolean);
     const text = escapeMd(parts.join("\n"));

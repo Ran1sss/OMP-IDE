@@ -1,0 +1,100 @@
+/* Prompt Improve («улучшить промпт») — wand in the input + suggestion card.
+   Design: Velvet Nebula glass + motion tokens; user act = --power ring. */
+
+/* positioning context around the composer textarea */
+.enhance-wrap {
+  position: relative;
+  display: flex;
+  width: 100%;
+}
+.enhance-wrap textarea {
+  flex: 1;
+  /* the wand floats over the corner — keep first-line text clear of it */
+  padding-right: 30px;
+}
+
+/* -- the wand: ghost icon button docked at the input's top-right corner -- */
+.enhance-btn {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: var(--r-s);
+  background: none;
+  color: var(--text-low);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  transition: color var(--t-fast) var(--ease-swift), background var(--t-fast) var(--ease-swift);
+}
+.enhance-btn:hover { color: var(--text-mid); background: var(--bg-2); }
+.enhance-btn:focus-visible { outline: none; box-shadow: 0 0 0 1px var(--power-40); color: var(--text-mid); }
+.enhance-btn.unavailable { color: var(--text-low); opacity: 0.45; cursor: default; }
+.enhance-btn.unavailable:hover { background: none; color: var(--text-low); }
+
+/* in-flight: the wand becomes a cyan pulse orb; second clicks are ignored */
+.enhance-btn.busy {
+  color: var(--energy);
+  cursor: progress;
+  animation: enhance-pulse var(--t-slow) var(--ease-swift) infinite;
+}
+@keyframes enhance-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
+/* -- suggestion card: glass surface sliding up above the input (240 ms) -- */
+.enhance-card {
+  border: 1px solid var(--line-bright);
+  border-radius: var(--r-m);
+  background: var(--glass-1, var(--bg-1));
+  backdrop-filter: var(--glass-blur, none);
+  margin-bottom: 8px;
+  overflow: hidden;
+}
+.ec-head {
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--energy);
+  padding: 7px 10px 0;
+}
+.ec-body {
+  padding: 6px 10px 8px;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--text-hi);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 180px;
+  overflow-y: auto;
+}
+.ec-actions {
+  display: flex;
+  gap: 6px;
+  padding: 0 10px 9px;
+}
+.ec-btn { padding: 3px 12px; font-size: 11.5px; }
+
+/* error state: one line — reason + «повторить» */
+.enhance-card.error { border-color: var(--crit-40); }
+.ec-err {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+}
+.ec-err-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--crit);
+}

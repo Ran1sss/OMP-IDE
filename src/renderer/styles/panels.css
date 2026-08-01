@@ -341,6 +341,9 @@
 .agent-now .now-name { color: var(--text-hi); font-weight: 600; font-size: 12px; flex-shrink: 0; }
 .agent-now .now-target { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
 .agent-now .now-elapsed { margin-left: auto; color: var(--energy); font-size: 11px; flex-shrink: 0; font-variant-numeric: tabular-nums; }
+/* team worker paused by rate-limit: flare tint, same row anatomy */
+.agent-now .now-row.throttled .now-target,
+.agent-now .now-row.throttled .now-elapsed { color: var(--flare); }
 .agent-now .now-sub { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .agent-now .now-todo { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-mid); }
 .agent-now .now-add { color: var(--ok-system); }

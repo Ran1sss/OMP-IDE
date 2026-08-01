@@ -10,8 +10,9 @@
 
 import { marked } from "marked";
 import { el, clear } from "../core/dom";
+import { emit } from "../core/bus";
 import { toast, confirmDialog, formDialog, inputDialog } from "../core/ui";
-import type { TeamAgent, TeamRunState, TeamSlice } from "../../shared/types";
+import type { TeamAgent, TeamFeedEntry, TeamRunState, TeamSlice, TeamTimelineEntry } from "../../shared/types";
 
 let panelEl: HTMLElement;
 let surfaceEl: HTMLElement;
@@ -35,18 +36,36 @@ let feedListEl: HTMLElement | null = null;
 /** previous agent states — drives the wake materialize + edge pulse */
 let prevAgentState: Record<string, string> = {};
 let elapsedTimer: number | undefined;
+/** «журнал команды»: ONE compact block for orchestration milestones (crew-design §3) */
+let journalEl: HTMLElement | null = null;
+let journalRows: HTMLElement | null = null;
+let journalCount = 0;
+let journalExpanded = false;
+/** expanded ledger groups (key: worker + first timestamp + size) */
+const expandedGroups = new Set<string>();
 
-const MARKER = "@@TEAM@@";
+function resetFeedUi(): void {
+  feedListEl = null;
+  feedRendered = 0;
+  journalEl = null;
+  journalRows = null;
+  journalCount = 0;
+}
+
+/** any protocol marker line: `@@NAME@@ …` (team events or other UI directives) */
+const PROTO_RE = /^@@[A-Z][A-Z0-9_]*@@/;
 
 /**
  * Strip protocol marker lines from agent chat text (team run narration).
- * Separator lines (`---`/`***`/`___`) adjacent to a stripped marker are
- * dropped too — orphaned they render as a stack of bare <hr>s.
+ * Catches every `@@…@@`-style directive, not only `@@TEAM@@`. Separator
+ * lines (`---`/`***`/`___`) adjacent to a stripped marker are dropped too —
+ * orphaned they render as a stack of bare <hr>s.
  */
 export function stripTeamMarkers(text: string): string {
-  if (!text.includes(MARKER)) return text;
+  if (!text.includes("@@")) return text;
   const lines = text.split("\n");
-  const isMarker = lines.map((l) => l.trimStart().startsWith(MARKER));
+  const isMarker = lines.map((l) => PROTO_RE.test(l.trimStart()));
+  if (!isMarker.some(Boolean)) return text;
   const isSep = lines.map((l) => /^(-{3,}|\*{3,}|_{3,})$/.test(l.trim()));
   const out: string[] = [];
   for (let i = 0; i < lines.length; i++) {
@@ -127,13 +146,13 @@ export function initTeamSurface(opts: { panel: HTMLElement; input: HTMLTextAreaE
 
 function applyState(s: TeamRunState | null): void {
   run = s;
+  emit("team-state", undefined);
   const live = !!s;
   panelEl.classList.toggle("team-live", live);
   surfaceEl.style.display = live ? "" : "none";
   if (!s) {
     clear(surfaceEl);
-    feedListEl = null;
-    feedRendered = 0;
+    resetFeedUi();
     feedRunId = "";
     prevAgentState = {};
     clearInterval(elapsedTimer);
@@ -202,8 +221,7 @@ function render(): void {
   // The feed appends incrementally; everything else rebuilds (small DOM).
   if (feedRunId !== r.runId) {
     clear(surfaceEl);
-    feedListEl = null;
-    feedRendered = 0;
+    resetFeedUi();
     feedRunId = r.runId;
     prevAgentState = {};
   }
@@ -249,15 +267,29 @@ function renderHead(head: HTMLElement, r: TeamRunState): void {
   // honesty badge: the LIVE mechanism, never a generic label (crew-rail §2)
   if (r.mechanism) {
     const m = r.mechanism;
-    const label =
-      m.kind === "solo" ? `solo: ${m.reason ?? "sequential"}` :
-      m.throttled > 0 ? `parallel ×${m.active} (${m.throttled} rate-limited)` :
-      `parallel ×${m.active}`;
-    head.append(el("span", {
-      class: `th-mech mono${m.kind === "solo" ? " solo" : ""}`,
-      title: m.kind === "solo" ? "Process spawning unavailable — the lead session executes sequentially." : "One omp process per active worker (cap 4, starts staggered ≥2s).",
-      text: label,
-    }));
+    // badge truthfulness (crew-design §3): `parallel ×N` requires N ≥ 2 live
+    // worker processes; exactly one live renders `solo (reason)`; zero live
+    // renders no badge (the phase label carries the state). `parallel ×1`
+    // is unrendercable by construction.
+    let label: string | null = null;
+    let soloTint = false;
+    if (m.kind === "solo") {
+      label = `solo: ${m.reason ?? "sequential"}`;
+      soloTint = true;
+    } else if (m.active >= 2) {
+      label = m.throttled > 0 ? `parallel ×${m.active} (${m.throttled} rate-limited)` : `parallel ×${m.active}`;
+    } else if (m.active === 1) {
+      label = `solo (${m.singleReason ?? "1 slice ready"})`;
+    }
+    if (label) {
+      head.append(el("span", {
+        class: `th-mech mono${soloTint ? " solo" : ""}`,
+        title: m.kind === "solo"
+          ? "Process spawning unavailable — the lead session executes sequentially."
+          : "Computed from live worker processes (cap 4, starts staggered ≥2s) — never from the plan's theoretical width.",
+        text: label,
+      }));
+    }
   } else if (r.solo && (r.phase === "probe" || r.phase === "deliberate" || r.phase === "gate")) {
     head.append(el("span", { class: "th-mech mono", title: "Subagent probe failed — execution will use process-level parallelism (one omp per worker).", text: "process-parallel on approve" }));
   }
@@ -276,8 +308,7 @@ function renderDeliberation(body: HTMLElement, r: TeamRunState): void {
   let wrap = body.querySelector(".team-delib") as HTMLElement | null;
   if (!wrap) {
     clear(body);
-    feedListEl = null;
-    feedRendered = 0;
+    resetFeedUi();
     wrap = el("div", { class: "team-delib" });
     body.append(wrap);
   }
@@ -327,8 +358,7 @@ function agentCard(a: TeamAgent): HTMLElement {
 
 function renderGate(body: HTMLElement, r: TeamRunState): void {
   clear(body);
-  feedListEl = null;
-  feedRendered = 0;
+  resetFeedUi();
   const stats = planStats(r.slices);
   const summary = `${r.slices.length} slice${r.slices.length === 1 ? "" : "s"} · ${stats.tracks} parallel track${stats.tracks === 1 ? "" : "s"} · est. ${stats.contracts} contract${stats.contracts === 1 ? "" : "s"}`;
 
@@ -667,10 +697,14 @@ function pipelineStrip(r: TeamRunState): HTMLElement {
       rowEl.append(
         el("span", {
           class: `pnode st-${s.state}`,
+          title: `SLICE ${s.id} · ${s.title}${s.autoDeps?.length ? " · ⛓ auto-serialized (write-sets overlap)" : ""}`,
           onClick: (e) => { e.stopPropagation(); showSliceDetail(s); },
         },
-          el("b", { text: `SLICE ${s.id}${s.autoDeps?.length ? " ⛓" : ""}` }),
-          el("span", { text: s.title.slice(0, 22) }),
+          el("b", {},
+            el("span", { class: "pfx", text: "SLICE " }),
+            el("span", { text: `${s.id}${s.autoDeps?.length ? " ⛓" : ""}` }),
+          ),
+          el("span", { class: "ptitle", text: s.title.slice(0, 22) }),
         ),
       );
     });
@@ -684,8 +718,7 @@ function renderBoard(body: HTMLElement, r: TeamRunState): void {
   const fresh = !board;
   if (!board) {
     clear(body);
-    feedListEl = null;
-    feedRendered = 0;
+    resetFeedUi();
     board = el("div", { class: "team-board" });
     body.append(board);
   }
@@ -722,14 +755,48 @@ function renderBoard(body: HTMLElement, r: TeamRunState): void {
   const entries = (r.timeline ?? []).filter((e) => !timelineFilter || e.worker === timelineFilter);
   if (entries.length) {
     tl.append(el("div", { class: "ctl-head mono", text: `TIMELINE${timelineFilter ? ` · ${timelineFilter}` : ""} (${entries.length})` }));
-    for (const e of entries.slice(-40)) {
-      tl.append(el("div", { class: "ctl-row mono" },
+    const timelineRow = (e: TeamTimelineEntry, nested = false): HTMLElement =>
+      el("div", { class: `ctl-row mono${nested ? " nested" : ""}` },
         el("span", { class: "ctl-sigil", text: e.glyph }),
         el("span", { class: "ctl-worker", text: e.worker }),
         el("span", { class: "ctl-tool", text: e.tool }),
         el("span", { class: "ctl-sum", text: e.summary }),
         el("span", { class: "ctl-at dim", text: new Date(e.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }) }),
+      );
+    // ledger grouping (crew-design §3): 2+ consecutive same-worker calls
+    // collapse into ONE group row, expandable to the individual calls
+    const recent = entries.slice(-60);
+    const groups: TeamTimelineEntry[][] = [];
+    for (const e of recent) {
+      const g = groups[groups.length - 1];
+      if (g && g[0].worker === e.worker) g.push(e);
+      else groups.push([e]);
+    }
+    for (const g of groups.slice(-40)) {
+      if (g.length === 1) { tl.append(timelineRow(g[0])); continue; }
+      const key = `${g[0].worker}:${g[0].at}:${g.length}`;
+      const open = expandedGroups.has(key);
+      const counts = new Map<string, number>();
+      for (const e of g) counts.set(e.tool, (counts.get(e.tool) ?? 0) + 1);
+      const tools = [...counts].map(([t, n]) => (n > 1 ? `${t} ×${n}` : t)).join(" + ");
+      const dur = Math.max(1, Math.round((g[g.length - 1].at - g[0].at) / 1000));
+      tl.append(el("div", {
+        class: `ctl-row ctl-group mono${open ? " open" : ""}`,
+        title: open ? "Свернуть группу" : `${g.length} вызовов — развернуть`,
+        onClick: () => {
+          if (open) expandedGroups.delete(key);
+          else expandedGroups.add(key);
+          render();
+        },
+      },
+        el("span", { class: "ctl-sigil", text: g[0].glyph }),
+        el("span", { class: "ctl-worker", text: g[0].worker }),
+        el("span", { class: "ctl-tool", text: tools }),
+        el("span", { class: "ctl-sum", text: g[g.length - 1].summary }),
+        el("span", { class: "ctl-at dim", text: `${dur}s` }),
+        el("span", { class: "ctl-chev dim", text: open ? "▾" : "▸" }),
       ));
+      if (open) for (const e of g) tl.append(timelineRow(e, true));
     }
     tl.scrollTop = tl.scrollHeight;
   }
@@ -768,9 +835,6 @@ function renderBoard(body: HTMLElement, r: TeamRunState): void {
       rep,
     );
   }
-  if (r.phase === "stopped") {
-    extras.append(el("div", { class: "tb-frozen dim", text: "· run stopped — board frozen in its last state ·" }));
-  }
   if (fresh) board.classList.add("materialize");
 }
 
@@ -778,8 +842,7 @@ function renderBoard(body: HTMLElement, r: TeamRunState): void {
 
 function renderStalled(body: HTMLElement, r: TeamRunState): void {
   clear(body);
-  feedListEl = null;
-  feedRendered = 0;
+  resetFeedUi();
   body.append(
     el("div", { class: "team-stalled materialize" },
       el("div", { class: "ts-title", text: r.didNotSurvive ? "This team run did not survive the restart" : "The team run stalled" }),
@@ -803,6 +866,63 @@ function renderStalled(body: HTMLElement, r: TeamRunState): void {
 
 // ---- feed (deliberation + system notes, incremental)
 
+// journal rows: glyph + short text + time; collapsed to the last 3 (CSS)
+function journalGlyph(text: string): string {
+  if (/done|complete|passed|converged|resumed|approved/.test(text)) return "✓";
+  if (/failed|rejected|error|gap/.test(text)) return "✗";
+  if (/throttled|rate limit|paused|needs your call|stalled|interrupted/.test(text)) return "▲";
+  if (/execution|building|probing|serialized/.test(text)) return "▶";
+  return "·";
+}
+
+function journalRow(f: TeamFeedEntry): HTMLElement {
+  const at = new Date(f.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  // no duplicate full text (crew-design §3): the plan lives in the gate —
+  // the narrative stream carries a one-line reference that opens it
+  if (f.text.startsWith("plan converged")) {
+    const n = run?.slices.length ?? 0;
+    return el("div", { class: "tj-row" },
+      el("span", { class: "tj-glyph mono", text: "◇" }),
+      el("span", {
+        class: "tj-text tj-link",
+        text: `план из ${n} слайс${n === 1 ? "а" : "ов"} — открыть`,
+        onClick: () => surfaceEl.scrollTo({ top: 0, behavior: "smooth" }),
+      }),
+      el("span", { class: "tj-at mono dim", text: at }),
+    );
+  }
+  return el("div", { class: "tj-row" },
+    el("span", { class: "tj-glyph mono", text: journalGlyph(f.text) }),
+    el("span", { class: "tj-text", text: f.text }),
+    el("span", { class: "tj-at mono dim", text: at }),
+  );
+}
+
+function ensureJournal(): void {
+  if (journalEl && journalRows) return;
+  journalRows = el("div", { class: "tj-rows" });
+  const toggle = el("button", {
+    class: "tj-toggle",
+    text: journalExpanded ? "свернуть" : "показать все",
+    onClick: () => {
+      journalExpanded = !journalExpanded;
+      journalEl?.classList.toggle("expanded", journalExpanded);
+      toggle.textContent = journalExpanded ? "свернуть" : "показать все";
+    },
+  });
+  toggle.style.display = "none";
+  journalEl = el("div", { class: `team-journal${journalExpanded ? " expanded" : ""}` },
+    el("div", { class: "tj-head mono" },
+      el("span", { class: "tj-title", text: "журнал команды" }),
+      el("span", { class: "tj-count dim", text: "" }),
+      el("span", { style: { flex: "1" } }),
+      toggle,
+    ),
+    journalRows,
+  );
+  feedListEl!.append(journalEl);
+}
+
 function renderFeed(r: TeamRunState): void {
   if (!feedListEl) {
     // board phases keep the feed below the board
@@ -816,7 +936,15 @@ function renderFeed(r: TeamRunState): void {
   feedRendered = r.feed.length;
   for (const f of fresh) {
     if (f.kind === "system") {
-      feedListEl.append(el("div", { class: "tf-sys dim", text: `· ${f.text} ·` }));
+      // one narrative stream (crew-design §3): orchestration milestones grow
+      // ONE journal block in place — never centered dot-lines in the chat
+      ensureJournal();
+      journalRows!.append(journalRow(f));
+      journalCount++;
+      const count = journalEl!.querySelector(".tj-count") as HTMLElement | null;
+      if (count) count.textContent = String(journalCount);
+      const toggle = journalEl!.querySelector(".tj-toggle") as HTMLElement | null;
+      if (toggle) toggle.style.display = journalCount > 3 ? "" : "none";
     } else {
       feedListEl.append(
         el("div", { class: `tf-entry${f.kind === "note" ? " tf-note" : ""}` },

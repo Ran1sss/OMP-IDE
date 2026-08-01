@@ -36,6 +36,7 @@ import "./styles/remote.css";
 import "./styles/models.css";
 import "./styles/mentions.css";
 import "./styles/team.css";
+import "./styles/enhance.css";
 import type { LayoutState, OmpStatus } from "../shared/types";
 
 type ViewId = "explorer" | "search" | "git" | "remote" | "outline";

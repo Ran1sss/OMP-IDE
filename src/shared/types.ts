@@ -521,7 +521,7 @@ export interface ModelsUsage {
 
 export interface ModelEvent {
   time: number;
-  kind: "switch" | "validate" | "health" | "role" | "provider" | "THINK" | "SWAP" | "balance" | "TEST";
+  kind: "switch" | "validate" | "health" | "role" | "provider" | "THINK" | "SWAP" | "balance" | "TEST" | "ENHANCE";
   detail: string;
   origin: string;
 }
@@ -695,6 +695,8 @@ export interface TeamMechanism {
   active: number;
   /** workers currently paused by rate-limit */
   throttled: number;
+  /** parallel with exactly ONE live worker: why only one (rate-limit / staggered start / deps / 1 slice ready) — the badge renders `solo (…)`, never `parallel ×1` */
+  singleReason?: string;
   /** solo: the actual reason ("omp not found", "probe: …") — never generic */
   reason?: string;
 }
@@ -916,6 +918,10 @@ export interface IdeApi {
     setBalancePollMinutes(minutes: number): Promise<void>;
     /** re-enable a depleted profile manually */
     clearDepleted(providerId: string): Promise<void>;
+    /** Prompt Improve: one stateless smol-role oneshot per call (never the agent session) */
+    enhance(draft: string, origin: string): Promise<{ ok: true; text: string; model: string } | { ok: false; error: string }>;
+    /** wand availability: oneshot support + smol assignment + smol profile health */
+    enhanceStatus(): Promise<{ ok: boolean; reason?: string; model?: string }>;
     onState(cb: (s: ModelsState) => void): () => void;
     onUsage(cb: (u: ModelsUsage) => void): () => void;
     /** active model rejected the thinking param — flipped to no-thinking */

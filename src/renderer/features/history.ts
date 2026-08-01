@@ -10,6 +10,7 @@ import { el, clear } from "../core/dom";
 import { state } from "../core/state";
 import { toast, errorText } from "../core/ui";
 import type { OmpSessionMeta, OmpSessionEntry } from "../../shared/types";
+import { stripTeamMarkers } from "./team";
 
 let historyClose: (() => void) | null = null;
 
@@ -177,7 +178,11 @@ export function openSessionHistory(): void {
         node = el("div", { class: "chat-user", text: e.text });
       } else if (e.kind === "assistant") {
         node = el("div", { class: "chat-agent md" });
-        node.innerHTML = marked.parse(e.text, { async: false });
+        // historical transcripts render clean too: protocol marker lines are
+        // stripped at render time (the live board consumed them long ago)
+        const cleaned = stripTeamMarkers(e.text);
+        if (e.text.length > 0 && cleaned.trim().length === 0) node.classList.add("md-empty");
+        node.innerHTML = marked.parse(cleaned, { async: false });
         // history is inert: neutralize links' default nav, keep them readable
         for (const a of node.querySelectorAll("a")) {
           a.addEventListener("click", (ev) => ev.preventDefault());

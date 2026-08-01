@@ -9,7 +9,10 @@
 
 import type { IpcMain } from "electron";
 import { BrowserWindow } from "electron";
+import { readdirSync } from "node:fs";
+import { basename } from "node:path";
 import chokidar, { type FSWatcher } from "chokidar";
+import { runOneshot, oneshotAvailable, smolSelector } from "../oneshot-runner";
 import type {
   ModelsState,
   ModelsUsage,
@@ -57,11 +60,24 @@ import { SwapEngine, notifyRemote } from "./swap-engine";
 import { registerTesterHost, registerTesterHandlers } from "./api-tester";
 import type { TesterProtocol, TesterVerdict } from "../../shared/types";
 
+/**
+ * Prompt Improve instruction template, v1 (versioned in code per spec §2).
+ * The oneshot payload = this system prompt + draft + one workspace line —
+ * no file contents, no chat history, no secrets.
+ */
+const ENHANCE_SYSTEM_V1 =
+  "Rewrite the user's draft as a precise task for a coding agent working in this workspace. " +
+  "Keep the user's language (Russian stays Russian). Keep the intent; add missing specifics " +
+  "only when they are unambiguous from the draft or the workspace line. State the expected " +
+  "deliverable. No preamble, no quotes, no commentary — output the rewritten prompt only.";
+
 class ModelsManager {
   private bridge: AgentBridge = getAgentBridge();
   private health = new Map<string, { state: ProviderHealth; detail?: string }>();
   private pendingSwitch: { selector: string; label: string } | null = null;
   private usage: ModelsUsage = { requests: 0, inputTokens: 0, outputTokens: 0, reasoningTokens: 0, hasTokenData: false };
+  /** Prompt Improve oneshots — real requests the session stats never see (cost honesty) */
+  private extraRequests = 0;
   private usagePollTimer: NodeJS.Timeout | null = null;
   /** session-only thinking override; cleared on new session */
   private sessionThinking: ThinkingLevel | null = null;
@@ -636,7 +652,7 @@ class ModelsManager {
   }
 
   private pushUsage(): void {
-    for (const w of BrowserWindow.getAllWindows()) w.webContents.send("models:usage", this.usage);
+    for (const w of BrowserWindow.getAllWindows()) w.webContents.send("models:usage", this.getUsage());
   }
 
   private log(kind: ModelEvent["kind"], detail: string, origin: string): void {
@@ -1032,7 +1048,47 @@ class ModelsManager {
   }
 
   getUsage(): ModelsUsage {
-    return this.usage;
+    // enhance oneshots are real requests — surfaced in the strip, never hidden
+    return { ...this.usage, requests: this.usage.requests + this.extraRequests };
+  }
+
+  // ================================================== prompt improve (enhance)
+
+  /** Why the wand would be disabled right now; ok=true → model short name too. */
+  async enhanceStatus(): Promise<{ ok: boolean; reason?: string; model?: string }> {
+    if (!(await oneshotAvailable())) return { ok: false, reason: "requires OMP oneshot support" };
+    const sel = smolSelector();
+    if (!sel) return { ok: false, reason: "smol role unassigned" };
+    const profile = sel.split("/")[0];
+    const h = this.health.get(profile);
+    if (h && (h.state === "depleted" || h.state === "auth-error"))
+      return { ok: false, reason: `smol profile ${h.state === "depleted" ? "depleted" : "auth error"}` };
+    return { ok: true, model: sel.split("/").pop() };
+  }
+
+  /**
+   * One click = at most ONE stateless oneshot on the smol role (same runner
+   * as the chat listener; the agent session is never touched). 20 s cap.
+   */
+  async enhance(draft: string, origin: string): Promise<{ ok: true; text: string; model: string } | { ok: false; error: string }> {
+    const st = await this.enhanceStatus();
+    if (!st.ok) return { ok: false, error: st.reason ?? "unavailable" };
+    const root = this.bridge.getRoot();
+    // context, minimal but real: workspace name + top-level NAMES only
+    let listing = "";
+    try {
+      if (root) listing = readdirSync(root).slice(0, 40).join(", ");
+    } catch {}
+    const prompt = `DRAFT:\n${draft}\n\nWORKSPACE: ${root ? basename(root) : "(no workspace open)"}${listing ? ` — ${listing}` : ""}`;
+    if (process.env.OMP_IDE_ENHANCE_LOG) console.log(`[enhance payload]\n${ENHANCE_SYSTEM_V1}\n---\n${prompt}`);
+    const res = await runOneshot({ system: ENHANCE_SYSTEM_V1, prompt, model: smolSelector(), timeoutMs: 20_000 });
+    if (!res.ok) return { ok: false, error: res.error };
+    const text = res.stdout.trim();
+    if (!text) return { ok: false, error: "empty result" };
+    this.log("ENHANCE", `${st.model}: «${draft.slice(0, 70)}» → ${text.length} chars`, origin);
+    this.extraRequests++;
+    this.pushUsage();
+    return { ok: true, text, model: st.model ?? "smol" };
   }
 
   getEvents(): ModelEvent[] {
@@ -1132,6 +1188,8 @@ export function registerModelsHandlers(ipc: IpcMain): void {
   ipc.handle("models:setSessionThinking", async (_e, level: ThinkingLevel | null, origin: string) => m.setSessionThinking(level, origin));
   ipc.handle("models:boostOnce", async (_e, origin: string) => m.boostOnce(origin));
   ipc.handle("models:getEvents", async () => m.getEvents());
+  ipc.handle("models:enhance", async (_e, draft: string, origin: string) => m.enhance(draft, origin));
+  ipc.handle("models:enhanceStatus", async () => m.enhanceStatus());
   ipc.handle("models:setBalanceEndpoint", async (_e, id: string, endpoint: string) => m.setBalanceEndpoint(id, endpoint));
   ipc.handle("models:checkBalance", async (_e, id: string) => m.checkBalance(id));
   ipc.handle("models:checkAllBalances", async () => m.checkAllBalances());

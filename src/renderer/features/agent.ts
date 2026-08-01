@@ -12,6 +12,7 @@ import { toast, confirmDialog, inputDialog, selectDialog } from "../core/ui";
 import type { OmpEvent, OmpStatus, OmpTodoPhase, OmpFileEdit, OmpUiRequest, RemoteVia } from "../../shared/types";
 import { switchModelViaPicker, mountUsageStrip, mountModelWarning, openModelsDialog, setSessionThinkingViaPicker, createBoostToggle } from "./models";
 import { openSessionHistory } from "./history";
+import { initPromptEnhance, notifyPromptSent } from "./enhance";
 import { createTeamToggle, teamConsumesPrompt, initTeamSurface, stripTeamMarkers, teamRun } from "./team";
 import {
   initMentionInput,
@@ -115,23 +116,37 @@ function fmtNowElapsed(startedAt: number): string {
   return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`;
 }
 
+/** NOW-zone phase words for a live team run — state only, never plan/summary prose */
+const TEAM_PHASE_RU: Record<string, string> = {
+  probe: "проба возможностей",
+  deliberate: "совещание планировщиков",
+  gate: "план ждёт подтверждения",
+  execute: "сборка",
+  verify: "проверка",
+};
+
 function renderNow(): void {
   if (!nowEl) return;
   const busy = status.state === "thinking" || status.state === "tool";
   const team = teamRun();
+  const teamLive = !!team && team.phase !== "done" && team.phase !== "stopped" && team.phase !== "stalled";
+  // any ALIVE worker process (working/waking/throttled) owns the zone —
+  // never «агент свободен» while a worker process runs (crew-design §3)
   const teamActive = team && (team.phase === "execute" || team.phase === "verify")
-    ? team.agents.filter((a) => a.kind === "worker" && a.state === "working")
+    ? team.agents.filter((a) => a.kind === "worker" && (a.state === "working" || a.state === "waking" || a.state === "throttled"))
     : [];
 
   clear(nowEl);
   nowEl.classList.toggle("collapsed", !busy && teamActive.length === 0);
 
   if (!busy && teamActive.length === 0) {
-    // idle: one line — free + last result summary
+    // idle: one line. Team runs never echo plan/summary/report prose here.
     nowEl.append(
       el("div", { class: "now-idle" },
         el("span", { class: "now-dot" }),
-        el("span", { text: `агент свободен${lastResultLine ? ` · ${lastResultLine}` : ""}` }),
+        team
+          ? el("span", { text: teamLive ? `команда · ${TEAM_PHASE_RU[team.phase] ?? team.phase}` : "агент свободен" })
+          : el("span", { text: `агент свободен${lastResultLine ? ` · ${lastResultLine}` : ""}` }),
       ),
     );
     if (nowTimer) { clearInterval(nowTimer); nowTimer = undefined; }
@@ -139,14 +154,17 @@ function renderNow(): void {
   }
 
   if (teamActive.length > 0) {
-    // Team mode: one row per ACTIVE worker (glanceable mirror of the board)
+    // Team mode: one row per ACTIVE worker — sigil + tool + target + ticking elapsed
     for (const w of teamActive) {
-      const slice = team!.slices.find((s) => s.id === w.slice);
+      const target =
+        w.state === "throttled" ? "rate-limited · backing off" :
+        w.state === "waking" ? "запуск…" :
+        (w.lastActivity ?? (w.slice ? `slice ${w.slice}` : ""));
       nowEl.append(
-        el("div", { class: "now-row" },
+        el("div", { class: `now-row${w.state === "throttled" ? " throttled" : ""}` },
           el("span", { class: "now-sigil mono", text: w.glyph }),
           el("span", { class: "mono now-name", text: w.name }),
-          el("span", { class: "now-target", text: slice ? `${slice.id} · ${slice.title}` : (w.slice ?? "") }),
+          el("span", { class: "now-target", text: target }),
           el("span", { class: "mono now-elapsed", text: fmtNowElapsed(w.sinceMs) }),
         ),
       );
@@ -189,6 +207,10 @@ function renderNow(): void {
   }
   if (!nowTimer) nowTimer = window.setInterval(renderNow, 1000);
 }
+
+// worker lifecycle changes arrive as team-state pushes, not agent status —
+// re-render the NOW zone on each so rows appear/collapse with the processes
+on("team-state", () => renderNow());
 
 const EXAMPLE_PROMPTS = [
   "Explain the structure of this project",
@@ -336,7 +358,7 @@ function nearBottom(): boolean {
 
 function addUserMessage(text: string, via?: RemoteVia, mentions?: MentionAttachment[]) {
   panelEl.querySelector(".agent-blank:not(.disabled-state)")?.remove();
-  chatEl.append(el("div", { class: "chat-user", text }));
+  chatEl.append(el("div", { class: "chat-user", text: stripTeamMarkers(text) }));
   if (mentions?.length) chatEl.append(renderMentionChips(mentions));
   if (via) {
     chatEl.append(
@@ -719,6 +741,7 @@ async function handleUiRequest(req: OmpUiRequest) {
 // ---------------------------------------------------------------- actions
 
 function sendPrompt() {
+  notifyPromptSent(); // sending always closes the advisory enhance card
   const text = promptInput.value.trim();
   if (!text && !hasMentions()) return;
   if (status.state === "unavailable" || status.state === "dead" || status.state === "starting") {
@@ -886,6 +909,7 @@ export function initAgentPanel(container: HTMLElement) {
   mountUsageStrip(panelEl);
   mountModelWarning(panelEl);
   initTeamSurface({ panel: panelEl, input: promptInput });
+  initPromptEnhance({ composer: composerEl, input: promptInput });
   renderWelcomeState();
 
   window.ide.omp.onStatus((s) => applyStatus(s));
