@@ -399,6 +399,11 @@ export class BotRuntime {
     }
   }
 
+  /** Liveness without a message: refresh Telegram's transient typing action. */
+  sendTyping(chatId: number): void {
+    void this.withRetry(() => this.bot.api.sendChatAction(chatId, "typing")).catch(() => {});
+  }
+
   /** Queued markdown send; resolves with message id or null on failure. */
   sendMd(chatId: number, text: string, keyboard?: InlineKeyboard): Promise<number | null> {
     const { promise, resolve } = Promise.withResolvers<number | null>();

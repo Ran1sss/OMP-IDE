@@ -192,6 +192,13 @@ html, body {
   color: var(--energy);
 }
 .btn-agent:hover { background: var(--energy-25); border-color: var(--energy); }
+/* voice 8+2 §5: the composer send button becomes a Stop control during a run */
+.btn-agent.btn-stop {
+  background: transparent;
+  border-color: var(--flare-40);
+  color: var(--flare);
+}
+.btn-agent.btn-stop:hover { background: var(--flare-15); border-color: var(--flare); }
 
 .btn-danger {
   background: var(--crit-15);

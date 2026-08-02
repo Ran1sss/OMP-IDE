@@ -15,7 +15,7 @@
  */
 
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { whichOmp, getOmpChildEnv } from "../omp-service";
+import { whichOmp, getOmpChildEnv, getAgentBridge } from "../omp-service";
 import { currentOmpPath } from "../store-service";
 
 export interface WorkerResult {
@@ -56,6 +56,7 @@ interface WorkerProc {
   retried: boolean;
   prompt: string;
   ended: boolean;
+  terminalError?: string;
   killed: boolean;
 }
 
@@ -104,7 +105,9 @@ export async function startWorker(opts: {
 
   let proc: ChildProcessWithoutNullStreams;
   try {
-    proc = spawn(bin, ["--mode", "rpc", "--auto-approve"], {
+    const active = getAgentBridge().getActiveModel();
+    const model = active ? `${active.provider}/${active.id}` : null;
+    proc = spawn(bin, ["--mode", "rpc", "--auto-approve", "--no-session", ...(model ? ["--model", model] : [])], {
       cwd: opts.root,
       windowsHide: true,
       stdio: ["pipe", "pipe", "pipe"],
@@ -126,6 +129,7 @@ export async function startWorker(opts: {
     prompt: opts.prompt,
     ended: false,
     killed: false,
+    terminalError: undefined,
   };
   live.set(opts.name, w);
 
@@ -265,22 +269,25 @@ function handleFrame(w: WorkerProc, frame: Record<string, any>): void {
         const detail = typeof msg.errorMessage === "string" ? msg.errorMessage : "provider error";
         const throttled = status === 429 || /rate.?limit|quota|overloaded|too many/i.test(detail);
         if (throttled && !w.retried) {
-          // throttled state: back off once, then retry the slice prompt in the SAME process
           w.retried = true;
           w.events.onThrottled(detail.slice(0, 200));
           w.throttleTimer = setTimeout(() => {
             w.throttleTimer = null;
+            w.terminalError = undefined;
             w.events.onResumed();
             send(w, { id: "wk_retry", type: "prompt", message: w.prompt });
           }, THROTTLE_BACKOFF_MS);
+        } else {
+          w.terminalError = `${status ?? "provider"}: ${detail}`;
         }
       }
       break;
     }
     case "agent_end": {
-      // a turn finished; if a throttle retry is pending, the timer owns the next move
       if (w.throttleTimer) break;
-      settle(w, { ok: true, text: w.finalText });
+      settle(w, w.terminalError
+        ? { ok: false, text: w.finalText, error: w.terminalError }
+        : { ok: true, text: w.finalText });
       break;
     }
     default:

@@ -23,6 +23,15 @@ interface TgStrings {
   yes: string;
   no: string;
   restartSession: string;
+  files: (n: number) => string;
+  minutes: (n: number) => string;
+  passed: (n: number) => string;
+  teamLabel: string;
+  teamPhase: (phase: string) => string;
+  teamState: (state: string) => string;
+  taskDoneFallback: string;
+  agentError: string;
+  freeTextReply: string;
   paired: (bot: string) => string;
   alreadyPaired: string;
   unknownCommand: string;
@@ -57,6 +66,15 @@ const RU: TgStrings = {
   yes: "Да",
   no: "Нет",
   restartSession: "Перезапустить сессию",
+  files: (n) => `${n} ${n === 1 ? "файл" : n > 1 && n < 5 ? "файла" : "файлов"}`,
+  minutes: (n) => `${n}м`,
+  passed: (n) => `${n} ${n % 10 === 1 && n % 100 !== 11 ? "тест" : n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 12 || n % 100 > 14) ? "теста" : "тестов"}`,
+  teamLabel: "команда",
+  teamPhase: (phase) => ({ route: "маршрутизация", gate: "ожидание запуска", execute: "выполнение", verify: "проверка" })[phase] ?? phase,
+  teamState: (state) => ({ pending: "в очереди", active: "работает", done: "готово", failed: "ошибка", replanned: "перепланировано" })[state] ?? state,
+  taskDoneFallback: "Задача завершена.",
+  agentError: "Задача остановилась: агент завершился с ошибкой.",
+  freeTextReply: "Ответьте обычным сообщением.",
   paired: (bot) => `Готово. Теперь вы управляете агентом OMP через @${bot}. Отправьте задачу обычным сообщением или /help.`,
   alreadyPaired: "Уже подключены. Отправьте задачу обычным сообщением или /help.",
   unknownCommand: "Неизвестная команда. /help покажет всё.",
@@ -105,6 +123,15 @@ const EN: TgStrings = {
   yes: "Yes",
   no: "No",
   restartSession: "Restart session",
+  files: (n) => `${n} ${n === 1 ? "file" : "files"}`,
+  minutes: (n) => `${n}m`,
+  passed: (n) => `${n} passed`,
+  teamLabel: "team",
+  teamPhase: (phase) => ({ route: "routing", gate: "awaiting start", execute: "running", verify: "verifying" })[phase] ?? phase,
+  teamState: (state) => ({ pending: "queued", active: "working", done: "done", failed: "failed", replanned: "replanned" })[state] ?? state,
+  taskDoneFallback: "Task completed.",
+  agentError: "The task stopped because the agent failed.",
+  freeTextReply: "Reply with a plain message.",
   paired: (bot) => `Paired. You now control the OMP agent through @${bot}. Send a task as a plain message, or /help.`,
   alreadyPaired: "Already paired. Send a task as a plain message, or /help.",
   unknownCommand: "Unknown command. /help lists everything.",

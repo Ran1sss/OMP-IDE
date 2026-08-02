@@ -9,3 +9,12 @@ tmp/
 # local artifacts
 debug.log
 /OMP IDE.exe
+
+# local credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx

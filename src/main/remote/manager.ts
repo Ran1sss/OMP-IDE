@@ -1,7 +1,6 @@
 /**
- * Remote Control Center backend: bot registry, pairing, inbound routing,
- * outbound broadcasting (digests / questions / summaries), activity feed,
- * and the `remote:*` IPC surface. One agent session, many remotes.
+ * Remote Control Center backend: bot registry, pairing, final-only task
+ * delivery, questions, transient typing liveness, and activity feed.
  */
 
 import type { IpcMain } from "electron";
@@ -36,25 +35,20 @@ import { registerSwapRemoteNotifier } from "../models/swap-engine";
 import {
   registerTeamGateNotifier,
   registerTeamEndNotifier,
-  approveTeamFromRemote,
   isTeamRunActive,
-  teamDigestData,
+  teamJournalData,
 } from "../omp-team/team-service";
 import { SessionTracker } from "./session-tracker";
 import { tg, tgLangFor } from "./tg-i18n";
+import { classifyTeamAgentEnd } from "../../shared/agent-end";
+import { shouldSendTyping } from "../../shared/remote-communication";
 import {
   escapeMd,
   mdToTelegram,
-  chunkText,
-  renderDigest,
-  renderTeamDigest,
   renderTodoLines,
   renderDiffstat,
-  diffstatLine,
   formatElapsed,
-  formatElapsedRu,
   sanitizeOutbound,
-  TG_LIMIT,
 } from "./format";
 import { routeIntent, answerQuestion, registerDialogueTracker } from "./dialogue";
 
@@ -69,10 +63,6 @@ interface ChatTarget {
   languageCode?: string;
 }
 
-interface DigestSlot {
-  messageId: number;
-  lastText: string;
-}
 
 class RemoteManager implements BotDelegate {
   private bridge: AgentBridge = getAgentBridge();
@@ -80,12 +70,10 @@ class RemoteManager implements BotDelegate {
   private runtimes = new Map<string, BotRuntime>();
   private pairing: (RemotePairing & { timer: NodeJS.Timeout }) | null = null;
   private activity: RemoteActivityEvent[] = [];
-  /** digest message per `${botId}:${chatId}` for the current task */
-  private digests = new Map<string, DigestSlot>();
-  private digestTimer: NodeJS.Timeout | null = null;
-  private digestDirty = false;
-  /** a Team run is ONE Telegram task: digests/summaries span its lead turns */
+  /** Team run spans several lead turns; only its notifier sends the final. */
   private teamTaskActive = false;
+  private taskFinalSent = false;
+  private typingTimer: NodeJS.Timeout | null = null;
   private currentUi: BridgeUiRequest | null = null;
   /** pending /stop and /new confirmations by callback token */
   private confirms = new Map<string, { kind: "stop" | "new"; username: string }>();
@@ -107,7 +95,7 @@ class RemoteManager implements BotDelegate {
     this.tracker.attach();
     // Chat Dialogue: the composer borrows the tracker's diffstat/elapsed/result
     registerDialogueTracker(this.tracker);
-    this.bridge.onStatus(() => this.markDigestDirty());
+    this.bridge.onStatus(() => this.refreshTyping());
     this.bridge.onEvent((e) => this.onAgentEvent(e));
     this.bridge.onUiRequest((req) => this.onAgentQuestion(req));
 
@@ -126,55 +114,23 @@ class RemoteManager implements BotDelegate {
         if (bot.enabled) await this.spawnRuntime(bot);
       }
     }
-    this.startDigestTimer();
     // auto-swap loudness: swaps and low-balance crossings reach Telegram too
     registerSwapRemoteNotifier((text) => {
       for (const t of this.targets()) t.runtime.sendMd(t.chatId, escapeMd(sanitizeOutbound(text)));
     });
-    // Team plan gate: compact human summary — goal one line + short slice
-    // bullets (message economy §4); the full technical plan lives behind
-    // [Open in IDE]. First decision wins with the IDE button.
-    registerTeamGateNotifier((packet) => {
-      const lines = [
-        `📋 ${sanitizeOutbound(packet.goal).split("\n")[0].slice(0, 180)}`,
-        ...packet.slices.map((s) => `• ${s.title.slice(0, 90)}`),
-      ];
-      // button labels localize per recipient (fix 4)
-      for (const t of this.targets()) {
-        const L = tg(tgLangFor(t.languageCode));
-        const kb = new InlineKeyboard()
-          .text(L.approve, `team:${packet.runId}`)
-          .text(L.openInIde, "team:open");
-        t.runtime.sendMd(t.chatId, escapeMd(lines.join("\n")), kb);
-      }
-    });
-    // Team run completion: THE one final answer — report text (already prose,
-    // sanitized) + one inline diffstat line + elapsed. Never a separate meta
-    // message (message economy §2).
+    // Team dispatch is desktop-only: no plan/progress push to Telegram.
+    registerTeamGateNotifier(() => {});
     registerTeamEndNotifier((p) => {
       this.teamTaskActive = false;
-      const stats = p.slices
-        .filter((s) => s.add > 0 || s.del > 0)
-        .map((s) => `${s.files?.[0]?.split("/").pop() ?? `slice ${s.id}`} +${s.add} −${s.del}`)
-        .join(" · ");
-      const meta = [stats, `⏱ ${formatElapsedRu(p.elapsedMs)}`].filter(Boolean).join(" · ");
-      const body = sanitizeOutbound(p.report).trim();
-      const text = (body ? mdToTelegram(body) + "\n\n" : "") + escapeMd(meta);
-      const chunks = chunkText(text, TG_LIMIT - 100);
-      for (const t of this.targets()) {
-        if (chunks.length > 2) {
-          t.runtime.sendMd(t.chatId, escapeMd(`✅ Готово — полный отчёт во вложении.\n${meta}`));
-          t.runtime.sendDocument(t.chatId, "team-report.md", body);
-        } else {
-          for (const c of chunks) t.runtime.sendMd(t.chatId, c);
-        }
-      }
+      this.stopTyping();
+      this.sendFinalOnce(sanitizeOutbound(p.report).trim(), p.elapsedMs);
     });
   }
 
   async dispose(): Promise<void> {
     registerSwapRemoteNotifier(null);
     registerTeamGateNotifier(null);
+    registerTeamEndNotifier(null);
     registerDialogueTracker(null);
     this.watch.dispose();
     // Flush a final broadcast if a task is mid-flight.
@@ -192,7 +148,7 @@ class RemoteManager implements BotDelegate {
         new Promise((r) => setTimeout(r, 2500)),
       ]);
     }
-    if (this.digestTimer) clearInterval(this.digestTimer);
+    this.stopTyping();
     this.cancelPairing();
     for (const rt of this.runtimes.values()) await rt.stop();
     this.runtimes.clear();
@@ -333,13 +289,6 @@ class RemoteManager implements BotDelegate {
     await Promise.all(ops);
   }
 
-  setDigestInterval(ms: number): void {
-    const store = loadStore();
-    store.digestIntervalMs = Math.max(1000, Math.min(30_000, ms));
-    saveStore();
-    this.startDigestTimer();
-    this.pushState();
-  }
 
   /**
    * Set the telegram proxy and restart live runtimes so it takes effect
@@ -543,6 +492,7 @@ class RemoteManager implements BotDelegate {
         this.currentUi = null;
         this.echoToOthers(botId, msg, "answer");
         this.pushRemoteAnswerToIde(msg.username, bot.name, msg.text);
+        this.startTyping();
       } else if (res.already) {
         rt.sendMd(
           msg.chatId,
@@ -612,22 +562,6 @@ class RemoteManager implements BotDelegate {
     // proposal decisions from the approver's DM: pp:<id>:do|skip
     if (this.watch.handleCallback(botId, cb.data, cb.username, cb.ack)) return;
     // team plan approval: team:<runId> | team:open (informational)
-    if (cb.data.startsWith("team:")) {
-      const arg = cb.data.slice(5);
-      if (arg === "open") {
-        cb.ack("Open OMP IDE on the desktop to edit the plan");
-        return;
-      }
-      const res = approveTeamFromRemote(arg, `@${cb.username} via Telegram`);
-      if (res.ok) {
-        cb.ack("Approved — team is building");
-        this.log(botId, bot.username, `@${cb.username}`, "answer", "team plan approved");
-        this.broadcastMd(escapeMd(`🧩 @${cb.username} approved the team plan.`), botId, cb.chatId);
-      } else {
-        cb.ack(res.error ?? "That plan is no longer active");
-      }
-      return;
-    }
     // agent question buttons: ui:<reqId>:<optIndex|yes|no>
     if (cb.data.startsWith("ui:")) {
       const [, reqId, choice] = cb.data.split(":");
@@ -655,14 +589,11 @@ class RemoteManager implements BotDelegate {
         cb.ack("Answered");
         this.currentUi = null;
         this.log(botId, bot.username, `@${cb.username}`, "answer", label);
-        this.broadcastMd(escapeMd(`@${cb.username} answered: ${label}`), botId, cb.chatId);
         this.pushRemoteAnswerToIde(cb.username, bot.name, label);
+        this.startTyping();
       } else if (res.already) {
         cb.ack(`Already answered by ${res.already.by}`);
-        rt.sendMd(
-          cb.chatId,
-          escapeMd(`Already answered by ${res.already.by} (their answer: ${res.already.answer.slice(0, 80)})`),
-        );
+        rt.sendMd(cb.chatId, escapeMd(`Already answered by ${res.already.by} (their answer: ${res.already.answer.slice(0, 80)})`));
       } else {
         cb.ack("Question expired");
       }
@@ -686,7 +617,6 @@ class RemoteManager implements BotDelegate {
       } else {
         this.bridge.newSession();
         this.tracker.reset();
-        this.digests.clear();
         this.log(botId, bot.username, `@${cb.username}`, "command", "/new confirmed");
         this.broadcastMd(escapeMd(`🔄 @${cb.username} started a new session.`));
       }
@@ -743,6 +673,13 @@ class RemoteManager implements BotDelegate {
         rt.sendMd(msg.chatId, escapeMd(tg(tgLangFor(msg.languageCode)).help));
         return;
       case "/status": {
+        const team = teamJournalData();
+        if (team && isTeamRunActive()) {
+          const L = tg(tgLangFor(msg.languageCode));
+          const rows = team.slices.map((s) => `${s.worker}: ${s.title} · ${L.teamState(s.state)}`);
+          rt.sendMd(msg.chatId, "```\n" + [`${L.teamLabel}: ${L.teamPhase(team.phase)}`, ...rows].join("\n").replace(/[`\\]/g, (c) => `\\${c}`) + "\n```");
+          return;
+        }
         const st = this.bridge.getStatus();
         const root = this.bridge.getRoot();
         const phases = this.bridge.getTodoPhases();
@@ -844,7 +781,6 @@ class RemoteManager implements BotDelegate {
         if (!busy) {
           this.bridge.newSession();
           this.tracker.reset();
-          this.digests.clear();
           this.log(bot.id, bot.username, `@${msg.username}`, "command", "/new");
           this.broadcastMd(escapeMd(`🔄 @${msg.username} started a new session.`));
           return;
@@ -885,142 +821,89 @@ class RemoteManager implements BotDelegate {
   }
 
   /** mirror an inbound remote message to the other remotes */
-  private echoToOthers(botId: string, msg: InboundMessage, kind: "task" | "steer" | "answer"): void {
-    const glyph = kind === "task" ? "▷" : kind === "steer" ? "↪" : "✎";
-    this.broadcastMd(escapeMd(`${glyph} @${msg.username}: ${sanitizeOutbound(msg.text).slice(0, 500)}`), botId, msg.chatId);
-  }
+  /** Tasks/steering/answers are visible in the shared IDE transcript only;
+   *  Telegram task pushes remain final-only. */
+  private echoToOthers(_botId: string, _msg: InboundMessage, _kind: "task" | "steer" | "answer"): void {}
 
-  private onAgentEvent(e: { kind: string }): void {
+  private onAgentEvent(e: { kind: string; failed?: boolean }): void {
     if (e.kind === "agent-start") {
-      // message economy §1: one digest message per TASK. A team run spans
-      // several lead turns — only the FIRST turn opens a fresh digest.
-      if (isTeamRunActive()) {
-        if (!this.teamTaskActive) {
-          this.teamTaskActive = true;
-          this.digests.clear();
-        }
-      } else {
-        this.teamTaskActive = false;
-        this.digests.clear();
-      }
-      this.markDigestDirty();
+      if (!this.teamTaskActive) this.taskFinalSent = false;
+      this.teamTaskActive = isTeamRunActive();
+      this.startTyping();
     } else if (e.kind === "agent-end") {
       this.currentUi = null;
-      // message economy §2: during a team run intermediate lead turns end
-      // (deliberation → gate) — no summary; the ONE final answer arrives
-      // via the team end notifier. Narration/standalone-elapsed sends die here.
-      if (!this.teamTaskActive) void this.sendCompletionSummary();
-    } else if (e.kind === "tool-start" || e.kind === "tool-end" || e.kind === "todos") {
-      this.markDigestDirty();
+      if (this.teamTaskActive) {
+        queueMicrotask(() => {
+          const decision = classifyTeamAgentEnd(teamJournalData()?.phase ?? null);
+          if (decision === "continue") return;
+          this.teamTaskActive = false;
+          this.stopTyping();
+          if (decision === "error") this.sendErrorOnce();
+        });
+      } else if (!this.teamTaskActive) {
+        this.stopTyping();
+        if (e.failed) this.sendErrorOnce();
+        else this.sendCompletionSummary();
+      }
+    } else if (e.kind === "tool-start" || e.kind === "tool-end" || e.kind === "todos" || e.kind === "text-delta") {
+      this.refreshTyping();
     }
-    // dead-agent alerting rides on status, handled below
   }
 
-  private lastStatusState = "";
+  private startTyping(): void {
+    this.refreshTyping();
+    if (this.typingTimer) clearInterval(this.typingTimer);
+    this.typingTimer = setInterval(() => this.refreshTyping(), 4000);
+  }
 
-  private markDigestDirty(): void {
-    this.digestDirty = true;
+  private stopTyping(): void {
+    if (this.typingTimer) clearInterval(this.typingTimer);
+    this.typingTimer = null;
+  }
+
+  private refreshTyping(): void {
     const st = this.bridge.getStatus();
-    if (st && st.state !== this.lastStatusState) {
-      const prev = this.lastStatusState;
-      this.lastStatusState = st.state;
-      if (st.state === "dead" && prev !== "" && prev !== "dead") {
-        const detail = st.detail ? `\n${sanitizeOutbound(st.detail).slice(-400)}` : "";
-        for (const t of this.targets()) {
-          const kb = new InlineKeyboard().text(tg(tgLangFor(t.languageCode)).restartSession, "restart");
-          t.runtime.sendMd(t.chatId, escapeMd(`⚠ Agent process died.${detail}`), kb);
-        }
-        this.log("", "", "system", "system", "agent died — alert broadcast");
-      }
+    if (!shouldSendTyping(st?.state, isTeamRunActive())) return;
+    for (const target of this.targets()) target.runtime.sendTyping(target.chatId);
+  }
+
+  private sendFinalOnce(final: string, elapsedMs = this.tracker.elapsedMs): void {
+    if (this.taskFinalSent) return;
+    this.taskFinalSent = true;
+    const files = this.tracker.totals().files;
+    const minutes = Math.max(1, Math.round(elapsedMs / 60000));
+    for (const target of this.targets()) {
+      const L = tg(tgLangFor(target.languageCode));
+      const meta = [files ? `✓ ${L.files(files)}` : "✓", this.tracker.lastPassedCount ? L.passed(this.tracker.lastPassedCount) : "", L.minutes(minutes)].filter(Boolean).join(" · ");
+      const text = `${mdToTelegram(final || L.taskDoneFallback)}\n\n\`${escapeMd(meta)}\``;
+      target.runtime.sendMd(target.chatId, text);
     }
   }
 
-  private startDigestTimer(): void {
-    if (this.digestTimer) clearInterval(this.digestTimer);
-    this.digestTimer = setInterval(() => void this.flushDigests(), loadStore().digestIntervalMs);
+  private sendCompletionSummary(): void {
+    this.sendFinalOnce(sanitizeOutbound(this.tracker.lastFinalText).trim());
   }
 
-  private async flushDigests(): Promise<void> {
-    // team runs: the digest mirrors live team state (workers run in their own
-    // processes — lead status alone would go stale); recomputed every tick,
-    // edits deduped via lastText
-    const team = teamDigestData();
-    let text: string | null = null;
-    if (team) {
-      text = renderTeamDigest(team);
-    } else {
-      if (!this.digestDirty) return;
-      this.digestDirty = false;
-      const st = this.bridge.getStatus();
-      if (!st || (st.state !== "thinking" && st.state !== "tool" && st.state !== "awaiting-input")) return;
-      const totals = this.tracker.totals();
-      text = renderDigest({
-        status: st,
-        phases: this.bridge.getTodoPhases(),
-        filesTouched: totals.files,
-        add: totals.add,
-        del: totals.del,
-      });
-    }
-    for (const t of this.targets()) {
-      const key = `${t.bot.id}:${t.chatId}`;
-      const slot = this.digests.get(key);
-      if (!slot) {
-        const id = await t.runtime.sendMd(t.chatId, text);
-        if (id !== null) this.digests.set(key, { messageId: id, lastText: text });
-      } else if (slot.lastText !== text) {
-        slot.lastText = text;
-        t.runtime.editMd(t.chatId, slot.messageId, text);
-      }
-    }
-  }
-
-  private async sendCompletionSummary(): Promise<void> {
-    const targets = this.targets();
-    if (!targets.length) return;
-    const final = sanitizeOutbound(this.tracker.lastFinalText).trim();
-    // message economy §2: ONE final answer — text + one inline diffstat line
-    // + elapsed. Never a separate telemetry/meta message.
-    const meta = [diffstatLine(this.tracker.stats()), `⏱ ${formatElapsedRu(this.tracker.elapsedMs)}`]
-      .filter(Boolean)
-      .join(" · ");
-    const body = (final ? mdToTelegram(final) : escapeMd("(нет финального ответа)")) + "\n\n" + escapeMd(meta);
-    const chunks = chunkText(body, TG_LIMIT - 100);
-
-    for (const t of targets) {
-      if (chunks.length > 2) {
-        t.runtime.sendMd(t.chatId, escapeMd(`✅ Готово — полный ответ во вложении.\n${meta}`));
-        t.runtime.sendDocument(t.chatId, "result.md", final);
-      } else {
-        for (const c of chunks) t.runtime.sendMd(t.chatId, c);
-      }
+  private sendErrorOnce(): void {
+    if (this.taskFinalSent) return;
+    this.taskFinalSent = true;
+    for (const target of this.targets()) {
+      const L = tg(tgLangFor(target.languageCode));
+      target.runtime.sendMd(target.chatId, escapeMd(L.agentError));
     }
   }
 
   private onAgentQuestion(req: BridgeUiRequest): void {
     this.currentUi = req;
+    this.stopTyping();
     const targets = this.targets();
-    if (!targets.length) return;
-    const kb = new InlineKeyboard();
-    if (req.method === "confirm") {
-      // Yes/No get localized per target below; the shared kb covers select
-    } else if (req.method === "select" && req.options?.length) {
-      req.options.forEach((opt, i) => kb.text(opt.slice(0, 48), `ui:${req.id}:${i}`).row());
-    }
-    const parts = [
-      `❓ ${req.title ?? "Agent asks"}`,
-      sanitizeOutbound(req.message ?? ""),
-      req.method === "input" || req.method === "editor" ? "(reply with a plain message)" : "",
-    ].filter(Boolean);
-    const text = escapeMd(parts.join("\n"));
-    for (const t of targets) {
-      if (req.method === "confirm") {
-        const L = tg(tgLangFor(t.languageCode));
-        const confirmKb = new InlineKeyboard().text(L.yes, `ui:${req.id}:yes`).text(L.no, `ui:${req.id}:no`);
-        t.runtime.sendMd(t.chatId, text, confirmKb);
-      } else {
-        t.runtime.sendMd(t.chatId, text, req.method === "select" ? kb : undefined);
-      }
+    for (const target of targets) {
+      const L = tg(tgLangFor(target.languageCode));
+      const kb = new InlineKeyboard();
+      if (req.method === "confirm") kb.text(L.yes, `ui:${req.id}:yes`).text(L.no, `ui:${req.id}:no`);
+      else if (req.method === "select") (req.options ?? []).forEach((opt, i) => kb.text(opt.slice(0, 48), `ui:${req.id}:${i}`).row());
+      const parts = [req.title ?? "Agent asks", sanitizeOutbound(req.message ?? ""), req.method === "input" || req.method === "editor" ? L.freeTextReply : ""].filter(Boolean);
+      target.runtime.sendMd(target.chatId, escapeMd(parts.join("\n")), req.method === "confirm" || req.method === "select" ? kb : undefined);
     }
   }
 
@@ -1061,7 +944,6 @@ class RemoteManager implements BotDelegate {
     const store = loadStore();
     return {
       globalEnabled: store.globalEnabled,
-      digestIntervalMs: store.digestIntervalMs,
       proxyUrl: store.proxyUrl,
       bots: store.bots.map((b) => this.botInfo(b)),
       pairing: this.pairing
@@ -1216,7 +1098,6 @@ export function registerRemoteHandlers(ipc: IpcMain): void {
     m.setBotEnabled(botId, enabled),
   );
   ipc.handle("remote:setGlobalEnabled", async (_e, enabled: boolean) => m.setGlobalEnabled(enabled));
-  ipc.handle("remote:setDigestInterval", async (_e, ms: number) => m.setDigestInterval(ms));
   ipc.handle("remote:setProxyUrl", async (_e, url: string) => m.setProxyUrl(url));
   ipc.handle("remote:testProxy", async (_e, url: string) => m.testProxy(url));
   ipc.handle("remote:startPairing", async (_e, botId: string) => m.startPairing(botId));

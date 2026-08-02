@@ -4,6 +4,7 @@ import { execFile } from "node:child_process";
 import * as fs from "node:fs";
 import { isAbsolute, resolve as resolvePath } from "node:path";
 import type { OmpEvent, OmpStatus, OmpFileEdit, OmpTodoPhase, ThinkingLevel } from "../shared/types";
+import { classifyAgentEnd } from "../shared/agent-end";
 import { currentOmpPath } from "./store-service";
 
 /**
@@ -44,6 +45,13 @@ export type UiAnswerResult =
   | { applied: false; already: UiAnswerRecord }
   | { applied: false; already: null };
 
+export interface PromptDisplayOptions {
+  /** false for orchestration prompts that must never enter the user feed */
+  echo?: boolean;
+  /** user-facing echo when the model receives a larger internal prompt */
+  displayText?: string;
+}
+
 export interface AgentBridge {
   onStatus(cb: (s: OmpStatus) => void): () => void;
   onEvent(cb: (e: OmpEvent) => void): () => void;
@@ -52,10 +60,9 @@ export interface AgentBridge {
   getRoot(): string | null;
   getTodoPhases(): OmpTodoPhase[];
   getStartedAt(): number | null;
-  /** prompt/steer/answer routed exactly like the IDE composer; `via` attributes it.
-   *  `attribution` overrides the default `[remote/telegram @user]` prefix
-   *  (chat-watch proposals carry chat + author + approver). */
-  prompt(message: string, via?: { username: string; botName: string; attribution?: string }): boolean;
+  /** prompt/steer/answer routed to the live session. `display` separates the
+   *  internal model prompt from what the user sees in the IDE feed. */
+  prompt(message: string, via?: { username: string; botName: string; attribution?: string }, display?: PromptDisplayOptions): boolean;
   abort(): boolean;
   newSession(): boolean;
   restartSession(): Promise<boolean>;
@@ -302,10 +309,8 @@ function handleFrame(s: OmpSession, frame: RpcFrame) {
       // flag is only a fallback for runs that die before any turn_end — it
       // races: a turn finishing naturally just after the user clicks
       // Interrupt must NOT read as interrupted.
-      const aborted = s.lastStopReason !== undefined
-        ? s.lastStopReason === "aborted"
-        : s.abortRequested === true;
-      emit(s, { kind: "agent-end", aborted });
+      const { aborted, failed } = classifyAgentEnd(s.lastStopReason, s.abortRequested === true);
+      emit(s, { kind: "agent-end", aborted, failed });
       s.abortRequested = false;
       s.lastStopReason = undefined;
       // Refresh todos snapshot after each run.
@@ -492,8 +497,13 @@ async function startSession(wc: WebContents, root: string, customPath: string) {
 
 // -------------------------------------------------- shared actions (IPC + bridge)
 
-function doPrompt(s: OmpSession, message: string, via?: { username: string; botName: string; attribution?: string }) {
-  emit(s, { kind: "user-message", text: message, via });
+function doPrompt(
+  s: OmpSession,
+  message: string,
+  via?: { username: string; botName: string; attribution?: string },
+  display?: PromptDisplayOptions,
+) {
+  if (display?.echo !== false) emit(s, { kind: "user-message", text: display?.displayText ?? message, via });
   const streaming = s.status.state === "thinking" || s.status.state === "tool";
   sendCmd(s, {
     type: "prompt",
@@ -552,10 +562,10 @@ export function getAgentBridge(): AgentBridge {
     getRoot: () => primarySession()?.root ?? null,
     getTodoPhases: () => lastTodoPhases,
     getStartedAt: () => primarySession()?.startedAt ?? null,
-    prompt(message, via) {
+    prompt(message, via, display) {
       const s = primarySession();
       if (!s) return false;
-      doPrompt(s, message, via);
+      doPrompt(s, message, via, display);
       return true;
     },
     abort() {

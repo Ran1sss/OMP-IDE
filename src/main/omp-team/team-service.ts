@@ -6,6 +6,7 @@ import type {
   OmpEvent,
   TeamAgent,
   TeamFeedEntry,
+  TeamRole,
   TeamRunState,
   TeamSlice,
   TeamTimelineEntry,
@@ -63,20 +64,37 @@ import { startWorker, killWorker, killAllWorkers, steerWorker, liveWorkerCount, 
 
 /** phases in which a run is live (persisted, stream-tapped, steerable) */
 const LIVE_PHASE: Partial<Record<TeamRunState["phase"], true>> = {
-  probe: true,
-  deliberate: true,
+  route: true,
   gate: true,
   execute: true,
   verify: true,
 };
 const MAX_FEED = 500;
+/** grace window (ms) before an unedited dispatch auto-starts (auto-routing §4) */
+const GRACE_MS = 2200;
 /** protocol event whitelist — a bare JSON line must carry one of these `ev` values */
 const EV_KINDS = new Set([
-  "probe", "planners", "say", "round", "converged", "plan",
+  "probe", "roster", "plan",
   "worker", "slice", "replan", "needs-call", "verify", "report",
 ]);
 /** legacy marker spellings — still parsed so old transcripts stay readable */
 const LEGACY_MARKERS = ["##TEAM##", "@@TEAM@@", "::TEAM::"];
+
+/**
+ * Default crew roster (auto-routing §1). The router receives these role
+ * descriptions + the request and returns which participate. User-defined
+ * agents extend this at runtime (future); today the three fixed roles cover
+ * the acceptance. Reviewer runs LAST on multi-agent runs (§3).
+ */
+const DEFAULT_ROSTER: TeamRole[] = [
+  { id: "coder", desc: "пишет и меняет код / writes and edits code" },
+  { id: "tester", desc: "пишет и гоняет тесты / writes and runs tests" },
+  { id: "reviewer", desc: "ревьюит итоговый дифф, ищет баги/утечки / reviews the final diff for bugs and leaks" },
+];
+
+export function teamRoster(): TeamRole[] {
+  return DEFAULT_ROSTER.map((r) => ({ ...r }));
+}
 
 let bridge: AgentBridge | null = null;
 let run: TeamRunState | null = null;
@@ -88,6 +106,8 @@ const lineBuf = new Map<number, string>();
 let turnSawContent = false;
 /** consecutive empty-turn retries this run (cap 2 — then honest stall) */
 let emptyRetries = 0;
+/** grace-window auto-approve timer (dispatch auto-starts unless edited) */
+let graceTimer: NodeJS.Timeout | null = null;
 /** remote gate notifier (Telegram bridge registers; null = remote absent) */
 let gateNotifier: ((packet: { runId: string; goal: string; summary: string; slices: TeamSlice[]; solo: boolean }) => void) | null = null;
 
@@ -127,16 +147,6 @@ export function isTeamRunActive(): boolean {
   return !!run && run.phase !== "done" && run.phase !== "stopped" && run.phase !== "stalled";
 }
 
-/** read-only live-state slice for the Telegram digest (never plan/summary prose) */
-export function teamDigestData(): { phase: string; active: string[]; done: number; total: number } | null {
-  if (!isTeamRunActive()) return null;
-  return {
-    phase: run!.phase,
-    active: run!.slices.filter((s) => s.state === "active").map((s) => `slice ${s.id}`),
-    done: run!.slices.filter((s) => s.state === "done").length,
-    total: run!.slices.length,
-  };
-}
 
 /**
  * Read-only журнал slice for the Chat Dialogue answer composer: milestones
@@ -293,19 +303,26 @@ function serializeOverlaps(slices: TeamSlice[]): void {
 
 // -------------------------------------------------- marker event application
 
+function protocolFailure(raw: string): void {
+  if (!run) return;
+  run.protocolError = { raw: raw.slice(0, 2000), at: Date.now() };
+  sysNote("protocol payload could not be parsed");
+}
+
 function applyMarker(raw: string): void {
   if (!run || !LIVE_PHASE[run.phase]) return;
   let ev: Record<string, unknown>;
   try {
     ev = JSON.parse(raw) as Record<string, unknown>;
   } catch {
-    return; // malformed marker — ignored, prose path already skipped it
+    protocolFailure(raw);
+    return;
   }
   switch (ev.ev) {
     case "probe": {
-      if (run.phase !== "probe") break;
+      // capability probe: sets solo (no debate phase — routing is direct)
+      if (run.phase !== "route") break;
       run.solo = ev.ok !== true;
-      run.phase = "deliberate";
       sysNote(
         run.solo
           ? `capability probe failed (${typeof ev.detail === "string" ? ev.detail.slice(0, 160) : "no subagent round-trip"}) — solo fallback: same pipeline, sequential`
@@ -313,70 +330,49 @@ function applyMarker(raw: string): void {
       );
       break;
     }
-    case "planners": {
-      if (run.phase !== "deliberate") break;
-      const agents = Array.isArray(ev.agents) ? ev.agents : [];
-      run.agents = agents
-        .filter((a): a is { name: string; glyph?: string } => !!a && typeof (a as Record<string, unknown>).name === "string")
-        .slice(0, 3)
-        .map((a) => ({
-          name: a.name,
-          glyph: typeof a.glyph === "string" && a.glyph ? a.glyph.slice(0, 2) : "◆",
-          kind: "planner" as const,
-          state: "deliberating" as const,
-          sinceMs: Date.now(),
-          filesTouched: 0,
-        }));
-      break;
-    }
-    case "say": {
-      if (typeof ev.who === "string" && typeof ev.text === "string") {
-        feed({ author: ev.who, glyph: run.agents.find((a) => a.name === ev.who)?.glyph, text: ev.text, kind: "argument" });
-      }
-      break;
-    }
-    case "round": {
-      if (typeof ev.n === "number") {
-        run.round = ev.n;
-        sysNote(`round ${ev.n}/${run.maxRounds}`);
-      }
-      break;
-    }
-    case "converged": {
-      sysNote(ev.forced === true ? "convergence forced — lead planner wrote the final plan from the strongest surviving points" : "planners converged");
+    case "roster": {
+      // the router's read on the request: which roles it will assign and why.
+      // A one-line note in the feed; the authoritative assignment is the plan.
+      if (run.phase !== "route") break;
+      if (typeof ev.note === "string") sysNote(`router: ${ev.note.slice(0, 200)}`);
       break;
     }
     case "plan": {
-      if (run.phase !== "deliberate") break;
-      const slices = normalizeSlices(ev.slices);
+      if (run.phase !== "route") break;
+      let slices = normalizeSlices(ev.slices);
+      const pinned = run.pinnedRoles ?? [];
+      const strictOnly = pinned.length === 1 && /\b(only|только)\b/i.test(run.goal);
+      if (strictOnly) slices = slices.filter((s) => s.worker.toLowerCase() === pinned[0]);
+      for (const role of pinned) {
+        if (!slices.some((s) => s.worker.toLowerCase() === role)) {
+          slices.push({ id: String.fromCharCode(65 + slices.length), title: run.goal.slice(0, 80), scope: run.goal, worker: role, deps: [], state: "pending", add: 0, del: 0 });
+        }
+      }
+      const reviewer = slices.find((s) => s.worker.toLowerCase() === "reviewer");
+      if (reviewer && slices.length > 1) reviewer.deps = slices.filter((s) => s !== reviewer).map((s) => s.id);
       if (!slices.length || hasCycle(slices)) {
         sysNote("plan event rejected: empty or cyclic slice graph");
         break;
       }
       run.slices = slices;
-      // deterministic sigils from the ordered glyph set (crew-rail §3): the
-      // model may propose glyphs, but assignment is ours — stable + unique
       run.planSummary = typeof ev.summary === "string" ? ev.summary : "";
       serializeOverlaps(run.slices);
-      const workers = Array.isArray(ev.workers) ? ev.workers : [];
+      const workerNames = [...new Set(run.slices.map((s) => s.worker))].slice(0, 6);
       const SIGILS = ["◆", "▲", "●", "■", "◇", "✚"];
-      const workerAgents: TeamAgent[] = workers
-        .filter((w): w is { name: string; glyph?: string } => !!w && typeof (w as Record<string, unknown>).name === "string")
-        .slice(0, 6)
-        .map((w, i) => ({
-          name: w.name,
-          glyph: SIGILS[i % SIGILS.length],
-          kind: "worker" as const,
-          state: "sleeping" as const,
-          sinceMs: Date.now(),
-          filesTouched: 0,
-          add: 0,
-          del: 0,
-        }));
-      for (const p of run.agents) if (p.kind === "planner") p.state = "done";
-      run.agents = [...run.agents.filter((a) => a.kind === "planner"), ...workerAgents];
+      run.agents = workerNames.map((name, i) => ({
+        name,
+        glyph: SIGILS[i % SIGILS.length],
+        kind: "worker" as const,
+        state: "sleeping" as const,
+        sinceMs: Date.now(),
+        filesTouched: 0,
+        add: 0,
+        del: 0,
+      }));
       run.phase = "gate";
-      sysNote("plan converged — awaiting your approval");
+      run.graceUntil = Date.now() + GRACE_MS;
+      armGrace();
+      sysNote("роли распределены — можно изменить до старта");
       gateNotifier?.({ runId: run.runId, goal: run.goal, summary: run.planSummary, slices: run.slices, solo: run.solo });
       break;
     }
@@ -410,9 +406,7 @@ function applyMarker(raw: string): void {
       if (typeof ev.handoff === "string") s.handoff = ev.handoff;
       if (typeof ev.add === "number") s.add = ev.add;
       if (typeof ev.del === "number") s.del = ev.del;
-      if (st === "failed") {
-        sysNote(`slice ${s.id} failed: ${typeof ev.error === "string" ? ev.error.slice(0, 200) : "unknown error"}`);
-      }
+      if (st === "failed") sysNote(`slice ${s.id} failed: ${typeof ev.error === "string" ? ev.error.slice(0, 200) : "unknown error"}`);
       break;
     }
     case "replan": {
@@ -422,7 +416,11 @@ function applyMarker(raw: string): void {
         sysNote("re-plan rejected: empty or cyclic slice graph");
         break;
       }
-      run.slices = slices;
+      const previous = new Map(run.slices.map((s) => [s.id, s]));
+      run.slices = slices.map((s) => {
+        const old = previous.get(s.id);
+        return old ? { ...s, state: old.state, handoff: old.handoff, add: old.add, del: old.del } : s;
+      });
       sysNote(`plan edited: ${typeof ev.note === "string" ? ev.note.slice(0, 300) : "orchestrator re-planned"}`);
       break;
     }
@@ -477,24 +475,27 @@ function flushProse(messageId: number): void {
 
 function consumeLine(messageId: number, line: string): void {
   const t = line.trim();
-  // primary protocol: a bare JSON object line with a whitelisted `ev`
-  if (t.startsWith("{\"") && t.endsWith("}") && t.includes("\"ev\"")) {
+  // Primary protocol: any line that looks like an event is transport, never
+  // prose. Valid events update state; malformed/unknown events become a
+  // designed protocol-error card with collapsed raw diagnostics.
+  if (t.startsWith("{") && t.includes("\"ev\"")) {
+    flushProse(messageId);
     try {
       const probe = JSON.parse(t) as Record<string, unknown>;
-      if (probe && typeof probe.ev === "string" && EV_KINDS.has(probe.ev)) {
-        flushProse(messageId); // keep prose/event ordering in the feed
-        applyMarker(t);
-        return;
-      }
+      if (probe && typeof probe.ev === "string" && EV_KINDS.has(probe.ev)) applyMarker(t);
+      else protocolFailure(t);
     } catch {
-      // not a protocol line — falls through to prose
+      protocolFailure(t);
     }
+    return;
   }
-  // legacy transcripts: decorated marker + JSON payload
+  // Legacy decorated markers are also always transport — never naked chat.
   const m = LEGACY_MARKERS.find((mk) => t.startsWith(mk));
   if (m) {
     flushProse(messageId);
-    applyMarker(t.slice(m.length).trim());
+    const payload = t.slice(m.length).trim();
+    if (payload) applyMarker(payload);
+    else protocolFailure(t);
   } else if (t) {
     proseBuf.set(messageId, (proseBuf.get(messageId) ?? "") + line + "\n");
   }
@@ -555,7 +556,7 @@ function onAgentEvent(e: OmpEvent): void {
       if (e.aborted) {
         run.phase = "stopped";
         sysNote("run interrupted — board frozen in its last state");
-      } else if (!sawContent && !poolActive && emptyRetries < 2 && (run.phase === "probe" || run.phase === "deliberate" || run.phase === "execute" || run.phase === "verify")) {
+      } else if (!sawContent && !poolActive && emptyRetries < 2 && (run.phase === "route" || run.phase === "execute" || run.phase === "verify")) {
         // Empty turn: HTTP-success with ZERO streamed content — a proxy output
         // filter ate the reply (observed live: echogate/claude-fable-5 cuts
         // completions; the filter comes and goes). Retrying with an explicit
@@ -564,10 +565,12 @@ function onAgentEvent(e: OmpEvent): void {
         sysNote(`the model returned an EMPTY turn (provider filter?) — retry ${emptyRetries}/2`);
         bridge!.prompt(
           `[TEAM MODE — your previous reply arrived EMPTY (the provider dropped it). Re-emit your current state as bare JSON protocol lines and continue from where you stopped. If a state line was already accepted it is safe to repeat it.]`,
+          undefined,
+          { echo: false },
         );
-      } else if (run.phase === "probe" || run.phase === "deliberate") {
+      } else if (run.phase === "route") {
         run.phase = "stalled";
-        sysNote("the deliberation turn ended without a converged plan — run stalled");
+        sysNote("the routing turn ended without a plan — run stalled");
       } else if ((run.phase === "execute" || run.phase === "verify") && !run.needsCall && !poolActive) {
         // pool mode: the LEAD session ending a turn is normal — workers run in
         // their own processes; only the lead-orchestrated path can stall here
@@ -603,47 +606,50 @@ function protocolBlock(): string {
     "No prefixes, no markers, no code fences around these lines — just the JSON object.",
     "Events (emit them at the moment they happen, never batched at the end):",
     `  {"ev":"probe","ok":true|false,"detail":"why"}`,
-    `  {"ev":"planners","agents":[{"name":"Vex","glyph":"◆"},{"name":"Ora","glyph":"▲"}]}`,
-    `  {"ev":"say","who":"Vex","text":"one argument"}`,
-    `  {"ev":"round","n":2}`,
-    `  {"ev":"converged","forced":false}`,
-    `  {"ev":"plan","summary":"one line","workers":[{"name":"Kilo","glyph":"●"}],"slices":[{"id":"A","title":"...","scope":"one line","worker":"Kilo","deps":[],"contract":"types/files/signatures fixed before fan-out","files":["src/a.ts","src/b.ts"]}]}`,
-    "  (files = the slice's planned write-set — REQUIRED; the IDE serializes slices whose write-sets overlap)",
-    `  {"ev":"worker","name":"Kilo","state":"working|sleeping|waking|done|failed","slice":"A","waitingFor":["B","C"]}`,
+    `  {"ev":"roster","note":"one line: which roles you assigned and why"}`,
+    `  {"ev":"plan","summary":"one line","workers":[{"name":"coder"},{"name":"tester"}],"slices":[{"id":"A","title":"...","scope":"one line","worker":"coder","deps":[],"contract":"types/files/signatures fixed before fan-out","files":["src/a.ts"]}]}`,
+    "  (worker = a role id from the roster; files = the slice's planned write-set — REQUIRED; the IDE serializes slices whose write-sets overlap)",
+    `  {"ev":"worker","name":"coder","state":"working|sleeping|waking|done|failed","slice":"A","waitingFor":["B"]}`,
     `  {"ev":"slice","id":"A","state":"active|done|failed","handoff":"one paragraph: what changed, where, what to watch for","add":12,"del":3,"error":"on failure"}`,
     `  {"ev":"replan","slices":[FULL updated slice array],"note":"what changed and why"}`,
     `  {"ev":"needs-call","slice":"A","error":"..."}`,
     `  {"ev":"verify","result":"gap|pass","note":"evidence"}`,
-    `  {"ev":"report","text":"what was built, per-slice summary, verification evidence"}`,
-    "Slice ids are short (A, B, C…). Worker names are short codenames, glyphs single characters.",
+    `  {"ev":"report","text":"ONE human final, 1-2 sentences: cause/what changed/outcome; no list, headings, diffstats, or telemetry"}`,
+    "Slice ids are short (A, B, C…). Worker names are roster role ids.",
   ].join("\n");
 }
 
-function deliberationPrompt(goal: string): string {
-  return [
-    "[TEAM MODE — deliberation run. Follow the protocol exactly.]",
+function routePrompt(goal: string, pinned: string[]): string {
+  const roster = teamRoster().map((r) => `  ${r.id} — ${r.desc}`).join("\n");
+  const lines = [
+    "[TEAM MODE — auto-routing run. Follow the protocol exactly.]",
     "",
     protocolBlock(),
     "",
-    `GOAL:\n${goal}`,
+    `REQUEST:\n${goal}`,
     "",
-    "PHASE 0 — CAPABILITY PROBE (first, before anything):",
-    "- Spawn ONE trivial subagent (task tool, agent \"scout\", instruction: reply PONG). Bound the wait to 60 seconds (hub wait with timeoutMs).",
-    `- Round-trip works → {"ev":"probe","ok":true} and run the crew as real subagents.`,
-    `- No reply / failure / task tool unavailable → {"ev":"probe","ok":false,"detail":"..."} and run SOLO: you play every role yourself, honestly labeled through the same events. Same pipeline, sequential execution.`,
+    "TEAM ROSTER (assign roles from this list):",
+    roster,
     "",
-    "PHASE 1 — DELIBERATE (hard cap: 3 rounds):",
-    "- Pick 2 planners (3 only if the goal spans 3+ subsystems). Emit the planners event.",
-    "- The planners argue COMPETING approaches: each proposes a distinct approach, then attacks the other's weak points. Relay every argument as a say event (multi-agent: relay subagent messages; solo: write each planner's case yourself, honestly attributed). Emit a round event at each round start.",
-    "- Mid-debate user notes arrive as \"[note to planners]: ...\" — planners must visibly address them.",
-    "- Converge naturally, or at round 3 force it: the lead planner writes the final plan from the strongest surviving points and you emit converged with forced:true.",
+    "PHASE 1 — ROUTE (assign roles — NO debate, NO planners):",
+    "- Read the request and decide WHICH roster roles it actually needs. Scale to the task:",
+    "  a trivial one-file change (typo, rename) takes ONE role (coder) — do NOT wake the whole team;",
+    "  a feature takes coder + tester; reviewer runs LAST on any multi-role run (reviews the final diff).",
+    "- Emit a roster event with a one-line rationale, then the plan event.",
+  ];
+  if (pinned.length) {
+    lines.push("", `MANUAL OVERRIDE — the user pinned these roles: ${pinned.join(", ")}. They MUST participate with exactly the scope the request implies. You may ADD a role only if the request clearly needs it beyond the pinned ones; never DROP a pinned role.`);
+  }
+  lines.push(
     "",
     "PHASE 2 — PLAN:",
-    "- Slices are small and independently verifiable; cross-slice contracts (types, file boundaries, API signatures) are FIXED in the contract field before any fan-out. Max 6 workers.",
-    "- The FINAL slice is always a verification slice: exercise the built thing against the goal (run it, drive it, test it).",
-    "- Emit the plan event, then END YOUR TURN IMMEDIATELY. Execute NOTHING — no file edits, no build commands. The user approves or edits the plan in the IDE; execution starts only when an approval message arrives.",
-    "- Do NOT restate the plan in prose — the IDE renders it from the plan event; that event line is the only place the full plan appears.",
-  ].join("\n");
+    "- One slice per role per unit of work; slices are small and independently verifiable. Cross-slice contracts are FIXED before fan-out. Max 6 slices.",
+    "- On a multi-role run the FINAL slice is a verification/review slice.",
+    "- worker on each slice is a roster role id. deps order the work (tester after coder; reviewer last).",
+    "- Emit the plan event, then END YOUR TURN IMMEDIATELY. Execute NOTHING — the dispatch card shows first and execution starts after the grace window or explicit approval.",
+    "- Do NOT restate the plan in prose.",
+  );
+  return lines.join("\n");
 }
 
 function executionPrompt(r: TeamRunState): string {
@@ -662,13 +668,13 @@ function executionPrompt(r: TeamRunState): string {
     `MODE: ${r.solo ? "SOLO fallback (probe failed earlier). Play each worker yourself, in dependency order — the graph still gates what may run; a role with unmet deps is asleep." : "MULTI-AGENT. Spawn workers via the task tool; sleeping workers use hub wait (event-driven, no polling)."}`,
     "",
     "EXECUTION RULES:",
-    "- Narrate every transition the moment it happens: worker working/sleeping (with waitingFor)/waking/done/failed; slice active/done/failed.",
+    "- Emit worker/slice transition EVENTS at the moment they happen; write NO progress prose.",
     "- A finished slice ALWAYS carries a hand-off note (one paragraph: what changed, where, what to watch for) and add/del line counts. A woken dependent's first activity must reference the hand-off notes of its completed dependencies.",
     "- A worker that discovers a broken contract reports it; you re-plan that seam and emit a replan event (full updated slice array + note). Retry, reassign or split — your call, but visible.",
     "- TWO consecutive failures on the SAME slice: emit needs-call and END YOUR TURN. The user decides (retry / edit slice / abort); their decision arrives as a message.",
     "- Steering arrives as \"[steer → Worker]: ...\" (only that worker acts on it) or \"[team note]: ...\" (all awake workers).",
     "- VERIFY (the final slice): actually exercise the result against the goal. Gap found → verify{gap} + replan adding a gap slice + keep executing. Pass → verify{pass} with evidence.",
-    "- Then emit the report event (what was built, per-slice diffstats, verification evidence) and END YOUR TURN.",
+    "- Then emit exactly ONE report event. Its text is the user's final: 1-2 natural sentences in the user's language, cause/what changed/outcome. No headings, lists, diffstats, telemetry, or concatenated hand-offs. END YOUR TURN.",
   ].join("\n");
 }
 
@@ -904,19 +910,23 @@ function scheduleSlices(): void {
 function finishParallelRun(): void {
   if (!run) return;
   poolActive = false;
-  const last = run.slices[run.slices.length - 1];
-  run.report = [
-    "## Team report (process-parallel run)",
-    "",
-    ...run.slices.map((s) => `**${s.id} · ${s.title}** — ${s.worker}, +${s.add} −${s.del}\n${s.handoff ?? ""}`),
-    "",
-    `Verification: ${last?.handoff ?? "see final slice hand-off"}`,
-  ].join("\n");
-  run.phase = "done";
+  run.phase = "verify";
   for (const a of run.agents) if (a.state !== "failed") a.state = "done";
   run.mechanism = { kind: "parallel", active: 0, throttled: 0 };
-  sysNote("run complete — team report assembled from worker hand-offs");
-  fireEndNotifier();
+  const evidence = run.slices.map((s) => ({
+    id: s.id,
+    role: s.worker,
+    title: s.title,
+    handoff: s.handoff ?? "",
+  }));
+  sysNote("workers complete — lead is composing the final answer");
+  bridge!.prompt([
+    "[TEAM MODE — compose the user-facing final now.]",
+    `GOAL:\n${run.goal}`,
+    `REAL WORKER EVIDENCE:\n${JSON.stringify(evidence)}`,
+    protocolBlock(),
+    "Emit exactly ONE report event and nothing else. Its text must be 1-2 natural sentences in the user's language: what caused the issue / what was built / outcome. No headings, bullets, diffstats, telemetry, or concatenated hand-offs.",
+  ].join("\n\n"), undefined, { echo: false });
   pushState();
 }
 
@@ -928,7 +938,7 @@ async function beginParallelExecution(): Promise<void> {
     // rung 3 — honest solo with the ACTUAL reason
     r.mechanism = { kind: "solo", active: 1, throttled: 0, reason: "omp not found" };
     sysNote("solo: omp not found — the lead session executes sequentially");
-    bridge!.prompt(executionPrompt(r));
+    bridge!.prompt(executionPrompt(r), undefined, { echo: false });
     pushState();
     return;
   }
@@ -943,7 +953,7 @@ async function beginParallelExecution(): Promise<void> {
 
 // -------------------------------------------------- public actions
 
-function startRun(goal: string): { ok: boolean; error?: string } {
+function startRun(goal: string, mentions?: string[]): { ok: boolean; error?: string } {
   const b = bridge!;
   const st = b.getStatus();
   if (!st || st.state === "unavailable" || st.state === "dead" || st.state === "starting")
@@ -951,13 +961,19 @@ function startRun(goal: string): { ok: boolean; error?: string } {
   if (run && LIVE_PHASE[run.phase]) return { ok: false, error: "a team run is already active" };
   const trimmed = goal.trim();
   if (!trimmed) return { ok: false, error: "empty goal" };
+  // @-mentions fix the participating roles (manual override, §5); no mentions =
+  // the router decides. Only known roster ids count.
+  const roster = teamRoster();
+  const rosterIds = new Set(roster.map((r) => r.id));
+  const pinned = (mentions ?? []).map((m) => m.replace(/^@/, "").toLowerCase()).filter((m) => rosterIds.has(m));
   run = {
     runId: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
     goal: trimmed,
-    phase: "probe",
+    phase: "route",
     solo: false,
-    round: 0,
-    maxRounds: 3,
+    roster,
+    pinnedRoles: pinned,
+    graceUntil: null,
     agents: [],
     slices: [],
     planSummary: "",
@@ -969,38 +985,56 @@ function startRun(goal: string): { ok: boolean; error?: string } {
   };
   turnSawContent = false;
   emptyRetries = 0;
-  sysNote("probing subagent capability (60s cap)…");
-  if (!b.prompt(deliberationPrompt(trimmed))) {
+  pushState(); // renderer knows this is a team run before the user echo lands
+  if (!b.prompt(routePrompt(trimmed, pinned), undefined, { displayText: trimmed })) {
     run = null;
+    pushState();
     return { ok: false, error: "failed to reach the agent process" };
   }
-  pushState();
   return { ok: true };
 }
 
-/** first decision wins across the IDE button and Telegram */
+/** arm the grace-window auto-approve (auto-routing §4). Any plan edit cancels it. */
+function armGrace(): void {
+  if (graceTimer) clearTimeout(graceTimer);
+  const deadline = run?.graceUntil ?? 0;
+  const delay = Math.max(0, deadline - Date.now());
+  graceTimer = setTimeout(() => {
+    graceTimer = null;
+    if (run && run.phase === "gate" && run.graceUntil === deadline) approve("auto");
+  }, delay);
+}
+
+/** cancel the grace auto-approve — called on any edit, approve, discard, stop */
+function cancelGrace(): void {
+  if (graceTimer) { clearTimeout(graceTimer); graceTimer = null; }
+  if (run) run.graceUntil = null;
+}
+
+/** first decision wins across the IDE button and auto-start */
 function approve(via: string): { ok: boolean; error?: string } {
   if (!run || run.phase !== "gate") return { ok: false, error: run?.approvedVia ? `already approved via ${run.approvedVia}` : "no plan awaiting approval" };
   if (hasCycle(run.slices)) return { ok: false, error: "the slice graph has a cycle — fix it first" };
+  cancelGrace();
   run.approvedVia = via;
   run.phase = "execute";
   run.needsCall = null;
   sysNote(`plan approved via ${via} — building`);
-  if (run.solo) {
-    // rung 1 passed earlier (probe ok): the lead session runs the crew itself
-    // via harness subagents… except probe-ok is the rare case; solo=true means
-    // the probe FAILED → rung 2: process-level parallelism (unconditional).
-    void beginParallelExecution();
-  } else {
-    // harness-native subagents confirmed working — the lead session orchestrates
-    run.mechanism = { kind: "parallel", active: 0, throttled: 0 };
-    bridge!.prompt(executionPrompt(run));
-  }
+  // Roles always execute as isolated OMP processes pinned to the IDE's active
+  // model. Harness-native named agents may carry stale independent bindings.
+  void beginParallelExecution();
   pushState();
   return { ok: true };
 }
 
+function holdDispatch(): void {
+  if (!run || run.phase !== "gate") return;
+  cancelGrace();
+  pushState();
+}
+
 function discard(): void {
+  cancelGrace();
   if (!run || run.phase !== "gate") return;
   run.phase = "stopped";
   sysNote("plan discarded");
@@ -1017,8 +1051,8 @@ function steer(text: string, target?: string): boolean {
   const t = text.trim();
   if (!t) return false;
   let message: string;
-  if (run.phase === "probe" || run.phase === "deliberate") {
-    message = `[note to planners]: ${t}`;
+  if (run.phase === "route") {
+    message = `[note to the router]: ${t}`;
     feed({ author: "you", text: t, kind: "note" });
   } else if (target) {
     message = `[steer → ${target}]: ${t}`;
@@ -1037,7 +1071,7 @@ function steer(text: string, target?: string): boolean {
           .map((a) => steerWorker(a.name, message))
           .some(Boolean);
   } else {
-    ok = bridge!.prompt(message);
+    ok = bridge!.prompt(message, undefined, { echo: false });
   }
   pushState();
   return ok;
@@ -1045,10 +1079,16 @@ function steer(text: string, target?: string): boolean {
 
 // ---- gate editing (main owns the plan; every edit re-validates the graph)
 
+function editableSlice(id: string): TeamSlice | null {
+  if (!run || (run.phase !== "gate" && run.phase !== "execute")) return null;
+  const slice = run.slices.find((s) => s.id === id) ?? null;
+  return slice?.state === "pending" ? slice : null;
+}
+
 function editSlice(id: string, patch: { title?: string; scope?: string }): { ok: boolean; error?: string } {
-  if (!run || run.phase !== "gate") return { ok: false, error: "no editable plan" };
-  const s = run.slices.find((x) => x.id === id);
-  if (!s) return { ok: false, error: "unknown slice" };
+  const s = editableSlice(id);
+  if (!s) return { ok: false, error: "slice has already started" };
+  cancelGrace();
   if (patch.title !== undefined) {
     if (!patch.title.trim()) return { ok: false, error: "title cannot be empty" };
     s.title = patch.title.trim();
@@ -1060,6 +1100,7 @@ function editSlice(id: string, patch: { title?: string; scope?: string }): { ok:
 
 function addSlice(input: { title: string; scope: string; deps: string[] }): { ok: boolean; error?: string } {
   if (!run || run.phase !== "gate") return { ok: false, error: "no editable plan" };
+  cancelGrace();
   if (!input.title.trim()) return { ok: false, error: "title cannot be empty" };
   // next free single-letter id, then S2, S3…
   const used = new Set(run.slices.map((s) => s.id));
@@ -1082,25 +1123,28 @@ function addSlice(input: { title: string; scope: string; deps: string[] }): { ok
 }
 
 function deleteSlice(id: string): { ok: boolean; error?: string } {
-  if (!run || run.phase !== "gate") return { ok: false, error: "no editable plan" };
-  if (!run.slices.some((s) => s.id === id)) return { ok: false, error: "unknown slice" };
-  if (run.slices.length <= 1) return { ok: false, error: "a plan needs at least one slice" };
-  run.slices = run.slices
-    .filter((s) => s.id !== id)
-    .map((s) => ({ ...s, deps: s.deps.filter((d) => d !== id) }));
-  pushState();
+  const s = editableSlice(id);
+  if (!s) return { ok: false, error: "slice has already started" };
+  cancelGrace();
+  if (run!.slices.length <= 1) return { ok: false, error: "a plan needs at least one slice" };
+  run!.slices = run!.slices
+    .filter((x) => x.id !== id)
+    .map((x) => ({ ...x, deps: x.deps.filter((d) => d !== id) }));
+  if (!run!.slices.some((x) => x.worker === s.worker)) run!.agents = run!.agents.filter((a) => a.name !== s.worker);
+  if (poolActive) scheduleSlices(); else pushState();
   return { ok: true };
 }
 
 function setDeps(id: string, deps: string[]): { ok: boolean; error?: string } {
-  if (!run || run.phase !== "gate") return { ok: false, error: "no editable plan" };
-  const s = run.slices.find((x) => x.id === id);
-  if (!s) return { ok: false, error: "unknown slice" };
-  const ids = new Set(run.slices.map((x) => x.id));
+  const s = editableSlice(id);
+  const current = run;
+  if (!s || !current) return { ok: false, error: "slice has already started" };
+  cancelGrace();
+  const ids = new Set(current.slices.map((x) => x.id));
   const clean = [...new Set(deps.filter((d) => ids.has(d) && d !== id))];
-  const next = run.slices.map((x) => (x.id === id ? { ...x, deps: clean } : x));
+  const next = current.slices.map((x) => (x.id === id ? { ...x, deps: clean } : x));
   if (hasCycle(next)) return { ok: false, error: "that edge creates a cycle" };
-  run.slices = next;
+  current.slices = next;
   pushState();
   return { ok: true };
 }
@@ -1129,11 +1173,13 @@ function needsCallDecision(choice: "retry" | "abort", editedScope?: string): voi
   }
   bridge!.prompt(
     `[team gate] ${editedScope !== undefined ? `Slice ${call.sliceId} was rescoped to: ${editedScope.trim()}. ` : ""}Retry slice ${call.sliceId} now. Resume the state protocol from where you paused.`,
+    undefined,
+    { echo: false },
   );
-  pushState();
 }
 
 function stopRun(): void {
+  cancelGrace();
   if (!run || !LIVE_PHASE[run.phase]) return;
   // the abort round-trip lands as agent-end{aborted} which freezes the board;
   // flip phase immediately so a dead process can't leave a zombie run
@@ -1150,6 +1196,7 @@ function stopRun(): void {
 }
 
 function clearRun(): void {
+  cancelGrace();
   poolActive = false;
   killAllWorkers();
   run = null;
@@ -1184,7 +1231,10 @@ export function registerTeamHandlers(ipc: IpcMain): void {
   });
 
   ipc.handle("team:getState", async (): Promise<TeamRunState | null> => run);
-  ipc.handle("team:start", async (_e, goal: string) => startRun(String(goal ?? "")));
+  ipc.handle("team:roster", async (): Promise<TeamRole[]> => teamRoster());
+  ipc.handle("team:start", async (_e, goal: string, mentions?: string[]) =>
+    startRun(String(goal ?? ""), Array.isArray(mentions) ? mentions.map(String) : undefined));
+  ipc.handle("team:hold", async () => holdDispatch());
   ipc.handle("team:steer", async (_e, text: string, target?: string) => steer(String(text ?? ""), typeof target === "string" ? target : undefined));
   ipc.handle("team:approve", async () => approve("IDE"));
   ipc.handle("team:discard", async () => discard());

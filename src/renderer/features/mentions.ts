@@ -78,6 +78,54 @@ export function setMentionDragData(e: DragEvent, refs: MentionRef[]): void {
 let chips: Chip[] = [];
 let stripEl: HTMLElement | null = null;
 let openFile: ((path: string) => void) | null = null;
+let pickerEl: HTMLElement | null = null;
+let mentionInput: HTMLTextAreaElement | null = null;
+let teamRoles: { id: string; desc: string }[] = [];
+
+function closePicker(): void {
+  pickerEl?.remove();
+  pickerEl = null;
+}
+
+function roleColor(index: number): string { return `agc-${(index % 4) + 1}`; }
+
+function showRolePicker(query: string, start: number): void {
+  if (!mentionInput || !stripEl) return;
+  closePicker();
+  const q = query.toLowerCase();
+  const matches = teamRoles.filter((r) => r.id.toLowerCase().includes(q));
+  if (!matches.length) return;
+  pickerEl = el("div", { class: "agent-mention-picker", title: t("agent.agentMentions") });
+  pickerEl.setAttribute("role", "listbox");
+  matches.forEach((role, index) => {
+    const row = el("button", {
+      class: "amp-row",
+      onMouseDown: (e) => {
+        e.preventDefault();
+        const end = mentionInput!.selectionStart;
+        mentionInput!.setRangeText(`@${role.id} `, start, end, "end");
+        mentionInput!.dispatchEvent(new Event("input", { bubbles: true }));
+        closePicker();
+        mentionInput!.focus();
+      },
+    },
+      el("span", { class: `dsp-chip ${roleColor(index)}`, text: role.id }),
+      el("span", { class: "amp-desc", text: role.desc }),
+    );
+    row.setAttribute("role", "option");
+    pickerEl!.append(row);
+  });
+  stripEl.parentElement?.append(pickerEl);
+}
+
+function updateRolePicker(): void {
+  if (!mentionInput) return;
+  const caret = mentionInput.selectionStart;
+  const before = mentionInput.value.slice(0, caret);
+  const match = /(?:^|\s)@([a-z\w-]*)$/i.exec(before);
+  if (!match) { closePicker(); return; }
+  showRolePicker(match[1], caret - match[1].length - 1);
+}
 
 function renderChipInto(host: HTMLElement, ref: MentionRef, opts: { removable: boolean; missing?: boolean }): HTMLElement {
   const chip = el(
@@ -240,10 +288,18 @@ function isMentionDrag(dt: DataTransfer | null): boolean {
 export function initMentionInput(opts: {
   strip: HTMLElement;
   zone: HTMLElement;
+  input: HTMLTextAreaElement;
   openFileAction: (path: string) => void;
 }): void {
   stripEl = opts.strip;
   openFile = opts.openFileAction;
+  mentionInput = opts.input;
+  void window.ide.team.roster().then((roles) => { teamRoles = roles; });
+  mentionInput.addEventListener("input", updateRolePicker);
+  mentionInput.addEventListener("blur", () => setTimeout(closePicker, 120));
+  mentionInput.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && pickerEl) { e.preventDefault(); closePicker(); }
+  });
   refreshStrip();
   on("fs-changed", onFsChanges);
 

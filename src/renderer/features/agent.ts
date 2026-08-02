@@ -8,13 +8,13 @@ import { el, clear, svgIcon } from "../core/dom";
 import { I, toolIcon } from "../core/icons";
 import { on, emit } from "../core/bus";
 import { state, relPath, baseName, normPath, joinPath, languageForPath } from "../core/state";
-import { toast, confirmDialog, inputDialog, selectDialog } from "../core/ui";
+import { toast, confirmDialog } from "../core/ui";
 import { t } from "../core/i18n";
 import type { OmpEvent, OmpStatus, OmpTodoPhase, OmpFileEdit, OmpUiRequest, RemoteVia } from "../../shared/types";
 import { switchModelViaPicker, mountUsageStrip, mountModelWarning, openModelsDialog, setSessionThinkingViaPicker } from "./models";
 import { openSessionHistory } from "./history";
 import { initPromptEnhance, notifyPromptSent } from "./enhance";
-import { createTeamToggle, teamConsumesPrompt, initTeamSurface, stripTeamMarkers, teamRun } from "./team";
+import { createTeamToggle, teamConsumesPrompt, initTeamSurface, stripTeamMarkers, teamRun, placeTeamSurfaceAfterUserMessage } from "./team";
 import {
   initMentionInput,
   serializePrompt,
@@ -38,6 +38,8 @@ let promptInput: HTMLTextAreaElement;
 let headOrb: HTMLElement;
 let headModel: HTMLElement;
 let stopBtn: HTMLButtonElement;
+/** composer send button — flips to «Стоп» during a run (voice 8+2 §5) */
+let sendBtn: HTMLButtonElement;
 let status: OmpStatus = { state: "starting" };
 
 // -------- silent-model feedback: elapsed ticker + stall nudge ---------------
@@ -90,7 +92,43 @@ function elapsedTick() {
   }
 }
 
-/** streaming text accumulation per messageId */
+/**
+ * Voice 8+2 (§1): interim assistant prose never renders as a chat bubble. Each
+ * streamed message accumulates into the run's collapsed «work trail»; the FINAL
+ * message of the turn is promoted to a green/red-edged block at agent-end. A
+ * team run suppresses this path entirely — the team surface owns its narrative.
+ */
+interface RunStream {
+  /** the trail disclosure for this run (interim prose, collapsed) */
+  trail: HTMLElement | null;
+  trailBody: HTMLElement | null;
+  trailCount: number;
+  /** messageId of the most recent assistant message this run (candidate final) */
+  lastMsgId: number | null;
+  /** a fatal-looking provider error seen this run (drives the red error final) */
+  lastError: string | null;
+}
+let runStream: RunStream = { trail: null, trailBody: null, trailCount: 0, lastMsgId: null, lastError: null };
+
+/** a team run owns its own narrative surface — the agent chat feed stays quiet */
+function isTeamLive(): boolean {
+  const r = teamRun();
+  return !!r && r.phase !== "done" && r.phase !== "stopped" && r.phase !== "stalled";
+}
+/** Latched at agent-start so a report flipping Team to `done` mid-stream does
+ *  not reclassify the tail as an ordinary single-agent answer. */
+let teamOwnsTurn = false;
+
+function teamOwnsCurrentTurn(): boolean {
+  return teamOwnsTurn || isTeamLive();
+}
+
+/** reset the per-run stream state (new turn / new session / cleared final) */
+function resetRunStream(): void {
+  runStream = { trail: null, trailBody: null, trailCount: 0, lastMsgId: null, lastError: null };
+  streamBuffers.clear();
+}
+/** streaming text accumulation per messageId (live element is the trail row) */
 const streamBuffers = new Map<number, { el: HTMLElement; text: string }>();
 /** tool cards by toolCallId */
 const toolCards = new Map<string, { card: HTMLElement; summary: HTMLElement; name: string }>();
@@ -249,12 +287,31 @@ function applyStatus(s: OmpStatus) {
     }
   }
   renderNow();
+  syncComposerRunState(busy);
 
   if (s.state === "unavailable") renderUnavailable(s.detail);
   else if (s.state === "dead") renderDead(s.detail);
   else {
     panelEl.querySelector(".agent-blank.disabled-state")?.remove();
     composerEl.style.display = "";
+  }
+}
+
+/**
+ * Composer run-state (voice 8+2 §5): during a run the send button becomes a
+ * «Стоп» control and the placeholder invites steering; back to idle otherwise.
+ * A live team run keeps its own steer placeholder (team surface owns it).
+ */
+function syncComposerRunState(busy: boolean): void {
+  if (!sendBtn || !promptInput) return;
+  const steer = busy && !isTeamLive();
+  sendBtn.classList.toggle("btn-stop", steer);
+  sendBtn.textContent = steer ? t("agent.stop") : t("agent.send");
+  sendBtn.title = steer ? t("agent.tipInterrupt") : "";
+  if (steer) {
+    promptInput.placeholder = t("agent.composerSteer");
+  } else if (!isTeamLive()) {
+    promptInput.placeholder = t("agent.placeholder");
   }
 }
 
@@ -301,7 +358,7 @@ function renderDead(detail?: string) {
 
 function clearChatSurface() {
   clear(chatEl);
-  streamBuffers.clear();
+  resetRunStream();
   toolCards.clear();
 }
 
@@ -374,15 +431,59 @@ function addUserMessage(text: string, via?: RemoteVia, mentions?: MentionAttachm
   scrollBottom();
 }
 
+/** the run's collapsed work-trail — created lazily on the first interim prose */
+function ensureTrail(): HTMLElement {
+  if (runStream.trail && runStream.trailBody) return runStream.trailBody;
+  const body = el("div", { class: "wt-body" });
+  const head = el("div", { class: "wt-head", text: t("agent.workTrailN", 0) });
+  const root = el("div", { class: "work-trail" }, head, body);
+  head.addEventListener("click", () => root.classList.toggle("open"));
+  chatEl.append(root);
+  runStream.trail = root;
+  runStream.trailBody = body;
+  return body;
+}
+
+/** interim prose stream: each message is a dimmed row inside the work-trail */
 function ensureStream(messageId: number): { el: HTMLElement; text: string } {
   let buf = streamBuffers.get(messageId);
   if (!buf) {
-    const div = el("div", { class: "chat-agent streaming md" });
-    chatEl.append(div);
+    const body = ensureTrail();
+    const div = el("div", { class: "wt-msg md streaming" });
+    body.append(div);
     buf = { el: div, text: "" };
     streamBuffers.set(messageId, buf);
+    runStream.trailCount++;
+    runStream.lastMsgId = messageId;
+    const head = runStream.trail?.querySelector(".wt-head");
+    if (head) head.textContent = t("agent.workTrailN", runStream.trailCount);
   }
   return buf;
+}
+
+/**
+ * Promote the run's final assistant message to a green (or red on failure)
+ * edged block per send-flow.html frame 4. The block is lifted OUT of the
+ * collapsed trail into the feed; if it was the only trail message the now-empty
+ * trail disclosure is removed so the feed shows user → tool cards → final.
+ */
+function promoteFinal(fail: boolean): void {
+  const buf = runStream.lastMsgId !== null ? streamBuffers.get(runStream.lastMsgId) : undefined;
+  const text = buf?.text.trim();
+  if (!text) return;
+  buf!.el.remove();
+  runStream.trailCount = Math.max(0, runStream.trailCount - 1);
+  if (runStream.trailCount === 0) {
+    runStream.trail?.remove();
+    runStream.trail = null;
+    runStream.trailBody = null;
+  } else {
+    const head = runStream.trail?.querySelector(".wt-head");
+    if (head) head.textContent = t("agent.workTrailN", runStream.trailCount);
+  }
+  const div = el("div", { class: `chat-final md${fail ? " fail" : ""}` });
+  renderMarkdownInto(div, text);
+  chatEl.append(div);
 }
 
 // ---------------------------------------------------------------- reasoning block
@@ -616,17 +717,22 @@ function handleEvent(e: OmpEvent) {
       const mentions = !e.via && pendingLocalMentions ? pendingLocalMentions : undefined;
       if (mentions) pendingLocalMentions = null;
       addUserMessage(e.text, e.via, mentions);
+      placeTeamSurfaceAfterUserMessage();
       break;
     }
     case "agent-start":
+      teamOwnsTurn = isTeamLive();
+      if (!teamOwnsTurn) resetRunStream();
       break;
     case "text-start":
       noteTurnData();
       closeThinkBlock(); // reasoning phase ends when the answer starts
+      if (teamOwnsCurrentTurn()) break; // team surface owns team narrative
       ensureStream(e.messageId);
       break;
     case "text-delta": {
       noteTurnData();
+      if (teamOwnsCurrentTurn()) break;
       const buf = ensureStream(e.messageId);
       buf.text += e.delta;
       renderMarkdownInto(buf.el, buf.text);
@@ -634,20 +740,24 @@ function handleEvent(e: OmpEvent) {
       break;
     }
     case "text-end": {
+      if (teamOwnsCurrentTurn()) break;
       const buf = streamBuffers.get(e.messageId);
       if (buf) {
         buf.el.classList.remove("streaming");
-        if (e.text && !buf.text) renderMarkdownInto(buf.el, e.text);
+        if (e.text && !buf.text) { buf.text = e.text; renderMarkdownInto(buf.el, e.text); }
       } else if (e.text) {
-        const div = el("div", { class: "chat-agent md" });
-        renderMarkdownInto(div, e.text);
-        chatEl.append(div);
+        // a message that never streamed a delta (rare): open the trail, land it
+        const nb = ensureStream(e.messageId);
+        nb.text = e.text;
+        renderMarkdownInto(nb.el, e.text);
+        nb.el.classList.remove("streaming");
       }
       if (nearBottom()) scrollBottom();
       break;
     }
     case "thinking-delta": {
       noteTurnData();
+      if (teamOwnsCurrentTurn()) break; // team reasoning stays off the main feed
       const tb = ensureThinkBlock();
       tb.chars += e.delta.length;
       tb.body.textContent += e.delta;
@@ -658,15 +768,16 @@ function handleEvent(e: OmpEvent) {
     }
     case "tool-start": {
       noteTurnData();
-      addToolCard(e.toolCallId, e.toolName, e.args, e.intent);
-      // NOW zone: this call is what the agent does right now
       const target = summarizeArgs(e.toolName, e.args, e.intent);
+      // Team orchestration tools are internal chatter: expose only the NOW
+      // status channel, never tool cards in the ordinary chat feed.
+      if (!teamOwnsCurrentTurn()) addToolCard(e.toolCallId, e.toolName, e.args, e.intent);
       nowLive = { toolCallId: e.toolCallId, name: e.toolName, target, startedAt: Date.now() };
       renderNow();
       break;
     }
     case "tool-end": {
-      finishToolCard(e.toolCallId, e.isError, e.resultText, e.fileEdit);
+      if (!teamOwnsCurrentTurn()) finishToolCard(e.toolCallId, e.isError, e.resultText, e.fileEdit);
       if (e.fileEdit) {
         const { add, del } = diffStat(e.fileEdit);
         sessionAdd += add;
@@ -677,76 +788,103 @@ function handleEvent(e: OmpEvent) {
       renderNow();
       break;
     }
+    case "turn-error":
+      if (!teamOwnsCurrentTurn()) runStream.lastError = e.message || `${e.status ?? ""} ${e.provider}`.trim();
+      break;
     case "todos": {
       noteTurnData();
-      renderTodos(e.phases);
-      // NOW zone todo mirror: active item + done/total counts
+      if (!teamOwnsCurrentTurn()) renderTodos(e.phases);
       let done = 0, total = 0;
       let active: string | null = null;
-      for (const p of e.phases) for (const t of p.tasks) {
+      for (const p of e.phases) for (const todo of p.tasks) {
         total++;
-        if (t.status === "completed") done++;
-        if (t.status === "in_progress" && !active) active = t.content;
+        if (todo.status === "completed") done++;
+        if (todo.status === "in_progress" && !active) active = todo.content;
       }
       activeTodo = total > 0 ? { content: active ?? "…", done, total } : null;
       renderNow();
       break;
     }
-    case "agent-end":
+    case "agent-end": {
+      const ownedByTeam = teamOwnsCurrentTurn();
       closeThinkBlock();
       for (const buf of streamBuffers.values()) buf.el.classList.remove("streaming");
-      // Marks BOTH interrupt origins (IDE button/stall card AND remote /stop):
-      // without a trace an aborted turn later reads as "the model never answered".
-      if (e.aborted) {
-        chatEl.append(el("div", { class: "turn-marker", text: "· turn interrupted ·" }));
-        if (nearBottom()) scrollBottom();
-      } else if (!gotTurnData) {
-        // HTTP 200 with ZERO content (no text/thinking/tool events): a broken
-        // proxy upstream answers "stop" with an empty completion. Without a
-        // visible trace this reads as "the IDE ate my reply" (user report).
-        chatEl.append(el("div", { class: "turn-marker crit", text: t("agent.emptyTurn") }));
+      if (!ownedByTeam) {
+        // Voice 8+2: promote the run's last message to the ONE edged final.
+        // Interrupt/empty/error paths get a red-edged marker instead.
+        if (e.aborted) {
+          chatEl.append(el("div", { class: "turn-marker", text: "· turn interrupted ·" }));
+        } else if (runStream.lastError) {
+          promoteFinal(true); // red-edged final naming what the model said
+          chatEl.append(el("div", { class: "turn-marker crit", text: runStream.lastError.slice(0, 200) }));
+        } else if (!gotTurnData) {
+          chatEl.append(el("div", { class: "turn-marker crit", text: t("agent.emptyTurn") }));
+        } else {
+          promoteFinal(false); // green-edged final
+        }
         if (nearBottom()) scrollBottom();
       }
-      // NOW zone: idle summary line = last agent text, one line
+      teamOwnsTurn = false;
+      // NOW zone: idle summary line = final text, one line
       {
-        const last = [...chatEl.querySelectorAll(".chat-agent")].pop()?.textContent ?? "";
+        const last = chatEl.querySelector(".chat-final")?.textContent ?? "";
         lastResultLine = e.aborted
           ? t("agent.interrupted")
-          : !gotTurnData
+          : runStream.lastError
             ? t("agent.emptyTurnShort")
-            : last.trim().split("\n")[0].slice(0, 80);
+            : !gotTurnData
+              ? t("agent.emptyTurnShort")
+              : last.trim().split("\n")[0].slice(0, 80);
         nowLive = null;
         renderNow();
       }
       break;
+    }
   }
 }
 
-async function handleUiRequest(req: OmpUiRequest) {
+/**
+ * Agent question (voice 8+2 §3): a yellow-edged in-feed message with answer
+ * affordances, never a modal. The run is visibly paused (status →
+ * awaiting-input drives the orb); answering resumes it. confirm/select offer
+ * buttons; input/editor offer an inline text field routed as the answer.
+ */
+function handleUiRequest(req: OmpUiRequest) {
+  const block = el("div", { class: "chat-final ask md" });
+  renderMarkdownInto(block, `**${req.title ?? t("agent.asksTitle")}**${req.message ? `\n\n${req.message}` : ""}`);
+  const answers = el("div", { class: "cf-answers" });
+  let answered = false;
+  const settle = (payload: Record<string, unknown>, label: string) => {
+    if (answered) return;
+    answered = true;
+    answers.replaceChildren(el("span", { class: "cf-picked mono", text: label }));
+    void window.ide.omp.uiResponse(req.id, payload);
+  };
   if (req.method === "confirm") {
-    const ok = await confirmDialog({
-      title: req.title ?? t("agent.asksTitle"),
-      message: req.message ?? "",
-      confirmLabel: t("agent.yes"),
-    });
-    void window.ide.omp.uiResponse(req.id, { confirmed: ok });
-  } else if (req.method === "input" || req.method === "editor") {
-    const value = await inputDialog({
-      title: req.title ?? t("agent.asksTitle"),
-      message: req.message,
-      placeholder: req.placeholder,
-    });
-    void window.ide.omp.uiResponse(
-      req.id,
-      value === null ? { cancelled: true } : { value },
+    answers.append(
+      el("button", { class: "cf-opt", text: t("agent.yes"), onClick: () => settle({ confirmed: true }, t("agent.yes")) }),
+      el("button", { class: "cf-opt", text: t("agent.no"), onClick: () => settle({ confirmed: false }, t("agent.no")) }),
     );
   } else if (req.method === "select") {
-    const pick = await selectDialog(req.title ?? t("agent.asksTitle"), req.options ?? []);
-    void window.ide.omp.uiResponse(
-      req.id,
-      pick === null ? { cancelled: true } : { value: pick },
-    );
+    for (const opt of req.options ?? [])
+      answers.append(el("button", { class: "cf-opt", text: opt, onClick: () => settle({ value: opt }, opt) }));
+  } else {
+    // input / editor: an inline text field is the answer affordance
+    const field = el("input", { class: "input cf-input", placeholder: req.placeholder ?? "" }) as HTMLInputElement;
+    const submit = () => {
+      const v = field.value.trim();
+      if (v) settle({ value: v }, v.slice(0, 60));
+    };
+    field.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submit(); }
+    });
+    answers.append(field, el("button", { class: "cf-opt", text: t("agent.send"), onClick: submit }));
   }
+  block.append(answers);
+  chatEl.append(block);
+  if (nearBottom()) scrollBottom();
+  if (req.method === "input" || req.method === "editor")
+    (block.querySelector(".cf-input") as HTMLInputElement | null)?.focus();
 }
 
 // ---------------------------------------------------------------- actions
@@ -908,7 +1046,19 @@ export function initAgentPanel(container: HTMLElement) {
   }) as HTMLTextAreaElement;
 
   const mentionStrip = el("div", { class: "mention-strip", style: { display: "none" } });
-  const sendBtn = el("button", { class: "btn btn-agent", text: t("agent.send"), onClick: () => sendPrompt() });
+  sendBtn = el("button", {
+    class: "btn btn-agent",
+    text: t("agent.send"),
+    onClick: () => {
+      // voice 8+2 §5: as «Стоп» with an empty box → interrupt; with text →
+      // the text is sent as steering (sendPrompt routes it to the live run)
+      if (sendBtn.classList.contains("btn-stop") && !promptInput.value.trim() && !hasMentions()) {
+        void interruptAgent();
+        return;
+      }
+      sendPrompt();
+    },
+  }) as HTMLButtonElement;
   composerEl = el(
     "div",
     { class: "agent-composer" },
@@ -928,7 +1078,7 @@ export function initAgentPanel(container: HTMLElement) {
   // armed/live runs) always wins over the plain agent placeholder.
   on("lang-changed", () => {
     promptInput.placeholder = t("agent.placeholder");
-    sendBtn.textContent = t("agent.send");
+    syncComposerRunState(status.state === "thinking" || status.state === "tool");
     stopBtn.title = t("agent.tipInterrupt");
     newBtn.title = t("agent.tipNewSession");
     restartBtn.title = t("agent.tipRestart");
@@ -946,6 +1096,7 @@ export function initAgentPanel(container: HTMLElement) {
   initMentionInput({
     strip: mentionStrip,
     zone: composerEl,
+    input: promptInput,
     openFileAction: (path) => emit("open-file", { path }),
   });
 

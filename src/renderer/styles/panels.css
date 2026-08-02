@@ -580,6 +580,74 @@
 }
 .chat-agent.streaming { border-left-color: var(--energy); }
 
+/* voice 8+2: the ONE final message per task — green edge on success, red on
+   failure. The interim prose that used to render as chat-agent bubbles now
+   lives collapsed in the work-trail disclosure below, never in the feed. */
+.chat-final {
+  align-self: stretch;
+  border-left: 2px solid var(--ok-system);
+  padding: 4px 0 4px 12px;
+  line-height: 1.55;
+  color: var(--text-hi);
+}
+.chat-final.fail { border-left-color: var(--crit); }
+.chat-final.ask { border-left-color: var(--flare); }
+/* a question pauses the run: answer affordances sit under the message */
+.chat-final .cf-answers { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.chat-final .cf-opt {
+  font-size: 12px;
+  padding: 4px 12px;
+  border-radius: var(--r-s);
+  border: 1px solid var(--flare-40);
+  color: var(--flare);
+  background: var(--flare-15);
+  cursor: pointer;
+}
+.chat-final .cf-opt:hover { background: var(--flare-40); color: var(--text-hi); }
+.chat-final .cf-input {
+  flex: 1;
+  min-width: 160px;
+  font-size: 12px;
+}
+.chat-final .cf-picked {
+  font-size: 12px;
+  color: var(--ok-system);
+}
+.work-trail .wt-msg { padding: 2px 0; }
+.work-trail .wt-msg + .wt-msg { border-top: 1px solid var(--line); margin-top: 4px; padding-top: 6px; }
+
+/* work-trail: interim narration collapsed under the run (dimmed, closed by
+   default). Opening it reveals the raw progress prose the model streamed. */
+.work-trail {
+  align-self: stretch;
+  border-left: 2px solid var(--line);
+  padding-left: 12px;
+}
+.work-trail .wt-head {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-low);
+  cursor: pointer;
+  user-select: none;
+  padding: 2px 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.work-trail .wt-head::before { content: "▸"; font-size: 9px; transition: transform var(--t-fast) var(--ease-swift); }
+.work-trail.open .wt-head::before { transform: rotate(90deg); }
+.work-trail .wt-head:hover { color: var(--text-mid); }
+.work-trail .wt-body {
+  display: none;
+  font-size: 12px;
+  color: var(--text-mid);
+  line-height: 1.5;
+  padding: 4px 0 6px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.work-trail.open .wt-body { display: block; }
+
 /* tool cards — entrance: translateY+fade + one diagonal glow sweep (lab).
    .enter is added ONLY on live creation, never on scrollback re-render;
    --card-delay staggers simultaneous arrivals (agent.ts). */

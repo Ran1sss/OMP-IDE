@@ -99,6 +99,42 @@
   z-index: 5;
 }
 
+/* typed @ mention picker: team roles, colored like dispatch rows */
+.agent-mention-picker {
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  bottom: calc(100% - 8px);
+  z-index: 12;
+  display: flex;
+  flex-direction: column;
+  padding: 5px;
+  border: 1px solid var(--line-bright);
+  border-radius: var(--r-m);
+  background: var(--bg-1);
+  box-shadow: var(--shadow-float);
+}
+.amp-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  min-height: 32px;
+  padding: 4px 6px;
+  border: 0;
+  border-radius: var(--r-s);
+  background: transparent;
+  color: var(--text-mid);
+  text-align: left;
+  cursor: pointer;
+}
+.amp-row:hover, .amp-row:focus-visible { outline: none; background: var(--bg-2); }
+.amp-desc { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10.5px; }
+.amp-row .dsp-chip.agc-1 { color: var(--energy); border-color: var(--energy-40); background: var(--energy-15); }
+.amp-row .dsp-chip.agc-2 { color: var(--power); border-color: var(--power-40); background: var(--power-15); }
+.amp-row .dsp-chip.agc-3 { color: var(--ok-system); border-color: var(--ok-system-15); background: var(--ok-system-15); }
+.amp-row .dsp-chip.agc-4 { color: var(--gold); border-color: color-mix(in srgb, var(--gold) 40%, transparent); background: color-mix(in srgb, var(--gold) 15%, transparent); }
+
 /* ---------- shared drag ghost ---------- */
 .mention-ghost {
   position: fixed;

@@ -23,6 +23,7 @@ export class SessionTracker {
   private finalText = "";
   private streamText = "";
   private taskStartedAt: number | null = null;
+  private passedCount: number | null = null;
 
   constructor(private bridge: AgentBridge) {}
 
@@ -36,6 +37,7 @@ export class SessionTracker {
             this.taskStartedAt = Date.now();
             this.streamText = "";
             this.finalText = "";
+            this.passedCount = null;
             break;
           case "text-start":
             this.streamText = "";
@@ -58,6 +60,11 @@ export class SessionTracker {
                   latest: e.fileEdit.newText,
                 });
             }
+            if (!e.isError) {
+              const match = /(?:#\s*)?pass(?:ed)?\s*[:=]?\s*(\d+)|(\d+)\s+passed/i.exec(e.resultText);
+              const count = Number(match?.[1] ?? match?.[2]);
+              if (Number.isFinite(count) && count > 0) this.passedCount = count;
+            }
             break;
           case "user-message":
             // a fresh task begins timing when the agent starts, not here
@@ -77,6 +84,7 @@ export class SessionTracker {
     this.finalText = "";
     this.streamText = "";
     this.taskStartedAt = null;
+    this.passedCount = null;
   }
 
   get elapsedMs(): number {
@@ -85,6 +93,10 @@ export class SessionTracker {
 
   get lastFinalText(): string {
     return this.finalText;
+  }
+
+  get lastPassedCount(): number | null {
+    return this.passedCount;
   }
 
   touchedPaths(): string[] {

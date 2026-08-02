@@ -13,7 +13,7 @@ import { el, clear } from "../core/dom";
 import { emit, on } from "../core/bus";
 import { toast, confirmDialog, formDialog, inputDialog } from "../core/ui";
 import { t } from "../core/i18n";
-import type { TeamAgent, TeamFeedEntry, TeamRunState, TeamSlice, TeamTimelineEntry } from "../../shared/types";
+import type { TeamRunState, TeamSlice, TeamTimelineEntry } from "../../shared/types";
 
 let panelEl: HTMLElement;
 let surfaceEl: HTMLElement;
@@ -29,45 +29,28 @@ export function teamRun(): TeamRunState | null {
   return run;
 }
 
-/** feed length already rendered (incremental append) */
-let feedRendered = 0;
-let feedRunId = "";
-let feedListEl: HTMLElement | null = null;
-/** previous agent states — drives the wake materialize + edge pulse */
-let prevAgentState: Record<string, string> = {};
-let elapsedTimer: number | undefined;
-/** «журнал команды»: ONE compact block for orchestration milestones (crew-design §3) */
-let journalEl: HTMLElement | null = null;
-let journalRows: HTMLElement | null = null;
-let journalCount = 0;
-let journalExpanded = false;
-/** expanded ledger groups (key: worker + first timestamp + size) */
-const expandedGroups = new Set<string>();
-
-function resetFeedUi(): void {
-  feedListEl = null;
-  feedRendered = 0;
-  journalEl = null;
-  journalRows = null;
-  journalCount = 0;
+/** Keep chronological feed order: user bubble → dispatch card → final. */
+export function placeTeamSurfaceAfterUserMessage(): void {
+  if (!run || !surfaceEl) return;
+  const chat = panelEl.querySelector(".agent-chat");
+  if (chat) chat.append(surfaceEl);
 }
+
+/** current run identity for one-time surface reset */
+let surfaceRunId = "";
+let elapsedTimer: number | undefined;
+/** expanded ledger groups (worker + first timestamp + size) */
+const expandedGroups = new Set<string>();
 
 /** legacy decorated marker line: `##NAME##`, `@@NAME@@` or `::NAME::` */
 const PROTO_RE = /^(##[A-Z][A-Z0-9_]*##|@@[A-Z][A-Z0-9_]*@@|::[A-Z][A-Z0-9_]*::)/;
 
 function isProtoLine(trimmed: string): boolean {
   if (PROTO_RE.test(trimmed)) return true;
-  if (trimmed.startsWith("{\"") && trimmed.endsWith("}") && trimmed.includes("\"ev\"")) {
-    try {
-      const o = JSON.parse(trimmed) as Record<string, unknown>;
-      return !!o && typeof o.ev === "string";
-    } catch {
-      return false;
-    }
-  }
-  return false;
+  // Any event-shaped JSON line is transport, even when malformed. The main
+  // adapter renders a designed error card; history/live chat never show raw.
+  return trimmed.startsWith("{") && trimmed.includes("\"ev\"");
 }
-
 /**
  * Strip protocol lines from agent chat text (team run narration): bare
  * `{"ev":…}` JSON events (primary) and legacy decorated markers. Separator
@@ -115,7 +98,7 @@ export function createTeamToggle(): HTMLElement {
  */
 export function teamConsumesPrompt(message: string): boolean {
   if (run) {
-    if (run.phase === "probe" || run.phase === "deliberate") {
+    if (run.phase === "route") {
       void window.ide.team.steer(message);
       return true;
     }
@@ -135,10 +118,25 @@ export function teamConsumesPrompt(message: string): boolean {
   if (!armed) return false;
   armed = false;
   toggleBtn?.classList.remove("armed");
-  void window.ide.team.start(message).then((r) => {
+  // @-mentions of roster roles pin those roles (manual override §5); no
+  // mentions = the router auto-assigns. Mentions are matched against the
+  // known roster ids so a stray @path (file) is ignored here.
+  const mentioned = extractAgentMentions(message);
+  void window.ide.team.start(message, mentioned).then((r) => {
     if (!r.ok) toast(r.error ?? t("team.startFailed"), { crit: true });
   });
   return true;
+}
+
+/** roster role ids explicitly @-mentioned in the goal text (manual override) */
+let rosterIds: Set<string> = new Set();
+function extractAgentMentions(message: string): string[] {
+  const out = new Set<string>();
+  for (const m of message.matchAll(/@([a-z][\w-]*)/gi)) {
+    const id = m[1].toLowerCase();
+    if (rosterIds.has(id)) out.add(id);
+  }
+  return [...out];
 }
 
 // ---------------------------------------------------------------- state plumbing
@@ -147,23 +145,25 @@ export function initTeamSurface(opts: { panel: HTMLElement; input: HTMLTextAreaE
   panelEl = opts.panel;
   inputEl = opts.input;
   surfaceEl = el("div", { class: "team-surface", style: { display: "none" } });
-  // between the agent head and the chat (chat stays as the unified timeline)
+  // The surface lives inside the unified chat timeline. It starts hidden and
+  // is moved after the team goal bubble by placeTeamSurfaceAfterUserMessage().
   const chat = panelEl.querySelector(".agent-chat");
-  if (chat) panelEl.insertBefore(surfaceEl, chat);
+  if (chat) chat.append(surfaceEl);
   else panelEl.append(surfaceEl);
 
   window.ide.team.onState((s) => applyState(s));
   void window.ide.team.getState().then((s) => applyState(s));
+  // cache the roster ids so @-mentions in a goal can be matched to roles
+  void window.ide.team.roster().then((roles) => { rosterIds = new Set(roles.map((r) => r.id)); });
 
-  // live language switch: rebuild the whole persistent surface (board, feed,
-  // journal — their fixed strings re-apply); on-demand dialogs rebuild on open
+  // live language switch: rebuild fixed strings; on-demand dialogs rebuild on open
   on("lang-changed", () => {
     if (toggleBtn) {
       toggleBtn.title = t("team.toggleTip");
       toggleBtn.textContent = t("team.title");
     }
     if (run) {
-      feedRunId = ""; // forces render() to clear + re-render from scratch
+      surfaceRunId = ""; // forces render() to clear + re-render from scratch
       applyState(run);
     } else if (armed && inputEl) {
       inputEl.placeholder = t("team.goalPlaceholder");
@@ -179,9 +179,6 @@ function applyState(s: TeamRunState | null): void {
   surfaceEl.style.display = live ? "" : "none";
   if (!s) {
     clear(surfaceEl);
-    resetFeedUi();
-    feedRunId = "";
-    prevAgentState = {};
     clearInterval(elapsedTimer);
     elapsedTimer = undefined;
     if (inputEl && !armed) inputEl.placeholder = t("agent.placeholder");
@@ -189,7 +186,7 @@ function applyState(s: TeamRunState | null): void {
   }
   if (inputEl) {
     inputEl.placeholder =
-      s.phase === "probe" || s.phase === "deliberate" ? t("team.notePlanners") :
+      s.phase === "route" ? t("team.noteRouter") :
       s.phase === "execute" || s.phase === "verify" ? t("team.steerPlaceholder") :
       t("agent.placeholder");
   }
@@ -222,37 +219,6 @@ function layerSlices(slices: TeamSlice[]): Map<string, number> {
   return memo;
 }
 
-function planStats(slices: TeamSlice[]): { tracks: number; contracts: number } {
-  const layers = layerSlices(slices);
-  const width = new Map<number, number>();
-  for (const l of layers.values()) width.set(l, (width.get(l) ?? 0) + 1);
-  let tracks = 1;
-  for (const w of width.values()) tracks = Math.max(tracks, w);
-  return { tracks, contracts: slices.filter((s) => s.contract && s.contract.trim()).length };
-}
-
-const ORB_BY_STATE: Record<string, string> = {
-  deliberating: "thinking",
-  working: "tool",
-  sleeping: "idle",
-  waking: "thinking",
-  done: "idle",
-  failed: "dead",
-};
-
-/** displayed agent-state word — the state values themselves stay protocol ids */
-function agentStateLabel(st: string): string {
-  switch (st) {
-    case "waking": return t("team.stWaking");
-    case "deliberating": return t("team.stDeliberating");
-    case "working": return t("team.stWorking");
-    case "sleeping": return t("team.stSleeping");
-    case "done": return t("team.stDone");
-    case "failed": return t("team.stFailed");
-    case "throttled": return t("team.stThrottled");
-    default: return st;
-  }
-}
 
 /** displayed slice-state word (detail popover chip) */
 function sliceStateLabel(st: string): string {
@@ -271,12 +237,9 @@ function sliceStateLabel(st: string): string {
 function render(): void {
   if (!run) return;
   const r = run;
-  // The feed appends incrementally; everything else rebuilds (small DOM).
-  if (feedRunId !== r.runId) {
+  if (surfaceRunId !== r.runId) {
     clear(surfaceEl);
-    resetFeedUi();
-    feedRunId = r.runId;
-    prevAgentState = {};
+    surfaceRunId = r.runId;
   }
 
   let head = surfaceEl.querySelector(".team-head") as HTMLElement | null;
@@ -293,19 +256,15 @@ function render(): void {
   }
 
   if (r.didNotSurvive || r.phase === "stalled") renderStalled(body, r);
-  else if (r.phase === "probe" || r.phase === "deliberate") renderDeliberation(body, r);
-  else if (r.phase === "gate") renderGate(body, r);
-  else renderBoard(body, r); // execute / verify / done / stopped
+  else renderDispatch(body, r); // route / gate / execute / verify / done / stopped
 
-  renderFeed(r);
   armElapsedTicker(r);
 }
 
 function renderHead(head: HTMLElement, r: TeamRunState): void {
   clear(head);
   const phaseLabel: Record<string, string> = {
-    probe: t("team.phaseProbe"),
-    deliberate: t("team.phaseDeliberate", Math.max(1, r.round), r.maxRounds),
+    route: t("team.phaseRoute"),
     gate: t("team.phaseGate"),
     execute: t("team.phaseExecute"),
     verify: t("team.phaseVerify"),
@@ -341,7 +300,7 @@ function renderHead(head: HTMLElement, r: TeamRunState): void {
         text: label,
       }));
     }
-  } else if (r.solo && (r.phase === "probe" || r.phase === "deliberate" || r.phase === "gate")) {
+  } else if (r.solo && (r.phase === "route" || r.phase === "gate")) {
     head.append(el("span", { class: "th-mech mono", title: t("team.processParallelTip"), text: t("team.processParallel") }));
   }
   head.append(
@@ -353,157 +312,101 @@ function renderHead(head: HTMLElement, r: TeamRunState): void {
   );
 }
 
-// ---- deliberation
+// ---- dispatch card (auto-routing 2A): one card, rows update in place
+//
+// The card is the single feed surface for a team run: flag title + one row per
+// assigned role (chip · task · status). During `route` it shows the routing
+// indicator; at `gate` a grace bar + «изменить»; through execute/verify the
+// rows transition в очереди → работает… → готово IN PLACE (never new messages);
+// at done the card stays and the ONE final message is the lead's summary.
 
-function renderDeliberation(body: HTMLElement, r: TeamRunState): void {
-  let wrap = body.querySelector(".team-delib") as HTMLElement | null;
-  if (!wrap) {
-    clear(body);
-    resetFeedUi();
-    wrap = el("div", { class: "team-delib" });
-    body.append(wrap);
-  }
-  let cards = wrap.querySelector(".td-planners") as HTMLElement | null;
-  if (!cards) {
-    cards = el("div", { class: "td-planners" });
-    wrap.append(cards);
-  }
-  clear(cards);
-  for (const a of r.agents.filter((x) => x.kind === "planner")) cards.append(agentCard(a));
-  if (!feedListEl) {
-    feedListEl = el("div", { class: "team-feed" });
-    wrap.append(feedListEl);
-  }
-}
-
-function agentCard(a: TeamAgent): HTMLElement {
-  const prev = prevAgentState[a.name];
-  const woke = (prev === "sleeping") && (a.state === "waking" || a.state === "working");
-  prevAgentState[a.name] = a.state;
-  const card = el(
-    "div",
-    { class: `team-card st-${a.state}${woke ? " materialize" : ""}` },
-    el("div", { class: "tc-row" },
-      el("span", { class: "tc-glyph mono", text: a.glyph }),
-      el("span", { class: "tc-agent mono", text: a.name }),
-      el("span", { class: `orb ${ORB_BY_STATE[a.state] ?? "idle"}` }),
-    ),
-    el("div", { class: "tc-row tc-meta" },
-      el("span", { class: "tc-chip mono", text: agentStateLabel(a.state) }),
-      a.kind === "worker" && a.slice && (a.state === "working" || a.state === "waking")
-        ? el("span", { class: "mono dim", text: t("team.sliceN", a.slice) }) : null,
-      a.state === "working" || a.state === "deliberating"
-        ? el("span", { class: "mono dim tc-elapsed", dataset: { since: String(a.sinceMs) }, text: fmtElapsed(a.sinceMs) }) : null,
-    ),
-    a.state === "sleeping" && a.waitingFor?.length
-      ? el("div", { class: "tc-wait dim", text: t("team.waitingFor", a.waitingFor.join(", ")) })
-      : null,
-    a.kind === "worker"
-      ? el("div", { class: "tc-files dim mono", text: t("team.filesTouchedN", a.filesTouched) })
-      : null,
-  );
-  return card;
-}
-
-// ---- plan gate
-
-function renderGate(body: HTMLElement, r: TeamRunState): void {
+function renderDispatch(body: HTMLElement, r: TeamRunState): void {
   clear(body);
-  resetFeedUi();
-  const stats = planStats(r.slices);
-  const summary = t("team.planSummary", r.slices.length, stats.tracks, stats.contracts);
-
-  let graphMode = body.dataset.graph === "1";
-  const viewBtn = el("button", {
-    class: "btn btn-ghost th-btn",
-    text: graphMode ? t("team.listView") : t("team.graphView"),
-    onClick: () => {
-      body.dataset.graph = graphMode ? "" : "1";
-      render();
-    },
-  });
-
-  const gate = el("div", { class: "team-gate materialize" },
-    el("div", { class: "tg-summary" },
-      el("span", { class: "mono", text: summary }),
-      r.planSummary ? el("span", { class: "dim", text: r.planSummary }) : null,
-      el("span", { style: { flex: "1" } }),
-      viewBtn,
-    ),
+  const editable = r.phase === "gate";
+  const graphMode = body.dataset.graph === "1";
+  const card = el("div", { class: "team-dispatch materialize" });
+  const title = el("div", { class: "dsp-title" },
+    el("span", { class: "dsp-flag", text: "⚑" }),
+    el("span", { class: "dsp-heading", text: dispatchHeading(r) }),
   );
-
-  if (graphMode) {
-    gate.append(renderDag(r.slices, { clickable: false }));
-  } else {
-    const list = el("div", { class: "tg-list" });
-    for (const s of r.slices) list.append(gateSliceRow(s, r));
-    gate.append(list);
+  if (r.slices.length) {
+    title.append(el("span", { style: { flex: "1" } }));
+    if (editable) title.append(el("button", { class: "btn btn-ghost dsp-viewbtn", text: t("team.edit"), onClick: () => void window.ide.team.hold() }));
+    title.append(el("button", { class: "btn btn-ghost dsp-viewbtn", text: graphMode ? t("team.listView") : t("team.graphView"), onClick: () => { body.dataset.graph = graphMode ? "" : "1"; render(); } }));
   }
-
-  gate.append(
-    el("div", { class: "tg-actions" },
-      el("button", {
-        class: "btn btn-ghost", text: t("team.addSliceBtn"),
-        onClick: () => void addSliceDialog(),
-      }),
-      el("span", { style: { flex: "1" } }),
-      el("button", {
-        class: "btn btn-ghost", text: t("team.discard"),
-        onClick: () => {
-          void confirmDialog({ title: t("team.discardPlanTitle"), message: t("team.discardPlanMsg"), confirmLabel: t("team.discard"), danger: true })
-            .then((ok) => { if (ok) void window.ide.team.discard(); });
-        },
-      }),
-      el("button", {
-        class: "btn btn-primary", text: t("team.approveRun"),
-        onClick: () => void window.ide.team.approve().then((res) => {
-          if (!res.ok) toast(res.error ?? t("team.approveFailed"), { crit: true });
-        }),
-      }),
-    ),
-  );
-  body.append(gate);
+  card.append(title);
+  if (r.protocolError) card.append(protocolErrorCard(r.protocolError.raw));
+  if (!r.slices.length) {
+    card.append(el("div", { class: "dsp-routing dim", text: t("team.routingLine") }));
+    body.append(card);
+    return;
+  }
+  if (graphMode) card.append(renderDag(r.slices, { clickable: true }));
+  else {
+    const rows = el("div", { class: "dsp-rows" });
+    for (const s of r.slices) rows.append(dispatchRow(s, r, editable || (r.phase === "execute" && s.state === "pending")));
+    card.append(rows);
+  }
+  if (editable) card.append(dispatchGate(r));
+  body.append(card);
+  if (r.phase === "execute" || r.phase === "verify" || r.phase === "done") renderExecExtras(card, r);
 }
 
-function gateSliceRow(s: TeamSlice, r: TeamRunState): HTMLElement {
-  return el("div", { class: "tg-slice" },
-    el("span", { class: "tg-id mono", text: s.id }),
-    el("div", { class: "tg-main" },
-      el("div", { class: "tg-title", text: s.title }),
-      el("div", { class: "tg-scope dim", text: s.scope }),
-      s.contract ? el("div", { class: "tg-contract mono dim", text: t("team.contractLbl", s.contract) }) : null,
-    ),
-    el("span", { class: "tg-deps mono dim" },
-      el("span", { text: s.deps.length ? `← ${s.deps.join(", ")}` : t("team.rootDep") }),
-      // auto-added serialization edges are visible at the gate with their reason
-      s.autoDeps?.length
-        ? el("span", {
-            class: "tg-auto",
-            title: t("team.autoDepTip", s.autoDeps.join(", ")),
-            text: t("team.autoTag"),
-          })
-        : null,
-    ),
-    el("span", { class: "tg-worker mono", text: s.worker }),
-    el("button", {
-      class: "btn btn-ghost tg-btn", text: t("team.edit"),
-      onClick: () => void editSliceDialog(s),
-    }),
-    el("button", {
-      class: "btn btn-ghost tg-btn", text: t("team.deps"),
-      title: t("team.depsTip"),
-      onClick: () => void editDepsDialog(s, r),
-    }),
-    el("button", {
-      class: "btn btn-ghost tg-btn tg-del", text: "✕",
-      title: t("team.deleteSliceTip"),
-      onClick: () => void window.ide.team.deleteSlice(s.id).then((res) => {
-        if (!res.ok) toast(res.error ?? t("team.deleteRejected"), { crit: true });
-      }),
-    }),
-  );
+function protocolErrorCard(raw: string): HTMLElement {
+  const details = el("details", { class: "dsp-proto-raw" }, el("summary", { text: t("team.protocolDetails") }), el("pre", { text: raw }));
+  return el("div", { class: "dsp-proto-error" }, el("div", { class: "dsp-proto-title", text: t("team.protocolError") }), details);
 }
 
+function dispatchHeading(r: TeamRunState): string {
+  if (r.phase === "route") return t("team.dspRouting");
+  const roles = r.slices.length;
+  if (r.phase === "gate") return t("team.dspAssigned", roles);
+  if (r.phase === "done") return t("team.dspDone");
+  if (r.phase === "stopped") return t("team.dspStopped");
+  return t("team.dspRunning", roles);
+}
+
+function dispatchRow(s: TeamSlice, r: TeamRunState, editable: boolean): HTMLElement {
+  const idx = r.slices.indexOf(s);
+  const depNote = s.deps.length === 0 ? "" : s.deps.length === 1 ? t("team.afterOne", s.deps[0]) : t("team.afterMany");
+  const statusText = s.state === "active" ? t("team.dspWorking") : s.state === "done" ? t("team.dspStDone") : s.state === "failed" ? t("team.dspStFailed") : s.state === "replanned" ? t("team.dspStReplanned") : (idx === r.slices.length - 1 && r.slices.length > 1 ? t("team.dspLast") : (depNote || t("team.dspQueued")));
+  const statusCls = s.state === "active" ? "run" : s.state === "done" ? "ok" : s.state === "failed" ? "fail" : "wait";
+  const row = el("div", { class: `dsp-row st-${s.state}` },
+    el("span", { class: `dsp-chip agc-${(idx % 4) + 1}`, text: s.worker }),
+    el("span", { class: "dsp-task", title: s.scope || s.title, text: s.title }),
+    el("span", { class: `dsp-st ${statusCls}`, text: statusText }),
+  );
+  if (!editable) {
+    row.classList.add("clickable");
+    row.addEventListener("click", () => showSliceDetail(s));
+  } else {
+    row.append(el("span", { class: "dsp-tools" },
+      el("button", { class: "btn btn-ghost dsp-tbtn", text: t("team.edit"), onClick: (e) => { e.stopPropagation(); void window.ide.team.hold().then(() => editSliceDialog(s)); } }),
+      el("button", { class: "btn btn-ghost dsp-tbtn", text: t("team.deps"), title: t("team.depsTip"), onClick: (e) => { e.stopPropagation(); void window.ide.team.hold().then(() => editDepsDialog(s, r)); } }),
+      el("button", { class: "btn btn-ghost dsp-tbtn dsp-del", text: "✕", title: t("team.deleteSliceTip"), onClick: (e) => { e.stopPropagation(); void window.ide.team.hold().then(() => window.ide.team.deleteSlice(s.id)).then((res) => { if (res && !res.ok) toast(res.error ?? t("team.deleteRejected"), { crit: true }); }); } }),
+    ));
+  }
+  return row;
+}
+
+function dispatchGate(r: TeamRunState): HTMLElement {
+  const wrap = el("div", { class: "dsp-gate" });
+  if (r.graceUntil && r.graceUntil > Date.now()) {
+    const bar = el("div", { class: "dsp-grace" }, el("div", { class: "dsp-grace-fill" }));
+    wrap.append(el("div", { class: "dsp-graceline" }, el("span", { class: "dim", text: t("team.graceLine") }), bar));
+    const remain = r.graceUntil - Date.now();
+    const fill = bar.querySelector(".dsp-grace-fill") as HTMLElement;
+    fill.style.transition = "none"; fill.style.width = "100%";
+    requestAnimationFrame(() => { fill.style.transition = `width ${remain}ms linear`; fill.style.width = "0%"; });
+  }
+  wrap.append(el("div", { class: "dsp-actions" },
+    el("button", { class: "btn btn-ghost", text: t("team.addSliceBtn"), onClick: () => void window.ide.team.hold().then(() => addSliceDialog()) }),
+    el("span", { style: { flex: "1" } }),
+    el("button", { class: "btn btn-ghost", text: t("team.discard"), onClick: () => { void window.ide.team.hold().then(() => confirmDialog({ title: t("team.discardPlanTitle"), message: t("team.discardPlanMsg"), confirmLabel: t("team.discard"), danger: true })).then((ok) => { if (ok) void window.ide.team.discard(); }); } }),
+    el("button", { class: "btn btn-primary", text: t("team.dspStartNow"), onClick: () => void window.ide.team.approve().then((res) => { if (!res.ok) toast(res.error ?? t("team.approveFailed"), { crit: true }); }) }),
+  ));
+  return wrap;
+}
 async function editSliceDialog(s: TeamSlice): Promise<void> {
   const values = await formDialog({
     title: t("team.editSliceTitle", s.id),
@@ -628,24 +531,32 @@ function renderDag(slices: TeamSlice[], opts: { clickable: boolean; pulseDeps?: 
 function showSliceDetail(s: TeamSlice): void {
   const existing = surfaceEl.querySelector(".slice-detail");
   existing?.remove();
-  const board = surfaceEl.querySelector(".team-board");
-  if (!board) return;
-  board.append(
+  const card = surfaceEl.querySelector(".team-dispatch");
+  if (!card) return;
+  const workerEvents = (run?.timeline ?? []).filter((e) => e.worker === s.worker);
+  const log = workerEvents.length
+    ? el("div", { class: "sd-log" },
+        ...workerEvents.slice(-30).map((e) => el("div", { class: "sd-log-row mono" },
+          el("span", { class: "sd-log-tool", text: e.tool }),
+          el("span", { class: "sd-log-summary", text: e.summary }),
+        )),
+      )
+    : null;
+  card.append(
     el("div", { class: "slice-detail materialize" },
       el("div", { class: "sd-head" },
-        el("span", { class: "mono", text: `${s.id} · ${s.title}` }),
+        el("span", { class: "mono", text: `${s.worker} · ${s.title}` }),
         el("span", { class: `tc-chip mono st-${s.state}`, text: sliceStateLabel(s.state) }),
         el("span", { class: "mono dim", text: `+${s.add} −${s.del}` }),
         el("span", { style: { flex: "1" } }),
         el("button", { class: "btn btn-ghost th-btn", text: "✕", onClick: (e) => (e.currentTarget as HTMLElement).closest(".slice-detail")?.remove() }),
       ),
-      // node popover anatomy (crew-rail §3): owner / deps / contract / diffstat / hand-off
       el("div", { class: "sd-meta mono dim" },
-        el("span", { text: t("team.ownerLbl", s.worker) }),
         el("span", { text: s.deps.length ? t("team.depsLbl", `${s.deps.join(", ")}${s.autoDeps?.length ? t("team.autoSuffix", s.autoDeps.join(", ")) : ""}`) : t("team.depsNone") }),
         s.contract ? el("span", { text: t("team.contractLbl", s.contract) }) : null,
         s.files?.length ? el("span", { text: t("team.filesLbl", s.files.join(", ")) }) : null,
       ),
+      log,
       el("div", { class: "sd-body dim", text: s.handoff ?? t("team.noHandoff") }),
     ),
   );
@@ -653,158 +564,21 @@ function showSliceDetail(s: TeamSlice): void {
 
 // ---- execution board — Crew Rail (crew-rail spec §3, lab variant 1)
 
-/** chip-expanded read-only toggles + timeline filter (session-scoped UI state) */
-let expandedChip: string | null = null;
+/** timeline filter — session-scoped UI state (set by a dispatch-row click) */
 let timelineFilter: string | null = null;
 
-function crewChip(a: TeamAgent, r: TeamRunState): HTMLElement {
-  const prev = prevAgentState[a.name];
-  const woke = (prev === "sleeping") && (a.state === "waking" || a.state === "working");
-  prevAgentState[a.name] = a.state;
-  const chip = el(
-    "div",
-    {
-      class: `rchip st-${a.state}${woke ? " materialize" : ""}${expandedChip === a.name ? " pinned" : ""}${timelineFilter === a.name ? " filtered" : ""}`,
-      title: a.slice ? `${a.name} · ${t("team.sliceN", a.slice)}` : a.name,
-      onClick: () => {
-        expandedChip = expandedChip === a.name ? null : a.name;
-        render();
-      },
-    },
-    el("span", { class: "sigil mono", text: a.glyph }),
-    el("div", { class: "rc-txt" },
-      el("div", { class: "rc-nm mono", text: a.name }),
-      el("div", { class: `rc-stt mono st-${a.state}`, text: agentStateLabel(a.state) }),
-    ),
-  );
-  return chip;
-}
-
-/** expanded live card for a currently-working agent (one per worker, stacked) */
-function crewExpanded(a: TeamAgent, r: TeamRunState): HTMLElement {
-  const s = a.slice ? r.slices.find((x) => x.id === a.slice) : undefined;
-  const streaming = a.state === "working" || a.state === "throttled";
-  const card = el(
-    "div",
-    {
-      class: `rexp st-${a.state}${streaming && a.state === "working" ? " streaming" : ""}${timelineFilter === a.name ? " filtered" : ""}`,
-      title: t("team.filterTlTip"),
-      onClick: () => {
-        timelineFilter = timelineFilter === a.name ? null : a.name;
-        render();
-      },
-    },
-    el("span", { class: "sigil big mono", text: a.glyph }),
-    el("div", { class: "rx-info" },
-      el("div", { class: "rx-t mono", text: `${a.name}${a.slice ? ` · ${t("team.sliceN", a.slice)}` : ""}` }),
-      el("div", { class: "rx-s", text: a.state === "throttled" ? t("team.rateLimited") : (s ? s.title : a.lastActivity ?? "") }),
-      el("div", { class: "rx-prog" }, el("i")),
-    ),
-    el("div", { class: "rx-files mono" },
-      el("div", {}, el("b", { text: String(a.filesTouched) }), ` ${t("team.filesTouchedWord", a.filesTouched)}`),
-      el("div", {}, el("b", { text: `+${a.add ?? 0} −${a.del ?? 0}` })),
-      el("div", { class: "tc-elapsed", dataset: { since: String(a.sinceMs) } }, t("team.onSlice", fmtElapsed(a.sinceMs))),
-    ),
-  );
-  return card;
-}
-
-/** read-only card for a clicked sleeping/done/failed chip */
-function crewReadonly(a: TeamAgent, r: TeamRunState): HTMLElement {
-  const doneSlices = r.slices.filter((x) => x.worker === a.name && x.state === "done");
-  const lastHandoff = doneSlices[doneSlices.length - 1]?.handoff;
-  return el(
-    "div",
-    { class: `rexp ro st-${a.state}` },
-    el("span", { class: "sigil big mono", text: a.glyph }),
-    el("div", { class: "rx-info" },
-      el("div", { class: "rx-t mono", text: `${a.name} · ${agentStateLabel(a.state)}` }),
-      a.state === "sleeping" && a.waitingFor?.length
-        ? el("div", { class: "rx-wait mono", text: t("team.waitingFor", a.waitingFor.join(", ")) })
-        : el("div", { class: "rx-s", text: a.lastActivity ?? (lastHandoff ? lastHandoff.slice(0, 160) : t("team.noActivity")) }),
-    ),
-    el("div", { class: "rx-files mono" },
-      el("div", {}, el("b", { text: String(a.filesTouched) }), ` ${t("team.filesWord", a.filesTouched)}`),
-      el("div", {}, el("b", { text: `+${a.add ?? 0} −${a.del ?? 0}` })),
-    ),
-  );
-}
-
-/** pipeline strip: layered nodes with elbow wrap; the edge INTO an active slice flows */
-function pipelineStrip(r: TeamRunState): HTMLElement {
-  const layers = layerSlices(r.slices);
-  const maxLayer = Math.max(0, ...layers.values());
-  const rows: TeamSlice[][] = [];
-  for (let l = 0; l <= maxLayer; l++) rows.push(r.slices.filter((s) => layers.get(s.id) === l));
-  const strip = el("div", { class: "pipe" });
-  rows.forEach((row, li) => {
-    const rowEl = el("div", { class: "pipe-row" });
-    row.forEach((s, i) => {
-      if (i > 0 || li > 0) {
-        // the edge INTO this node: flows while the node is active
-        const flows = s.state === "active";
-        rowEl.append(el("span", { class: `pedge${flows ? " flow" : ""}${i === 0 ? " elbow" : ""}` }));
-      }
-      rowEl.append(
-        el("span", {
-          class: `pnode st-${s.state}`,
-          title: `${t("team.slicePfx")}${s.id} · ${s.title}${s.autoDeps?.length ? t("team.autoSerialized") : ""}`,
-          onClick: (e) => { e.stopPropagation(); showSliceDetail(s); },
-        },
-          el("b", {},
-            el("span", { class: "pfx", text: t("team.slicePfx") }),
-            el("span", { text: `${s.id}${s.autoDeps?.length ? " ⛓" : ""}` }),
-          ),
-          el("span", { class: "ptitle", text: s.title.slice(0, 22) }),
-        ),
-      );
-    });
-    strip.append(rowEl);
-  });
-  return strip;
-}
-
-function renderBoard(body: HTMLElement, r: TeamRunState): void {
-  let board = body.querySelector(".team-board") as HTMLElement | null;
-  const fresh = !board;
-  if (!board) {
-    clear(body);
-    resetFeedUi();
-    board = el("div", { class: "team-board" });
-    body.append(board);
-  }
-
-  const workers = r.agents.filter((x) => x.kind === "worker");
-  const crew = workers.length ? workers : r.agents;
-
-  // the rail: one chip per crew member, wraps, never scrolls horizontally
-  let rail = board.querySelector(".rail") as HTMLElement | null;
-  if (!rail) { rail = el("div", { class: "rail" }); board.append(rail); }
-  clear(rail);
-  for (const a of crew) rail.append(crewChip(a, r));
-
-  // expanded cards: every WORKING agent expands (true parallelism = several at once);
-  // throttled stays expanded (flare); a clicked chip pins a read-only card
-  let exps = board.querySelector(".rexps") as HTMLElement | null;
-  if (!exps) { exps = el("div", { class: "rexps" }); board.append(exps); }
-  clear(exps);
-  for (const a of crew) {
-    if (a.state === "working" || a.state === "throttled") exps.append(crewExpanded(a, r));
-    else if (expandedChip === a.name) exps.append(crewReadonly(a, r));
-  }
-
-  // pipeline strip (replaces the DAG boxes + A–E tab row)
-  let pipeHost = board.querySelector(".pipe-host") as HTMLElement | null;
-  if (!pipeHost) { pipeHost = el("div", { class: "pipe-host" }); board.append(pipeHost); }
-  clear(pipeHost);
-  pipeHost.append(pipelineStrip(r));
-
-  // shared attributed timeline (filterable by clicking an expanded card)
-  let tl = board.querySelector(".crew-tl") as HTMLElement | null;
-  if (!tl) { tl = el("div", { class: "crew-tl" }); board.append(tl); }
-  clear(tl);
+/**
+ * Execution detail appended UNDER the dispatch card (Part 3): the shared
+ * attributed timeline (row-click filters it), the needs-call pause, and the
+ * ONE final message — the lead's report, green-edged like the single-agent
+ * final (voice 8+2). The card rows already carry chip·task·status, so the old
+ * crew rail/pipeline are gone; per-agent logs open via row-click (showSliceDetail).
+ */
+function renderExecExtras(host: HTMLElement, r: TeamRunState): void {
+  // shared attributed timeline (filterable by clicking a row → showSliceDetail)
   const entries = (r.timeline ?? []).filter((e) => !timelineFilter || e.worker === timelineFilter);
   if (entries.length) {
+    const tl = el("div", { class: "crew-tl" });
     tl.append(el("div", { class: "ctl-head mono", text: timelineFilter ? t("team.timelineHeadFiltered", timelineFilter, entries.length) : t("team.timelineHead", entries.length) }));
     const timelineRow = (e: TeamTimelineEntry, nested = false): HTMLElement =>
       el("div", { class: `ctl-row mono${nested ? " nested" : ""}` },
@@ -814,8 +588,6 @@ function renderBoard(body: HTMLElement, r: TeamRunState): void {
         el("span", { class: "ctl-sum", text: e.summary }),
         el("span", { class: "ctl-at dim", text: new Date(e.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }) }),
       );
-    // ledger grouping (crew-design §3): 2+ consecutive same-worker calls
-    // collapse into ONE group row, expandable to the individual calls
     const recent = entries.slice(-60);
     const groups: TeamTimelineEntry[][] = [];
     for (const e of recent) {
@@ -829,16 +601,12 @@ function renderBoard(body: HTMLElement, r: TeamRunState): void {
       const open = expandedGroups.has(key);
       const counts = new Map<string, number>();
       for (const e of g) counts.set(e.tool, (counts.get(e.tool) ?? 0) + 1);
-      const tools = [...counts].map(([t, n]) => (n > 1 ? `${t} ×${n}` : t)).join(" + ");
+      const tools = [...counts].map(([tool, n]) => (n > 1 ? `${tool} ×${n}` : tool)).join(" + ");
       const dur = Math.max(1, Math.round((g[g.length - 1].at - g[0].at) / 1000));
       tl.append(el("div", {
         class: `ctl-row ctl-group mono${open ? " open" : ""}`,
         title: open ? t("team.collapseGroup") : t("team.expandGroup", g.length),
-        onClick: () => {
-          if (open) expandedGroups.delete(key);
-          else expandedGroups.add(key);
-          render();
-        },
+        onClick: () => { if (open) expandedGroups.delete(key); else expandedGroups.add(key); render(); },
       },
         el("span", { class: "ctl-sigil", text: g[0].glyph }),
         el("span", { class: "ctl-worker", text: g[0].worker }),
@@ -849,16 +617,13 @@ function renderBoard(body: HTMLElement, r: TeamRunState): void {
       ));
       if (open) for (const e of g) tl.append(timelineRow(e, true));
     }
+    host.append(tl);
     tl.scrollTop = tl.scrollHeight;
   }
 
-  let extras = board.querySelector(".tb-extras") as HTMLElement | null;
-  if (!extras) { extras = el("div", { class: "tb-extras" }); board.append(extras); }
-  clear(extras);
-
   if (r.needsCall) {
     const call = r.needsCall;
-    extras.append(
+    host.append(
       el("div", { class: "needs-call materialize" },
         el("div", { class: "nc-title", text: t("team.needsCallTitle", call.sliceId) }),
         el("div", { class: "nc-error mono dim", text: call.error }),
@@ -878,22 +643,18 @@ function renderBoard(body: HTMLElement, r: TeamRunState): void {
     );
   }
 
+  // the ONE final message (Part 3 §4): the lead's report, green-edged
   if (r.phase === "done" && r.report) {
-    const rep = el("div", { class: "team-report materialize md" });
+    const rep = el("div", { class: "dsp-final md materialize" });
     rep.innerHTML = marked.parse(r.report, { async: false });
-    extras.append(
-      el("div", { class: "tr-head mono", text: t("team.reportHead") }),
-      rep,
-    );
+    host.append(rep);
   }
-  if (fresh) board.classList.add("materialize");
 }
 
 // ---- stalled / restart honesty
 
 function renderStalled(body: HTMLElement, r: TeamRunState): void {
   clear(body);
-  resetFeedUi();
   body.append(
     el("div", { class: "team-stalled materialize" },
       el("div", { class: "ts-title", text: r.didNotSurvive ? t("team.didNotSurvive") : t("team.stalledTitle") }),
@@ -915,98 +676,6 @@ function renderStalled(body: HTMLElement, r: TeamRunState): void {
   );
 }
 
-// ---- feed (deliberation + system notes, incremental)
-
-// journal rows: glyph + short text + time; collapsed to the last 3 (CSS)
-function journalGlyph(text: string): string {
-  if (/done|complete|passed|converged|resumed|approved/.test(text)) return "✓";
-  if (/failed|rejected|error|gap/.test(text)) return "✗";
-  if (/throttled|rate limit|paused|needs your call|stalled|interrupted/.test(text)) return "▲";
-  if (/execution|building|probing|serialized/.test(text)) return "▶";
-  return "·";
-}
-
-function journalRow(f: TeamFeedEntry): HTMLElement {
-  const at = new Date(f.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-  // no duplicate full text (crew-design §3): the plan lives in the gate —
-  // the narrative stream carries a one-line reference that opens it
-  if (f.text.startsWith("plan converged")) {
-    const n = run?.slices.length ?? 0;
-    return el("div", { class: "tj-row" },
-      el("span", { class: "tj-glyph mono", text: "◇" }),
-      el("span", {
-        class: "tj-text tj-link",
-        text: t("team.planOfSlices", n),
-        onClick: () => surfaceEl.scrollTo({ top: 0, behavior: "smooth" }),
-      }),
-      el("span", { class: "tj-at mono dim", text: at }),
-    );
-  }
-  return el("div", { class: "tj-row" },
-    el("span", { class: "tj-glyph mono", text: journalGlyph(f.text) }),
-    el("span", { class: "tj-text", text: f.text }),
-    el("span", { class: "tj-at mono dim", text: at }),
-  );
-}
-
-function ensureJournal(): void {
-  if (journalEl && journalRows) return;
-  journalRows = el("div", { class: "tj-rows" });
-  const toggle = el("button", {
-    class: "tj-toggle",
-    text: journalExpanded ? t("team.collapse") : t("team.showAll"),
-    onClick: () => {
-      journalExpanded = !journalExpanded;
-      journalEl?.classList.toggle("expanded", journalExpanded);
-      toggle.textContent = journalExpanded ? t("team.collapse") : t("team.showAll");
-    },
-  });
-  toggle.style.display = "none";
-  journalEl = el("div", { class: `team-journal${journalExpanded ? " expanded" : ""}` },
-    el("div", { class: "tj-head mono" },
-      el("span", { class: "tj-title", text: t("team.journal") }),
-      el("span", { class: "tj-count dim", text: "" }),
-      el("span", { style: { flex: "1" } }),
-      toggle,
-    ),
-    journalRows,
-  );
-  feedListEl!.append(journalEl);
-}
-
-function renderFeed(r: TeamRunState): void {
-  if (!feedListEl) {
-    // board phases keep the feed below the board
-    const host = surfaceEl.querySelector(".team-board, .team-delib");
-    if (!host) return;
-    feedListEl = el("div", { class: "team-feed" });
-    host.append(feedListEl);
-    feedRendered = 0;
-  }
-  const fresh = r.feed.slice(feedRendered);
-  feedRendered = r.feed.length;
-  for (const f of fresh) {
-    if (f.kind === "system") {
-      // one narrative stream (crew-design §3): orchestration milestones grow
-      // ONE journal block in place — never centered dot-lines in the chat
-      ensureJournal();
-      journalRows!.append(journalRow(f));
-      journalCount++;
-      const count = journalEl!.querySelector(".tj-count") as HTMLElement | null;
-      if (count) count.textContent = String(journalCount);
-      const toggle = journalEl!.querySelector(".tj-toggle") as HTMLElement | null;
-      if (toggle) toggle.style.display = journalCount > 3 ? "" : "none";
-    } else {
-      feedListEl.append(
-        el("div", { class: `tf-entry${f.kind === "note" ? " tf-note" : ""}` },
-          el("span", { class: "tf-author mono", text: `${f.glyph ? f.glyph + " " : ""}${f.author}` }),
-          el("span", { class: "tf-text", text: f.text }),
-        ),
-      );
-    }
-  }
-  if (fresh.length) feedListEl.scrollTop = feedListEl.scrollHeight;
-}
 
 // ---- elapsed ticker (1 s, only while someone is on the clock)
 

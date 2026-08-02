@@ -31,7 +31,7 @@ const BOT_GLYPH = `<rect x="3" y="5" width="10" height="8" rx="2"/><circle cx="6
 
 let ccRoot: HTMLElement | null = null;
 let feedEl: HTMLElement | null = null;
-let state: RemoteState = { globalEnabled: true, digestIntervalMs: 3000, proxyUrl: "", bots: [], pairing: null };
+let state: RemoteState = { globalEnabled: true, proxyUrl: "", bots: [], pairing: null };
 let activity: RemoteActivityEvent[] = [];
 
 // pairing dialog live handles (so state pushes can flip it to "paired")
@@ -506,16 +506,6 @@ function renderControlCenter(): void {
   if (!ccRoot) return;
   clear(ccRoot);
 
-  const digestInput = el("input", {
-    class: "input mono cc-num",
-    type: "number",
-    value: String(Math.round(state.digestIntervalMs / 1000)),
-    title: t("rc.digestTitle"),
-    onChange: (e) => {
-      const v = parseInt((e.target as HTMLInputElement).value, 10);
-      if (v >= 1 && v <= 30) void window.ide.remote.setDigestInterval(v * 1000);
-    },
-  });
 
   ccRoot.append(
     el(
@@ -528,13 +518,7 @@ function renderControlCenter(): void {
       ),
       // compact language selector (fix 4) — the Remote header area surface
       langSelector(),
-      // digest+cooldown wrap below the title as ONE unit at narrow widths
-      el("span", { class: "cc-dials" },
-        el("span", { class: "cc-note", text: t("rc.digestLbl") }),
-        digestInput,
-        el("span", { class: "cc-note", text: t("rc.secSuffix") }),
-        ...cooldownControl(),
-      ),
+      el("span", { class: "cc-dials" }, ...cooldownControl()),
     ),
   );
 

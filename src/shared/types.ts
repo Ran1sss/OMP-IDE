@@ -163,7 +163,7 @@ export interface OmpTodoPhase {
 /** Renderer-facing normalized agent events. */
 export type OmpEvent =
   | { kind: "agent-start" }
-  | { kind: "agent-end"; aborted?: boolean }
+  | { kind: "agent-end"; aborted?: boolean; failed?: boolean }
   | { kind: "text-start"; messageId: number }
   | { kind: "text-delta"; messageId: number; delta: string }
   | { kind: "text-end"; messageId: number; text: string }
@@ -323,7 +323,6 @@ export interface RemoteActivityEvent {
 
 export interface RemoteState {
   globalEnabled: boolean;
-  digestIntervalMs: number;
   /** telegram proxy url ("" = direct); http(s):// or socks(4/5):// */
   proxyUrl: string;
   bots: RemoteBotInfo[];
@@ -691,8 +690,9 @@ export interface TesterApi {
 //     after 3 reminders") — solo fallback is the expected live path here.
 
 export type TeamPhase =
-  | "probe"
-  | "deliberate"
+  /** lead is assigning roles from the roster to the request (auto-routing) */
+  | "route"
+  /** dispatch card shown — grace window before auto-start; editable */
   | "gate"
   | "execute"
   | "verify"
@@ -774,6 +774,14 @@ export interface TeamMechanism {
   reason?: string;
 }
 
+/** a team role the auto-router may assign (crew roster; user agents extend it) */
+export interface TeamRole {
+  /** stable id used in @mentions and slice.worker ("coder", "tester", …) */
+  id: string;
+  /** one-line description the router reads ("tester — пишет и гоняет тесты") */
+  desc: string;
+}
+
 export interface TeamRunState {
   runId: string;
   goal: string;
@@ -782,8 +790,14 @@ export interface TeamRunState {
   solo: boolean;
   /** live mechanism readout for the panel-header badge */
   mechanism?: TeamMechanism;
-  round: number;
-  maxRounds: number;
+  /** epoch ms when the grace window auto-approves the dispatch (gate phase); null = manual */
+  graceUntil?: number | null;
+  /** the roster the router chose from (role id → description), for the «изменить» sheet */
+  roster?: TeamRole[];
+  /** explicit @role manual overrides fixed for this run */
+  pinnedRoles?: string[];
+  /** malformed transport payload intercepted before rendering; raw stays collapsed */
+  protocolError?: { raw: string; at: number };
   agents: TeamAgent[];
   slices: TeamSlice[];
   planSummary: string;
@@ -802,10 +816,15 @@ export interface TeamRunState {
 
 export interface TeamApi {
   getState(): Promise<TeamRunState | null>;
-  /** kick off a team run for a goal (probe → deliberate) */
-  start(goal: string): Promise<{ ok: boolean; error?: string }>;
-  /** mid-run message; target = named worker, omitted = planners note / team note */
+  /** the default team roster (roles the router assigns) + any user-defined agents */
+  roster(): Promise<TeamRole[]>;
+  /** kick off a team run (route → gate → execute); `mentions` = pinned role ids (@-override) */
+  start(goal: string, mentions?: string[]): Promise<{ ok: boolean; error?: string }>;
+  /** mid-run message; target = named worker, omitted = team note */
   steer(text: string, target?: string): Promise<boolean>;
+  /** approve the dispatch now (skips the remaining grace window) */
+  /** hold the dispatch at the gate before editing; cancels auto-start */
+  hold(): Promise<void>;
   approve(): Promise<{ ok: boolean; error?: string }>;
   discard(): Promise<void>;
   stop(): Promise<void>;
@@ -922,7 +941,6 @@ export interface IdeApi {
     removeBot(botId: string): Promise<void>;
     setBotEnabled(botId: string, enabled: boolean): Promise<void>;
     setGlobalEnabled(enabled: boolean): Promise<void>;
-    setDigestInterval(ms: number): Promise<void>;
     /** telegram proxy ("" = direct); validates AND live-probes the proxy before committing */
     setProxyUrl(url: string): Promise<{ ok: boolean; error?: string; probe?: string }>;
     /** probe api.telegram.org through a proxy URL ("" = direct) without committing or bouncing bots */

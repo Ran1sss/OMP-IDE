@@ -20,7 +20,6 @@ export interface StoredBot {
 
 export interface RemoteStore {
   globalEnabled: boolean;
-  digestIntervalMs: number;
   /** telegram proxy url ("" = direct); http(s):// or socks(4/5):// */
   proxyUrl: string;
   bots: StoredBot[];
@@ -28,7 +27,6 @@ export interface RemoteStore {
 
 const DEFAULT_STORE: RemoteStore = {
   globalEnabled: true,
-  digestIntervalMs: 3000,
   proxyUrl: "",
   bots: [],
 };
@@ -49,10 +47,6 @@ export function loadStore(): RemoteStore {
     const parsed = JSON.parse(fs.readFileSync(storePath(), "utf-8")) as Partial<RemoteStore>;
     storeCache = {
       globalEnabled: parsed.globalEnabled !== false,
-      digestIntervalMs:
-        typeof parsed.digestIntervalMs === "number" && parsed.digestIntervalMs >= 1000
-          ? parsed.digestIntervalMs
-          : 3000,
       proxyUrl: typeof parsed.proxyUrl === "string" ? parsed.proxyUrl : "",
       bots: Array.isArray(parsed.bots) ? parsed.bots : [],
     };
