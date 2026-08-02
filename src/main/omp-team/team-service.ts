@@ -29,20 +29,27 @@ import { startWorker, killWorker, killAllWorkers, steerWorker, liveWorkerCount, 
  * orchestrating agent narrates team state through the marker protocol below.
  * The IDE parses markers into authoritative state; it never simulates agents.
  *
- * == Marker protocol (agent → IDE) ==
- * One event per line, alone on the line, minified JSON:
- *   @@TEAM@@ {"ev":"probe","ok":true|false,"detail"?}
- *   @@TEAM@@ {"ev":"planners","agents":[{"name","glyph"}...]}
- *   @@TEAM@@ {"ev":"say","who","text"}
- *   @@TEAM@@ {"ev":"round","n"}
- *   @@TEAM@@ {"ev":"converged","forced":bool}
- *   @@TEAM@@ {"ev":"plan","summary","workers":[{"name","glyph"}],"slices":[...]}
- *   @@TEAM@@ {"ev":"worker","name","state","slice"?,"waitingFor"?}
- *   @@TEAM@@ {"ev":"slice","id","state","handoff"?,"add"?,"del"?,"error"?}
- *   @@TEAM@@ {"ev":"replan","slices":[...],"note"}
- *   @@TEAM@@ {"ev":"needs-call","slice","error"}
- *   @@TEAM@@ {"ev":"verify","result":"gap"|"pass","note"}
- *   @@TEAM@@ {"ev":"report","text"}
+ * == State protocol (agent → IDE) ==
+ * One event per line, alone on the line: a BARE minified JSON object with an
+ * `ev` discriminator from the whitelist below. NO marker prefix — proxy
+ * providers run output filters that kill completions containing decorated
+ * lines (observed live on echogate/claude-fable-5: replies with `@@…@@`,
+ * `##…##`, `::…::`, XML tags, even yaml `k: v` pairs get cut at the 2nd
+ * token, while plain JSON object lines pass consistently). Legacy-marker
+ * spellings are still PARSED for old transcripts, but prompts instruct
+ * bare JSON only.
+ *   {"ev":"probe","ok":true|false,"detail"?}
+ *   {"ev":"planners","agents":[{"name","glyph"}...]}
+ *   {"ev":"say","who","text"}
+ *   {"ev":"round","n"}
+ *   {"ev":"converged","forced":bool}
+ *   {"ev":"plan","summary","workers":[{"name","glyph"}],"slices":[...]}
+ *   {"ev":"worker","name","state","slice"?,"waitingFor"?}
+ *   {"ev":"slice","id","state","handoff"?,"add"?,"del"?,"error"?}
+ *   {"ev":"replan","slices":[...],"note"}
+ *   {"ev":"needs-call","slice","error"}
+ *   {"ev":"verify","result":"gap"|"pass","note"}
+ *   {"ev":"report","text"}
  * Non-marker text is relayed into the feed attributed to the lead planner —
  * nothing the model says is hidden, nothing is fabricated.
  *
@@ -63,7 +70,13 @@ const LIVE_PHASE: Partial<Record<TeamRunState["phase"], true>> = {
   verify: true,
 };
 const MAX_FEED = 500;
-const MARKER = "@@TEAM@@";
+/** protocol event whitelist — a bare JSON line must carry one of these `ev` values */
+const EV_KINDS = new Set([
+  "probe", "planners", "say", "round", "converged", "plan",
+  "worker", "slice", "replan", "needs-call", "verify", "report",
+]);
+/** legacy marker spellings — still parsed so old transcripts stay readable */
+const LEGACY_MARKERS = ["##TEAM##", "@@TEAM@@", "::TEAM::"];
 
 let bridge: AgentBridge | null = null;
 let run: TeamRunState | null = null;
@@ -71,6 +84,10 @@ let run: TeamRunState | null = null;
 const proseBuf = new Map<number, string>();
 /** partial-line tail per streaming message */
 const lineBuf = new Map<number, string>();
+/** did the CURRENT lead turn stream any content? (empty-turn retry detector) */
+let turnSawContent = false;
+/** consecutive empty-turn retries this run (cap 2 — then honest stall) */
+let emptyRetries = 0;
 /** remote gate notifier (Telegram bridge registers; null = remote absent) */
 let gateNotifier: ((packet: { runId: string; goal: string; summary: string; slices: TeamSlice[]; solo: boolean }) => void) | null = null;
 
@@ -460,9 +477,24 @@ function flushProse(messageId: number): void {
 
 function consumeLine(messageId: number, line: string): void {
   const t = line.trim();
-  if (t.startsWith(MARKER)) {
-    flushProse(messageId); // keep prose/marker ordering in the feed
-    applyMarker(t.slice(MARKER.length).trim());
+  // primary protocol: a bare JSON object line with a whitelisted `ev`
+  if (t.startsWith("{\"") && t.endsWith("}") && t.includes("\"ev\"")) {
+    try {
+      const probe = JSON.parse(t) as Record<string, unknown>;
+      if (probe && typeof probe.ev === "string" && EV_KINDS.has(probe.ev)) {
+        flushProse(messageId); // keep prose/event ordering in the feed
+        applyMarker(t);
+        return;
+      }
+    } catch {
+      // not a protocol line — falls through to prose
+    }
+  }
+  // legacy transcripts: decorated marker + JSON payload
+  const m = LEGACY_MARKERS.find((mk) => t.startsWith(mk));
+  if (m) {
+    flushProse(messageId);
+    applyMarker(t.slice(m.length).trim());
   } else if (t) {
     proseBuf.set(messageId, (proseBuf.get(messageId) ?? "") + line + "\n");
   }
@@ -474,6 +506,7 @@ function onAgentEvent(e: OmpEvent): void {
   switch (e.kind) {
     case "text-delta": {
       if (!live) break;
+      turnSawContent = true;
       let buf = (lineBuf.get(e.messageId) ?? "") + e.delta;
       let nl: number;
       while ((nl = buf.indexOf("\n")) >= 0) {
@@ -494,6 +527,8 @@ function onAgentEvent(e: OmpEvent): void {
       break;
     }
     case "tool-end": {
+      // ANY tool activity proves the turn is alive (empty-turn detector)
+      if (live) turnSawContent = true;
       // live files-touched attribution: the working worker owns edits observed
       // in the root stream (solo mode = full fidelity; multi-agent slices also
       // report add/del in their done events)
@@ -515,9 +550,21 @@ function onAgentEvent(e: OmpEvent): void {
       if (!live) break;
       lineBuf.clear();
       for (const id of [...proseBuf.keys()]) flushProse(id);
+      const sawContent = turnSawContent;
+      turnSawContent = false;
       if (e.aborted) {
         run.phase = "stopped";
         sysNote("run interrupted — board frozen in its last state");
+      } else if (!sawContent && !poolActive && emptyRetries < 2 && (run.phase === "probe" || run.phase === "deliberate" || run.phase === "execute" || run.phase === "verify")) {
+        // Empty turn: HTTP-success with ZERO streamed content — a proxy output
+        // filter ate the reply (observed live: echogate/claude-fable-5 cuts
+        // completions; the filter comes and goes). Retrying with an explicit
+        // nudge usually lands on a clean pass; markers are idempotent by design.
+        emptyRetries++;
+        sysNote(`the model returned an EMPTY turn (provider filter?) — retry ${emptyRetries}/2`);
+        bridge!.prompt(
+          `[TEAM MODE — your previous reply arrived EMPTY (the provider dropped it). Re-emit your current state as bare JSON protocol lines and continue from where you stopped. If a state line was already accepted it is safe to repeat it.]`,
+        );
       } else if (run.phase === "probe" || run.phase === "deliberate") {
         run.phase = "stalled";
         sysNote("the deliberation turn ended without a converged plan — run stalled");
@@ -552,21 +599,22 @@ function onAgentEvent(e: OmpEvent): void {
 function protocolBlock(): string {
   return [
     "STATE PROTOCOL — the IDE renders a live team board from your output.",
-    `Every state change is ONE line, alone on its line: ${MARKER} {minified JSON}.`,
+    "Every state change is ONE line, alone on its line: a bare minified JSON object.",
+    "No prefixes, no markers, no code fences around these lines — just the JSON object.",
     "Events (emit them at the moment they happen, never batched at the end):",
-    `  ${MARKER} {"ev":"probe","ok":true|false,"detail":"why"}`,
-    `  ${MARKER} {"ev":"planners","agents":[{"name":"Vex","glyph":"◆"},{"name":"Ora","glyph":"▲"}]}`,
-    `  ${MARKER} {"ev":"say","who":"Vex","text":"one argument"}`,
-    `  ${MARKER} {"ev":"round","n":2}`,
-    `  ${MARKER} {"ev":"converged","forced":false}`,
-    `  ${MARKER} {"ev":"plan","summary":"one line","workers":[{"name":"Kilo","glyph":"●"}],"slices":[{"id":"A","title":"...","scope":"one line","worker":"Kilo","deps":[],"contract":"types/files/signatures fixed before fan-out","files":["src/a.ts","src/b.ts"]}]}`,
+    `  {"ev":"probe","ok":true|false,"detail":"why"}`,
+    `  {"ev":"planners","agents":[{"name":"Vex","glyph":"◆"},{"name":"Ora","glyph":"▲"}]}`,
+    `  {"ev":"say","who":"Vex","text":"one argument"}`,
+    `  {"ev":"round","n":2}`,
+    `  {"ev":"converged","forced":false}`,
+    `  {"ev":"plan","summary":"one line","workers":[{"name":"Kilo","glyph":"●"}],"slices":[{"id":"A","title":"...","scope":"one line","worker":"Kilo","deps":[],"contract":"types/files/signatures fixed before fan-out","files":["src/a.ts","src/b.ts"]}]}`,
     "  (files = the slice's planned write-set — REQUIRED; the IDE serializes slices whose write-sets overlap)",
-    `  ${MARKER} {"ev":"worker","name":"Kilo","state":"working|sleeping|waking|done|failed","slice":"A","waitingFor":["B","C"]}`,
-    `  ${MARKER} {"ev":"slice","id":"A","state":"active|done|failed","handoff":"one paragraph: what changed, where, what to watch for","add":12,"del":3,"error":"on failure"}`,
-    `  ${MARKER} {"ev":"replan","slices":[FULL updated slice array],"note":"what changed and why"}`,
-    `  ${MARKER} {"ev":"needs-call","slice":"A","error":"..."}`,
-    `  ${MARKER} {"ev":"verify","result":"gap|pass","note":"evidence"}`,
-    `  ${MARKER} {"ev":"report","text":"what was built, per-slice summary, verification evidence"}`,
+    `  {"ev":"worker","name":"Kilo","state":"working|sleeping|waking|done|failed","slice":"A","waitingFor":["B","C"]}`,
+    `  {"ev":"slice","id":"A","state":"active|done|failed","handoff":"one paragraph: what changed, where, what to watch for","add":12,"del":3,"error":"on failure"}`,
+    `  {"ev":"replan","slices":[FULL updated slice array],"note":"what changed and why"}`,
+    `  {"ev":"needs-call","slice":"A","error":"..."}`,
+    `  {"ev":"verify","result":"gap|pass","note":"evidence"}`,
+    `  {"ev":"report","text":"what was built, per-slice summary, verification evidence"}`,
     "Slice ids are short (A, B, C…). Worker names are short codenames, glyphs single characters.",
   ].join("\n");
 }
@@ -581,8 +629,8 @@ function deliberationPrompt(goal: string): string {
     "",
     "PHASE 0 — CAPABILITY PROBE (first, before anything):",
     "- Spawn ONE trivial subagent (task tool, agent \"scout\", instruction: reply PONG). Bound the wait to 60 seconds (hub wait with timeoutMs).",
-    `- Round-trip works → ${MARKER} {"ev":"probe","ok":true} and run the crew as real subagents.`,
-    `- No reply / failure / task tool unavailable → ${MARKER} {"ev":"probe","ok":false,"detail":"..."} and run SOLO: you play every role yourself, honestly labeled through the same events. Same pipeline, sequential execution.`,
+    `- Round-trip works → {"ev":"probe","ok":true} and run the crew as real subagents.`,
+    `- No reply / failure / task tool unavailable → {"ev":"probe","ok":false,"detail":"..."} and run SOLO: you play every role yourself, honestly labeled through the same events. Same pipeline, sequential execution.`,
     "",
     "PHASE 1 — DELIBERATE (hard cap: 3 rounds):",
     "- Pick 2 planners (3 only if the goal spans 3+ subsystems). Emit the planners event.",
@@ -919,6 +967,8 @@ function startRun(goal: string): { ok: boolean; error?: string } {
     startedAt: Date.now(),
     report: null,
   };
+  turnSawContent = false;
+  emptyRetries = 0;
   sysNote("probing subagent capability (60s cap)…");
   if (!b.prompt(deliberationPrompt(trimmed))) {
     run = null;

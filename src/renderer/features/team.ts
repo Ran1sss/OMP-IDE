@@ -52,19 +52,32 @@ function resetFeedUi(): void {
   journalCount = 0;
 }
 
-/** any protocol marker line: `@@NAME@@ …` (team events or other UI directives) */
-const PROTO_RE = /^@@[A-Z][A-Z0-9_]*@@/;
+/** legacy decorated marker line: `##NAME##`, `@@NAME@@` or `::NAME::` */
+const PROTO_RE = /^(##[A-Z][A-Z0-9_]*##|@@[A-Z][A-Z0-9_]*@@|::[A-Z][A-Z0-9_]*::)/;
+
+function isProtoLine(trimmed: string): boolean {
+  if (PROTO_RE.test(trimmed)) return true;
+  if (trimmed.startsWith("{\"") && trimmed.endsWith("}") && trimmed.includes("\"ev\"")) {
+    try {
+      const o = JSON.parse(trimmed) as Record<string, unknown>;
+      return !!o && typeof o.ev === "string";
+    } catch {
+      return false;
+    }
+  }
+  return false;
+}
 
 /**
- * Strip protocol marker lines from agent chat text (team run narration).
- * Catches every `@@…@@`-style directive, not only `@@TEAM@@`. Separator
- * lines (`---`/`***`/`___`) adjacent to a stripped marker are dropped too —
+ * Strip protocol lines from agent chat text (team run narration): bare
+ * `{"ev":…}` JSON events (primary) and legacy decorated markers. Separator
+ * lines (`---`/`***`/`___`) adjacent to a stripped line are dropped too —
  * orphaned they render as a stack of bare <hr>s.
  */
 export function stripTeamMarkers(text: string): string {
-  if (!text.includes("@@")) return text;
+  if (!text.includes("{\"ev\"") && !text.includes("##") && !text.includes("@@") && !text.includes("::")) return text;
   const lines = text.split("\n");
-  const isMarker = lines.map((l) => PROTO_RE.test(l.trimStart()));
+  const isMarker = lines.map((l) => isProtoLine(l.trim()));
   if (!isMarker.some(Boolean)) return text;
   const isSep = lines.map((l) => /^(-{3,}|\*{3,}|_{3,})$/.test(l.trim()));
   const out: string[] = [];

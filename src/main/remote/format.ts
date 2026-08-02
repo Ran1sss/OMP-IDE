@@ -247,8 +247,8 @@ export function formatElapsed(ms: number): string {
 // copies are prohibited. User-relevant facts inside a stripped marker are
 // re-expressed as words, never as raw JSON.
 
-/** a protocol marker line: `@@NAME@@` optionally followed by one JSON object */
-const PROTO_LINE = /^@@[A-Z][A-Z0-9_]*@@\s*(\{.*\})?\s*$/;
+/** a protocol marker line: `##NAME##`/`@@NAME@@`/`::NAME::` optionally followed by one JSON object */
+const PROTO_LINE = /^(?:##[A-Z][A-Z0-9_]*##|@@[A-Z][A-Z0-9_]*@@|::[A-Z][A-Z0-9_]*::)\s*(\{.*\})?\s*$/;
 
 /** re-express a stripped directive's user-relevant facts as human text */
 function humanizeDirective(json: string | undefined): string | null {
