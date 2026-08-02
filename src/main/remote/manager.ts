@@ -37,11 +37,21 @@ import {
   registerTeamEndNotifier,
   isTeamRunActive,
   teamJournalData,
+  startTeamFromRemote,
+  steerTeamFromRemote,
+  stopTeamFromRemote,
+  teamRoster,
 } from "../omp-team/team-service";
 import { SessionTracker } from "./session-tracker";
 import { tg, tgLangFor } from "./tg-i18n";
 import { classifyTeamAgentEnd } from "../../shared/agent-end";
-import { shouldSendTyping } from "../../shared/remote-communication";
+import { shouldRelayUnsolicitedNotice, shouldSendTyping } from "../../shared/remote-communication";
+import { classifyTaskIntake, extractRosterMentions, parseModeCommand, parseSoloTask, renderTelegramStartNotice, renderTelegramTeamStatus, stripLeadingMentionsForIntent } from "../../shared/team-remote";
+import {
+  classifyGroupMessage,
+  shouldHintPrivacyMode,
+  shouldLogBlockedGroupUser,
+} from "../../shared/telegram-group";
 import {
   escapeMd,
   mdToTelegram,
@@ -51,18 +61,34 @@ import {
   sanitizeOutbound,
 } from "./format";
 import { routeIntent, answerQuestion, registerDialogueTracker } from "./dialogue";
+import { PendingModeRegistry, type PendingEntry } from "./mode-picker";
 
 const appStartedAt = Date.now();
+/** the picker auto-starts Solo after this quiet period */
+const PICKER_TIMEOUT_MS = 60_000;
 
 interface ChatTarget {
   runtime: BotRuntime;
   bot: StoredBot;
   chatId: number;
   username: string;
-  /** recipient's Telegram language_code — localizes fixed strings per chat */
   languageCode?: string;
+  /** source message for threaded group replies */
+  replyToMessageId?: number;
 }
 
+interface PendingModePayload {
+  runtime: BotRuntime;
+  bot: StoredBot;
+  message: InboundMessage;
+  text: string;
+  mentions: string[];
+}
+
+interface TeamStartNotice {
+  target: ChatTarget;
+  editMessageId?: number;
+}
 
 class RemoteManager implements BotDelegate {
   private bridge: AgentBridge = getAgentBridge();
@@ -75,11 +101,24 @@ class RemoteManager implements BotDelegate {
   private taskFinalSent = false;
   private typingTimer: NodeJS.Timeout | null = null;
   private currentUi: BridgeUiRequest | null = null;
-  /** pending /stop and /new confirmations by callback token */
-  private confirms = new Map<string, { kind: "stop" | "new"; username: string }>();
+  /** pending /new confirmations by callback token */
+  private confirms = new Map<string, { kind: "new"; username: string }>();
   private confirmSeq = 0;
   /** /diff file index snapshot per request so button data stays tiny */
   private diffIndex: string[] = [];
+  /** group strangers are logged once per bot/user, never once per message */
+  private blockedGroupUsers = new Set<string>();
+  /** the privacy-mode explanation is owed once per group, not per message */
+  private privacyHinted = new Set<string>();
+  /** task origin controls typing, questions and the one final reply */
+  private activeTaskTarget: ChatTarget | null = null;
+  /** one pending Solo/Team choice per bot/chat; nothing survives an IDE restart */
+  private pending = new PendingModeRegistry<PendingModePayload>(
+    (fn, ms) => setTimeout(fn, ms),
+    (timer) => clearTimeout(timer as NodeJS.Timeout),
+  );
+  /** Team notice waits for the router's real slice assignment. */
+  private teamStartNotice: TeamStartNotice | null = null;
   /** chat-watch layer (group listening, proposals) — deletable with the module */
   readonly watch = new WatchManager({
     runtime: (botId) => this.runtimes.get(botId),
@@ -88,6 +127,90 @@ class RemoteManager implements BotDelegate {
       this.log(botId, bot?.username ?? botId, sender, kind ?? "watch", detail);
     },
   });
+
+  private taskTarget(runtime: BotRuntime, bot: StoredBot, message: InboundMessage): ChatTarget {
+    return {
+      runtime,
+      bot,
+      chatId: message.chatId,
+      username: message.username,
+      ...(message.languageCode ? { languageCode: message.languageCode } : {}),
+      ...(message.messageId !== undefined ? { replyToMessageId: message.messageId } : {}),
+    };
+  }
+
+  private reply(runtime: BotRuntime, message: InboundMessage, text: string, keyboard?: InlineKeyboard): Promise<number | null> {
+    return runtime.sendMd(message.chatId, text, keyboard, message.messageId);
+  }
+
+  private pendingChatKey(botId: string, chatId: number): string {
+    return `${botId}:${chatId}`;
+  }
+
+  private async createModePicker(runtime: BotRuntime, bot: StoredBot, message: InboundMessage, text: string): Promise<void> {
+    const payload: PendingModePayload = { runtime, bot, message, text, mentions: extractRosterMentions(text, teamRoster()) };
+    const { entry, evicted } = this.pending.open(this.pendingChatKey(bot.id, message.chatId), message.userId, payload);
+    if (evicted?.pickerMessageId !== null && evicted) {
+      void evicted.payload.runtime.editMd(evicted.payload.message.chatId, evicted.pickerMessageId, escapeMd(tg(tgLangFor(evicted.payload.message.languageCode)).pickerCancelled));
+    }
+    this.pushRemoteAnswerToIde(message.username, bot.name, text);
+    const L = tg(tgLangFor(message.languageCode));
+    const keyboard = new InlineKeyboard().text(L.pickerSolo, `mode:${entry.id}:solo`).text(L.pickerTeam, `mode:${entry.id}:team`);
+    const pickerId = await this.reply(runtime, message, escapeMd(L.modePicker), keyboard);
+    if (pickerId === null) {
+      this.pending.claim(entry.id);
+      return;
+    }
+    if (!this.pending.setPickerMessageId(entry.id, pickerId)) return;
+    this.pending.arm(entry.id, PICKER_TIMEOUT_MS, (expired) => void this.startPendingMode(expired, "solo", "timeout"));
+  }
+
+  /** Starts a claimed pending task; the picker message becomes its receipt. */
+  private async startPendingMode(entry: PendingEntry<PendingModePayload>, mode: "solo" | "team", by: string): Promise<boolean> {
+    const { runtime, bot, message, text, mentions } = entry.payload;
+    const lang = tgLangFor(message.languageCode);
+    const editPicker = (body: string): Promise<boolean> =>
+      entry.pickerMessageId === null ? Promise.resolve(false) : runtime.editMd(message.chatId, entry.pickerMessageId, escapeMd(body));
+    this.activeTaskTarget = this.taskTarget(runtime, bot, message);
+    this.taskFinalSent = false;
+    if (mode === "solo") {
+      await editPicker(tg(lang).soloStarted);
+      if (!this.bridge.prompt(text, { username: message.username, botName: bot.name }, { echo: false })) {
+        this.activeTaskTarget = null;
+        await editPicker(tg(lang).agentNotRunning);
+        return false;
+      }
+      this.log(bot.id, bot.username, `@${message.username}`, "task", `${by}: solo ${text}`.slice(0, 120));
+      return true;
+    }
+    this.teamStartNotice = {
+      target: this.activeTaskTarget,
+      ...(entry.pickerMessageId !== null ? { editMessageId: entry.pickerMessageId } : {}),
+    };
+    if (!startTeamFromRemote({ goal: text, mentions, via: { username: message.username, botName: bot.name }, echo: false }).ok) {
+      this.teamStartNotice = null;
+      this.activeTaskTarget = null;
+      await editPicker(tg(lang).teamStartFailed);
+      return false;
+    }
+    this.log(bot.id, bot.username, `@${message.username}`, "task", `${by}: team ${text}`.slice(0, 120));
+    return true;
+  }
+
+  private async startDirectTeam(runtime: BotRuntime, bot: StoredBot, message: InboundMessage, text: string, mentions: string[]): Promise<boolean> {
+    const target = this.taskTarget(runtime, bot, message);
+    this.activeTaskTarget = target;
+    this.taskFinalSent = false;
+    this.teamStartNotice = { target };
+    if (!startTeamFromRemote({ goal: text, mentions, via: { username: message.username, botName: bot.name } }).ok) {
+      this.activeTaskTarget = null;
+      this.teamStartNotice = null;
+      await this.reply(runtime, message, escapeMd(tg(tgLangFor(message.languageCode)).teamStartFailed));
+      return false;
+    }
+    this.log(bot.id, bot.username, `@${message.username}`, "task", text.slice(0, 120));
+    return true;
+  }
 
   // ================================================== lifecycle
 
@@ -116,10 +239,18 @@ class RemoteManager implements BotDelegate {
     }
     // auto-swap loudness: swaps and low-balance crossings reach Telegram too
     registerSwapRemoteNotifier((text) => {
+      if (!shouldRelayUnsolicitedNotice(isTeamRunActive())) return;
       for (const t of this.targets()) t.runtime.sendMd(t.chatId, escapeMd(sanitizeOutbound(text)));
     });
     // Team dispatch is desktop-only: no plan/progress push to Telegram.
-    registerTeamGateNotifier(() => {});
+    registerTeamGateNotifier((packet) => {
+      const notice = this.teamStartNotice;
+      if (!notice) return;
+      this.teamStartNotice = null;
+      const text = escapeMd(renderTelegramStartNotice(packet.slices.map((slice) => ({ id: slice.id, worker: slice.worker, title: slice.title, deps: slice.deps })), tgLangFor(notice.target.languageCode)));
+      if (notice.editMessageId !== undefined) void notice.target.runtime.editMd(notice.target.chatId, notice.editMessageId, text);
+      else void notice.target.runtime.sendMd(notice.target.chatId, text, undefined, notice.target.replyToMessageId);
+    });
     registerTeamEndNotifier((p) => {
       this.teamTaskActive = false;
       this.stopTyping();
@@ -132,6 +263,11 @@ class RemoteManager implements BotDelegate {
     registerTeamGateNotifier(null);
     registerTeamEndNotifier(null);
     registerDialogueTracker(null);
+    for (const entry of this.pending.drain()) {
+      if (entry.pickerMessageId === null) continue;
+      const { runtime, message } = entry.payload;
+      await runtime.editMd(message.chatId, entry.pickerMessageId, escapeMd(tg(tgLangFor(message.languageCode)).lostPendingTask));
+    }
     this.watch.dispose();
     // Flush a final broadcast if a task is mid-flight.
     const st = this.bridge.getStatus();
@@ -290,21 +426,37 @@ class RemoteManager implements BotDelegate {
   }
 
 
+  /** Restart every live runtime; the proxy agent is captured at Bot construction. */
+  private async bounceRuntimes(): Promise<void> {
+    const ids = [...this.runtimes.keys()];
+    await Promise.all(
+      ids.map((id) =>
+        this.queueBotOp(id, async () => {
+          const cur = loadStore();
+          const b = cur.bots.find((x) => x.id === id);
+          if (b && b.enabled && cur.globalEnabled) await this.spawnRuntime(b);
+        }),
+      ),
+    );
+  }
+
+  private maskProxy(url: string): string {
+    return url.replace(/\/\/[^@]*@/, "//***@");
+  }
+
   /**
-   * Set the telegram proxy and restart live runtimes so it takes effect
-   * immediately. When a proxy is set, probe api.telegram.org through it with
-   * a bogus token: ANY HTTP reply (401/404) proves the transport works;
-   * timeout/reset = the proxy itself is dead — reported instead of leaving
-   * bots to flap in `degraded`.
+   * Save the proxy URL. Reconnecting only matters while the proxy is ON: with
+   * the toggle off this is pure persistence, so the address survives for later.
+   * A live probe still guards an enabled proxy — a dead one must not silently
+   * kill every bot.
    */
   async setProxyUrl(url: string): Promise<{ ok: boolean; error?: string; probe?: string }> {
     const err = validateProxyUrl(url);
     if (err) return { ok: false, error: err };
     const store = loadStore();
     const trimmed = url.trim();
-    // probe BEFORE committing: a dead proxy must not silently kill all bots
     let probe: string | undefined;
-    if (trimmed) {
+    if (trimmed && store.proxyEnabled) {
       const prev = store.proxyUrl;
       store.proxyUrl = trimmed; // currentProxyAgent() reads the store
       try {
@@ -320,20 +472,38 @@ class RemoteManager implements BotDelegate {
     }
     store.proxyUrl = trimmed;
     saveStore();
-    this.log("", "", "system", "system", store.proxyUrl ? `telegram proxy set: ${store.proxyUrl.replace(/\/\/[^@]*@/, "//***@")}` : "telegram proxy cleared");
+    this.log("", "", "system", "system", trimmed ? `telegram proxy url saved: ${this.maskProxy(trimmed)}` : "telegram proxy url cleared");
     this.pushState();
-    // bounce every enabled runtime — the agent is captured at Bot construction
-    const ids = [...this.runtimes.keys()];
-    await Promise.all(
-      ids.map((id) =>
-        this.queueBotOp(id, async () => {
-          const cur = loadStore();
-          const b = cur.bots.find((x) => x.id === id);
-          if (b && b.enabled && cur.globalEnabled) await this.spawnRuntime(b);
-        }),
-      ),
-    );
+    if (store.proxyEnabled) await this.bounceRuntimes();
     return { ok: true, probe };
+  }
+
+  /**
+   * Flip the proxy on/off without touching the saved URL. Enabling without a
+   * usable address is refused so the UI never shows a half-broken state; the
+   * caller snaps its toggle back on `ok: false`.
+   */
+  async setProxyEnabled(enabled: boolean): Promise<{ ok: boolean; error?: string }> {
+    const store = loadStore();
+    if (enabled) {
+      const url = store.proxyUrl.trim();
+      if (!url) return { ok: false, error: "Proxy URL is empty — enter an address first" };
+      const invalid = validateProxyUrl(url);
+      if (invalid) return { ok: false, error: invalid };
+    }
+    if (store.proxyEnabled === enabled) return { ok: true };
+    store.proxyEnabled = enabled;
+    saveStore();
+    this.log(
+      "",
+      "",
+      "system",
+      "system",
+      enabled ? `telegram proxy enabled: ${this.maskProxy(store.proxyUrl)}` : "telegram proxy disabled — connecting directly",
+    );
+    this.pushState();
+    await this.bounceRuntimes();
+    return { ok: true };
   }
 
   /**
@@ -450,7 +620,53 @@ class RemoteManager implements BotDelegate {
 
   onGroupMessage(botId: string, gm: GroupMessage): void {
     this.relayPulse(botId);
-    this.watch.onGroupMessage(botId, gm);
+    const bot = loadStore().bots.find((candidate) => candidate.id === botId);
+    if (!bot) return;
+    const intake = classifyGroupMessage({
+      authorId: gm.authorId,
+      ownerIds: bot.paired.filter((user) => user.owner).map((user) => user.telegramId),
+      chatId: gm.chatId,
+      edit: gm.edit,
+      text: gm.text,
+      botUsername: gm.botUsername ?? bot.username,
+      mentionsBot: gm.mentionsBot,
+      replyToBot: gm.replyToBot,
+      ...(gm.migrateToChatId !== undefined ? { migrateToChatId: gm.migrateToChatId } : {}),
+    });
+    if (intake.action === "migrate") {
+      this.watch.onChatMigration(botId, gm.chatId, intake.toChatId);
+      return;
+    }
+    this.watch.onGroupMessage(botId, { ...gm, ownerHandled: intake.action === "route" });
+    if (intake.action === "blocked") {
+      if (shouldLogBlockedGroupUser(this.blockedGroupUsers, `${botId}:${gm.authorId}`)) {
+        this.log(botId, bot.username, `@${gm.author}`, "blocked-unauthorized", "group command ignored");
+      }
+      return;
+    }
+    if (intake.action === "ignore") return;
+    const rt = this.runtimes.get(botId);
+    if (
+      rt &&
+      shouldHintPrivacyMode({
+        coverage: this.watch.coverageFor(botId, gm.chatId),
+        addressed: intake.addressed,
+        hinted: this.privacyHinted,
+        key: `${botId}:${gm.chatId}`,
+      })
+    ) {
+      void rt.sendMd(gm.chatId, escapeMd(tg(tgLangFor(gm.languageCode)).privacyModeHint), undefined, gm.messageId);
+    }
+    this.onMessage(botId, {
+      userId: gm.authorId,
+      username: gm.author,
+      firstName: gm.author,
+      chatId: gm.chatId,
+      text: intake.text,
+      messageId: gm.messageId,
+      chatKind: gm.chatKind,
+      ...(gm.languageCode ? { languageCode: gm.languageCode } : {}),
+    });
   }
 
   onChatMember(botId: string, ev: { chatId: number; title: string; kind: "group" | "supergroup"; present: boolean }): void {
@@ -510,7 +726,7 @@ class RemoteManager implements BotDelegate {
 
   /** classify a paired-DM message, then answer / run / nudge / both */
   private async routeDm(botId: string, rt: BotRuntime, bot: StoredBot, msg: InboundMessage): Promise<void> {
-    const verdict = await routeIntent(msg.text, [], bot.username);
+    const verdict = await routeIntent(stripLeadingMentionsForIntent(msg.text), [], bot.username);
     const lang = tgLangFor(msg.languageCode);
     if (verdict.intent === "other") {
       // one-line nudge (spec §2) — never a task, never silence in a paired DM
@@ -536,21 +752,30 @@ class RemoteManager implements BotDelegate {
     }
   }
 
-  /** the pre-dialogue task path, verbatim: prompt / steer + logging + echo */
+  /** Telegram tasks pick Solo/Team unless roster mentions already decide. */
   private runDmTask(botId: string, rt: BotRuntime, bot: StoredBot, msg: InboundMessage, text: string): void {
     if (!this.bridge.getRoot()) {
-      rt.sendMd(msg.chatId, escapeMd("No workspace open in OMP IDE."));
+      void this.reply(rt, msg, escapeMd(tg(tgLangFor(msg.languageCode)).agentNotRunning));
       return;
     }
-    const st = this.bridge.getStatus();
-    const running = st?.state === "thinking" || st?.state === "tool";
-    const ok = this.bridge.prompt(text, { username: msg.username, botName: bot.name });
-    if (!ok) {
-      rt.sendMd(msg.chatId, escapeMd("Agent is not running in OMP IDE."));
+    const intake = classifyTaskIntake({
+      text,
+      roster: teamRoster(),
+      teamRunActive: isTeamRunActive(),
+      ...(this.bridge.getStatus()?.state ? { agentState: this.bridge.getStatus()!.state } : {}),
+    });
+    if (intake.kind === "steer") {
+      const ok = isTeamRunActive() ? steerTeamFromRemote(text) : this.bridge.prompt(text, { username: msg.username, botName: bot.name });
+      if (!ok) void this.reply(rt, msg, escapeMd(tg(tgLangFor(msg.languageCode)).agentNotRunning));
+      else this.log(botId, bot.username, `@${msg.username}`, "steer", text.slice(0, 120));
       return;
     }
-    this.log(botId, bot.username, `@${msg.username}`, running ? "steer" : "task", text.slice(0, 120));
-    this.echoToOthers(botId, { ...msg, text }, running ? "steer" : "task");
+    if (intake.kind === "team") {
+      this.pushRemoteAnswerToIde(msg.username, bot.name, text);
+      void this.startDirectTeam(rt, bot, msg, text, intake.mentions);
+      return;
+    }
+    void this.createModePicker(rt, bot, msg, text);
   }
 
   onCallback(botId: string, cb: InboundCallback): void {
@@ -563,6 +788,20 @@ class RemoteManager implements BotDelegate {
     if (this.watch.handleCallback(botId, cb.data, cb.username, cb.ack)) return;
     // team plan approval: team:<runId> | team:open (informational)
     // agent question buttons: ui:<reqId>:<optIndex|yes|no>
+    // Solo/Team picker: mode:<taskId>:solo|team
+    if (cb.data.startsWith("mode:")) {
+      const [, id, choice] = cb.data.split(":");
+      const L = tg(tgLangFor(cb.languageCode));
+      const claim = this.pending.claim(id, cb.userId);
+      if (!claim.ok) {
+        cb.ack(claim.reason === "foreign" ? L.pickerNotYours : L.pickerExpired);
+        if (claim.reason === "missing" && cb.messageId !== undefined) void rt.editMd(cb.chatId, cb.messageId, escapeMd(L.lostPendingTask));
+        return;
+      }
+      cb.ack();
+      void this.startPendingMode(claim.entry, choice === "team" ? "team" : "solo", `@${cb.username}`);
+      return;
+    }
     if (cb.data.startsWith("ui:")) {
       const [, reqId, choice] = cb.data.split(":");
       if (!this.currentUi || this.currentUi.id !== reqId) {
@@ -600,7 +839,7 @@ class RemoteManager implements BotDelegate {
       return;
     }
 
-    // /stop, /new confirmations: cfm:<token>:<yes|no>
+    // /new confirmations: cfm:<token>:<yes|no>
     if (cb.data.startsWith("cfm:")) {
       const [, token, choice] = cb.data.split(":");
       const pending = this.confirms.get(token);
@@ -610,16 +849,10 @@ class RemoteManager implements BotDelegate {
         return;
       }
       cb.ack("Confirmed");
-      if (pending.kind === "stop") {
-        this.bridge.abort();
-        this.log(botId, bot.username, `@${cb.username}`, "command", "/stop confirmed");
-        this.broadcastMd(escapeMd(`⏹ @${cb.username} stopped the agent.`));
-      } else {
-        this.bridge.newSession();
-        this.tracker.reset();
-        this.log(botId, bot.username, `@${cb.username}`, "command", "/new confirmed");
-        this.broadcastMd(escapeMd(`🔄 @${cb.username} started a new session.`));
-      }
+      this.bridge.newSession();
+      this.tracker.reset();
+      this.log(botId, bot.username, `@${cb.username}`, "command", "/new confirmed");
+      this.broadcastMd(escapeMd(`🔄 @${cb.username} started a new session.`));
       return;
     }
 
@@ -672,12 +905,48 @@ class RemoteManager implements BotDelegate {
       case "/help":
         rt.sendMd(msg.chatId, escapeMd(tg(tgLangFor(msg.languageCode)).help));
         return;
+      case "/solo": {
+        const L = tg(tgLangFor(msg.languageCode));
+        const parsed = parseSoloTask(msg.text);
+        if (!parsed.ok) {
+          void this.reply(rt, msg, escapeMd(L.soloUsage));
+          return;
+        }
+        if (isTeamRunActive()) {
+          void this.reply(rt, msg, escapeMd(L.teamAlreadyActive));
+          return;
+        }
+        this.activeTaskTarget = this.taskTarget(rt, bot, msg);
+        this.taskFinalSent = false;
+        const ok = this.bridge.prompt(parsed.task, { username: msg.username, botName: bot.name });
+        if (!ok) {
+          this.activeTaskTarget = null;
+          void this.reply(rt, msg, escapeMd(L.agentNotRunning));
+          return;
+        }
+        this.log(bot.id, bot.username, `@${msg.username}`, "task", `/solo ${parsed.task}`.slice(0, 120));
+        void this.reply(rt, msg, escapeMd(L.soloStarted));
+        return;
+      }
+      case "/team": {
+        const L = tg(tgLangFor(msg.languageCode));
+        const parsed = parseModeCommand(msg.text, "team");
+        if (!parsed.ok) {
+          void this.reply(rt, msg, escapeMd(L.teamUsage));
+          return;
+        }
+        if (isTeamRunActive()) {
+          void this.reply(rt, msg, escapeMd(L.teamAlreadyActive));
+          return;
+        }
+        void this.startDirectTeam(rt, bot, msg, parsed.task, extractRosterMentions(parsed.task, teamRoster()));
+        return;
+      }
       case "/status": {
         const team = teamJournalData();
         if (team && isTeamRunActive()) {
-          const L = tg(tgLangFor(msg.languageCode));
-          const rows = team.slices.map((s) => `${s.worker}: ${s.title} · ${L.teamState(s.state)}`);
-          rt.sendMd(msg.chatId, "```\n" + [`${L.teamLabel}: ${L.teamPhase(team.phase)}`, ...rows].join("\n").replace(/[`\\]/g, (c) => `\\${c}`) + "\n```");
+          const text = renderTelegramTeamStatus(team, tgLangFor(msg.languageCode));
+          rt.sendMd(msg.chatId, "```\n" + text.replace(/[`\\]/g, (c) => `\\${c}`) + "\n```");
           return;
         }
         const st = this.bridge.getStatus();
@@ -764,15 +1033,34 @@ class RemoteManager implements BotDelegate {
         return;
       }
       case "/stop": {
-        const st = this.bridge.getStatus();
-        if (!st || st.state === "idle" || st.state === "dead" || st.state === "unavailable") {
-          rt.sendMd(msg.chatId, escapeMd("Agent is not running."));
+        const L = tg(tgLangFor(msg.languageCode));
+        const pending = this.pending.cancelByChat(this.pendingChatKey(bot.id, msg.chatId));
+        if (pending) {
+          if (pending.pickerMessageId !== null) await rt.editMd(msg.chatId, pending.pickerMessageId, escapeMd(L.pickerCancelled));
+          this.log(bot.id, bot.username, `@${msg.username}`, "command", "/stop pending");
+          void this.reply(rt, msg, escapeMd(L.taskStopped));
           return;
         }
-        const token = String(++this.confirmSeq);
-        this.confirms.set(token, { kind: "stop", username: msg.username });
-        const kb = new InlineKeyboard().text("Yes, stop", `cfm:${token}:yes`).text("Cancel", `cfm:${token}:no`);
-        rt.sendMd(msg.chatId, escapeMd("Interrupt the running agent?"), kb);
+        if (stopTeamFromRemote()) {
+          this.teamTaskActive = false;
+          this.stopTyping();
+          this.taskFinalSent = true;
+          this.activeTaskTarget = null;
+          this.log(bot.id, bot.username, `@${msg.username}`, "command", "/stop team");
+          void this.reply(rt, msg, escapeMd(L.teamStopped));
+          return;
+        }
+        const st = this.bridge.getStatus();
+        const busy = st && (st.state === "thinking" || st.state === "tool" || st.state === "awaiting-input");
+        if (!busy || !this.bridge.abort()) {
+          void this.reply(rt, msg, escapeMd(L.nothingToStop));
+          return;
+        }
+        this.stopTyping();
+        this.taskFinalSent = true;
+        this.activeTaskTarget = null;
+        this.log(bot.id, bot.username, `@${msg.username}`, "command", "/stop");
+        void this.reply(rt, msg, escapeMd(L.taskStopped));
         return;
       }
       case "/new": {
@@ -864,7 +1152,8 @@ class RemoteManager implements BotDelegate {
   private refreshTyping(): void {
     const st = this.bridge.getStatus();
     if (!shouldSendTyping(st?.state, isTeamRunActive())) return;
-    for (const target of this.targets()) target.runtime.sendTyping(target.chatId);
+    const targets = this.activeTaskTarget ? [this.activeTaskTarget] : this.targets();
+    for (const target of targets) target.runtime.sendTyping(target.chatId);
   }
 
   private sendFinalOnce(final: string, elapsedMs = this.tracker.elapsedMs): void {
@@ -872,12 +1161,14 @@ class RemoteManager implements BotDelegate {
     this.taskFinalSent = true;
     const files = this.tracker.totals().files;
     const minutes = Math.max(1, Math.round(elapsedMs / 60000));
-    for (const target of this.targets()) {
+    const targets = this.activeTaskTarget ? [this.activeTaskTarget] : this.targets();
+    for (const target of targets) {
       const L = tg(tgLangFor(target.languageCode));
       const meta = [files ? `✓ ${L.files(files)}` : "✓", this.tracker.lastPassedCount ? L.passed(this.tracker.lastPassedCount) : "", L.minutes(minutes)].filter(Boolean).join(" · ");
       const text = `${mdToTelegram(final || L.taskDoneFallback)}\n\n\`${escapeMd(meta)}\``;
-      target.runtime.sendMd(target.chatId, text);
+      target.runtime.sendMd(target.chatId, text, undefined, target.replyToMessageId);
     }
+    this.activeTaskTarget = null;
   }
 
   private sendCompletionSummary(): void {
@@ -887,23 +1178,25 @@ class RemoteManager implements BotDelegate {
   private sendErrorOnce(): void {
     if (this.taskFinalSent) return;
     this.taskFinalSent = true;
-    for (const target of this.targets()) {
+    const targets = this.activeTaskTarget ? [this.activeTaskTarget] : this.targets();
+    for (const target of targets) {
       const L = tg(tgLangFor(target.languageCode));
-      target.runtime.sendMd(target.chatId, escapeMd(L.agentError));
+      target.runtime.sendMd(target.chatId, escapeMd(L.agentError), undefined, target.replyToMessageId);
     }
+    this.activeTaskTarget = null;
   }
 
   private onAgentQuestion(req: BridgeUiRequest): void {
     this.currentUi = req;
     this.stopTyping();
-    const targets = this.targets();
+    const targets = this.activeTaskTarget ? [this.activeTaskTarget] : this.targets();
     for (const target of targets) {
       const L = tg(tgLangFor(target.languageCode));
       const kb = new InlineKeyboard();
       if (req.method === "confirm") kb.text(L.yes, `ui:${req.id}:yes`).text(L.no, `ui:${req.id}:no`);
       else if (req.method === "select") (req.options ?? []).forEach((opt, i) => kb.text(opt.slice(0, 48), `ui:${req.id}:${i}`).row());
       const parts = [req.title ?? "Agent asks", sanitizeOutbound(req.message ?? ""), req.method === "input" || req.method === "editor" ? L.freeTextReply : ""].filter(Boolean);
-      target.runtime.sendMd(target.chatId, escapeMd(parts.join("\n")), req.method === "confirm" || req.method === "select" ? kb : undefined);
+      target.runtime.sendMd(target.chatId, escapeMd(parts.join("\n")), req.method === "confirm" || req.method === "select" ? kb : undefined, target.replyToMessageId);
     }
   }
 
@@ -945,6 +1238,7 @@ class RemoteManager implements BotDelegate {
     return {
       globalEnabled: store.globalEnabled,
       proxyUrl: store.proxyUrl,
+      proxyEnabled: store.proxyEnabled,
       bots: store.bots.map((b) => this.botInfo(b)),
       pairing: this.pairing
         ? { botId: this.pairing.botId, code: this.pairing.code, expiresAt: this.pairing.expiresAt }
@@ -1099,6 +1393,7 @@ export function registerRemoteHandlers(ipc: IpcMain): void {
   );
   ipc.handle("remote:setGlobalEnabled", async (_e, enabled: boolean) => m.setGlobalEnabled(enabled));
   ipc.handle("remote:setProxyUrl", async (_e, url: string) => m.setProxyUrl(url));
+  ipc.handle("remote:setProxyEnabled", async (_e, enabled: boolean) => m.setProxyEnabled(enabled));
   ipc.handle("remote:testProxy", async (_e, url: string) => m.testProxy(url));
   ipc.handle("remote:startPairing", async (_e, botId: string) => m.startPairing(botId));
   ipc.handle("remote:cancelPairing", async () => m.cancelPairing());

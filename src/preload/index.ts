@@ -176,6 +176,7 @@ const api: IdeApi = {
     setBotEnabled: (botId, enabled) => ipcRenderer.invoke("remote:setBotEnabled", botId, enabled),
     setGlobalEnabled: (enabled) => ipcRenderer.invoke("remote:setGlobalEnabled", enabled),
     setProxyUrl: (url) => ipcRenderer.invoke("remote:setProxyUrl", url),
+    setProxyEnabled: (enabled) => ipcRenderer.invoke("remote:setProxyEnabled", enabled),
     testProxy: (url) => ipcRenderer.invoke("remote:testProxy", url),
     startPairing: (botId): Promise<RemotePairing> => ipcRenderer.invoke("remote:startPairing", botId),
     cancelPairing: () => ipcRenderer.invoke("remote:cancelPairing"),

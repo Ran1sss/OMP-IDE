@@ -20,14 +20,17 @@ export interface StoredBot {
 
 export interface RemoteStore {
   globalEnabled: boolean;
-  /** telegram proxy url ("" = direct); http(s):// or socks(4/5):// */
+  /** telegram proxy url; kept verbatim when the proxy is switched off */
   proxyUrl: string;
+  /** route Telegram through proxyUrl; false = direct, url preserved */
+  proxyEnabled: boolean;
   bots: StoredBot[];
 }
 
 const DEFAULT_STORE: RemoteStore = {
   globalEnabled: true,
   proxyUrl: "",
+  proxyEnabled: false,
   bots: [],
 };
 
@@ -48,6 +51,8 @@ export function loadStore(): RemoteStore {
     storeCache = {
       globalEnabled: parsed.globalEnabled !== false,
       proxyUrl: typeof parsed.proxyUrl === "string" ? parsed.proxyUrl : "",
+      // pre-toggle installs stored a url only when they wanted it used
+      proxyEnabled: typeof parsed.proxyEnabled === "boolean" ? parsed.proxyEnabled : !!parsed.proxyUrl,
       bots: Array.isArray(parsed.bots) ? parsed.bots : [],
     };
   } catch {

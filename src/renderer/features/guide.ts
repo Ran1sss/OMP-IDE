@@ -13,6 +13,7 @@ import { state } from "../core/state";
 import { t } from "../core/i18n";
 import { openPalette, closePalette } from "./palette";
 import { toggleTerminal, isTerminalVisible } from "./terminal";
+import { TourRenderGate } from "./tour-render-gate";
 
 const DONE_KEY = "ompGuideDone.v2";
 
@@ -193,6 +194,7 @@ export function startTour(): void {
   /** Esc pressed once — inline exit confirm row */
   let confirmExit = false;
   let renderGen = 0;
+  const renderGate = new TourRenderGate();
 
   const root = el("div", { class: "og-root" });
   const hole = el("div", { class: "og-hole" });
@@ -253,6 +255,7 @@ export function startTour(): void {
     );
     placeCard(null);
     (card.querySelector("button") as HTMLElement)?.focus();
+    renderGate.settle();
     // a folder opened from the welcome screen resumes the tour by itself
     stopPausePoll();
     pausePoll = window.setInterval(() => {
@@ -344,6 +347,7 @@ export function startTour(): void {
       const rect2 = target && visible(target) ? target.getBoundingClientRect() : null;
       placeCard(rect2);
       (card.querySelector(".og-primary") as HTMLElement)?.focus();
+      renderGate.settle();
     }, s.before ? 320 : 0);
   }
 
@@ -373,27 +377,31 @@ export function startTour(): void {
 
   function next(): void {
     if (paused) return;
-    leaveStep();
-    dir = 1;
-    // welcome pause gate: no workspace → hold after the intro step
-    if (idx === 0 && !state.root && visible(q(".welcome"))) {
-      renderPause();
-      return;
-    }
-    if (idx < steps.length - 1) {
-      idx++;
-      render();
-    } else {
-      finish();
-    }
+    renderGate.tryNavigate(() => {
+      leaveStep();
+      dir = 1;
+      // welcome pause gate: no workspace → hold after the intro step
+      if (idx === 0 && !state.root && visible(q(".welcome"))) {
+        renderPause();
+        return;
+      }
+      if (idx < steps.length - 1) {
+        idx++;
+        render();
+      } else {
+        finish();
+      }
+    });
   }
 
   function back(): void {
     if (paused || idx === 0) return;
-    leaveStep();
-    dir = -1;
-    idx--;
-    render();
+    renderGate.tryNavigate(() => {
+      leaveStep();
+      dir = -1;
+      idx--;
+      render();
+    });
   }
 
   function onKey(e: KeyboardEvent): void {
@@ -437,6 +445,7 @@ export function startTour(): void {
   function finish(): void {
     if (!active) return;
     active = false;
+    renderGate.settle();
     stopPausePoll();
     leaveStep();
     document.removeEventListener("keydown", onKey, true);

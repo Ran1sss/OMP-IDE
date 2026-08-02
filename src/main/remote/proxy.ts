@@ -36,7 +36,8 @@ export function agentForUrl(url: string): Agent | undefined {
     : new HttpsProxyAgent(trimmed);
 }
 
-/** agent for the CURRENT stored proxy; undefined = direct */
+/** agent for the CURRENT stored proxy; undefined = direct (off or unset) */
 export function currentProxyAgent(): Agent | undefined {
-  return agentForUrl(loadStore().proxyUrl);
+  const store = loadStore();
+  return store.proxyEnabled ? agentForUrl(store.proxyUrl) : undefined;
 }

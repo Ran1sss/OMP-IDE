@@ -10,9 +10,11 @@ import type {
   TeamRunState,
   TeamSlice,
   TeamTimelineEntry,
+  RemoteVia,
 } from "../../shared/types";
 import { getAgentBridge, onNewSession, whichOmp, type AgentBridge } from "../omp-service";
 import { currentOmpPath } from "../store-service";
+import { shouldStallTeamLeadEnd } from "../../shared/agent-end";
 import { startWorker, killWorker, killAllWorkers, steerWorker, liveWorkerCount, liveWorkerPids } from "./worker-pool";
 
 /**
@@ -158,7 +160,7 @@ export function teamJournalData(): {
   goal: string;
   planSummary: string;
   feed: { author: string; text: string; at: number }[];
-  slices: { id: string; title: string; state: string; worker: string; add: number; del: number }[];
+  slices: { id: string; title: string; state: string; worker: string; deps: string[]; add: number; del: number }[];
   report: string | null;
   startedAt: number;
 } | null {
@@ -168,7 +170,7 @@ export function teamJournalData(): {
     goal: run.goal,
     planSummary: run.planSummary,
     feed: run.feed.slice(-20).map((f) => ({ author: f.author, text: f.text, at: f.at })),
-    slices: run.slices.map((s) => ({ id: s.id, title: s.title, state: s.state, worker: s.worker, add: s.add, del: s.del })),
+    slices: run.slices.map((s) => ({ id: s.id, title: s.title, state: s.state, worker: s.worker, deps: [...s.deps], add: s.add, del: s.del })),
     report: run.report,
     startedAt: run.startedAt,
   };
@@ -341,8 +343,7 @@ function applyMarker(raw: string): void {
       if (run.phase !== "route") break;
       let slices = normalizeSlices(ev.slices);
       const pinned = run.pinnedRoles ?? [];
-      const strictOnly = pinned.length === 1 && /\b(only|только)\b/i.test(run.goal);
-      if (strictOnly) slices = slices.filter((s) => s.worker.toLowerCase() === pinned[0]);
+      if (pinned.length) slices = slices.filter((s) => pinned.includes(s.worker.toLowerCase()));
       for (const role of pinned) {
         if (!slices.some((s) => s.worker.toLowerCase() === role)) {
           slices.push({ id: String.fromCharCode(65 + slices.length), title: run.goal.slice(0, 80), scope: run.goal, worker: role, deps: [], state: "pending", add: 0, del: 0 });
@@ -370,10 +371,16 @@ function applyMarker(raw: string): void {
         del: 0,
       }));
       run.phase = "gate";
-      run.graceUntil = Date.now() + GRACE_MS;
-      armGrace();
-      sysNote("роли распределены — можно изменить до старта");
-      gateNotifier?.({ runId: run.runId, goal: run.goal, summary: run.planSummary, slices: run.slices, solo: run.solo });
+      if (run.immediateStart && run.originVia) {
+        sysNote("roles assigned — dispatching immediately via Telegram");
+        gateNotifier?.({ runId: run.runId, goal: run.goal, summary: run.planSummary, slices: run.slices, solo: run.solo });
+        approve(`@${run.originVia.username} via Telegram`);
+      } else {
+        run.graceUntil = Date.now() + GRACE_MS;
+        armGrace();
+        sysNote("роли распределены — можно изменить до старта");
+        gateNotifier?.({ runId: run.runId, goal: run.goal, summary: run.planSummary, slices: run.slices, solo: run.solo });
+      }
       break;
     }
     case "worker": {
@@ -557,10 +564,6 @@ function onAgentEvent(e: OmpEvent): void {
         run.phase = "stopped";
         sysNote("run interrupted — board frozen in its last state");
       } else if (!sawContent && !poolActive && emptyRetries < 2 && (run.phase === "route" || run.phase === "execute" || run.phase === "verify")) {
-        // Empty turn: HTTP-success with ZERO streamed content — a proxy output
-        // filter ate the reply (observed live: echogate/claude-fable-5 cuts
-        // completions; the filter comes and goes). Retrying with an explicit
-        // nudge usually lands on a clean pass; markers are idempotent by design.
         emptyRetries++;
         sysNote(`the model returned an EMPTY turn (provider filter?) — retry ${emptyRetries}/2`);
         bridge!.prompt(
@@ -571,14 +574,10 @@ function onAgentEvent(e: OmpEvent): void {
       } else if (run.phase === "route") {
         run.phase = "stalled";
         sysNote("the routing turn ended without a plan — run stalled");
-      } else if ((run.phase === "execute" || run.phase === "verify") && !run.needsCall && !poolActive) {
-        // pool mode: the LEAD session ending a turn is normal — workers run in
-        // their own processes; only the lead-orchestrated path can stall here
+      } else if (shouldStallTeamLeadEnd(run.phase, poolActive, executionStarting, !!run.needsCall)) {
         run.phase = "stalled";
         sysNote("the execution turn ended without a report — run stalled");
       }
-      // gate: the deliberation turn legitimately ends after the plan event
-      // needs-call: the turn legitimately ends awaiting the user's decision
       pushState();
       break;
     }
@@ -699,6 +698,8 @@ function executionPrompt(r: TeamRunState): string {
 let poolActive = false;
 /** consecutive failure count per slice id (two → needs-call) */
 const failCounts = new Map<string, number>();
+/** true while the immediate plan approval resolves the OMP worker binary */
+let executionStarting = false;
 /** per-slice live diffstat accumulated from worker tool calls */
 const sliceRunStats = new Map<string, { add: number; del: number }>();
 
@@ -930,12 +931,16 @@ function finishParallelRun(): void {
   pushState();
 }
 
-/** Mechanism ladder entry: called from approve() when the probe failed. */
 async function beginParallelExecution(): Promise<void> {
   const r = run!;
+  executionStarting = true;
   const bin = await whichOmp(currentOmpPath());
+  if (!run || run !== r || run.phase !== "execute") {
+    executionStarting = false;
+    return;
+  }
   if (!bin) {
-    // rung 3 — honest solo with the ACTUAL reason
+    executionStarting = false;
     r.mechanism = { kind: "solo", active: 1, throttled: 0, reason: "omp not found" };
     sysNote("solo: omp not found — the lead session executes sequentially");
     bridge!.prompt(executionPrompt(r), undefined, { echo: false });
@@ -943,6 +948,7 @@ async function beginParallelExecution(): Promise<void> {
     return;
   }
   poolActive = true;
+  executionStarting = false;
   failCounts.clear();
   sliceRunStats.clear();
   r.timeline = [];
@@ -953,7 +959,14 @@ async function beginParallelExecution(): Promise<void> {
 
 // -------------------------------------------------- public actions
 
-function startRun(goal: string, mentions?: string[]): { ok: boolean; error?: string } {
+interface TeamStartOptions {
+  mentions?: string[];
+  via?: RemoteVia;
+  immediate?: boolean;
+  echo?: boolean;
+}
+
+function startRun(goal: string, options: TeamStartOptions = {}): { ok: boolean; error?: string } {
   const b = bridge!;
   const st = b.getStatus();
   if (!st || st.state === "unavailable" || st.state === "dead" || st.state === "starting")
@@ -965,7 +978,7 @@ function startRun(goal: string, mentions?: string[]): { ok: boolean; error?: str
   // the router decides. Only known roster ids count.
   const roster = teamRoster();
   const rosterIds = new Set(roster.map((r) => r.id));
-  const pinned = (mentions ?? []).map((m) => m.replace(/^@/, "").toLowerCase()).filter((m) => rosterIds.has(m));
+  const pinned = (options.mentions ?? []).map((m) => m.replace(/^@/, "").toLowerCase()).filter((m) => rosterIds.has(m));
   run = {
     runId: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
     goal: trimmed,
@@ -973,6 +986,8 @@ function startRun(goal: string, mentions?: string[]): { ok: boolean; error?: str
     solo: false,
     roster,
     pinnedRoles: pinned,
+    immediateStart: options.immediate === true,
+    ...(options.via ? { originVia: options.via } : {}),
     graceUntil: null,
     agents: [],
     slices: [],
@@ -986,7 +1001,7 @@ function startRun(goal: string, mentions?: string[]): { ok: boolean; error?: str
   turnSawContent = false;
   emptyRetries = 0;
   pushState(); // renderer knows this is a team run before the user echo lands
-  if (!b.prompt(routePrompt(trimmed, pinned), undefined, { displayText: trimmed })) {
+  if (!b.prompt(routePrompt(trimmed, pinned), options.via, { echo: options.echo, displayText: trimmed })) {
     run = null;
     pushState();
     return { ok: false, error: "failed to reach the agent process" };
@@ -1190,6 +1205,8 @@ function stopRun(): void {
   } else {
     bridge!.abort();
   }
+  for (const slice of run.slices) if (slice.state === "pending" || slice.state === "active") slice.state = "stopped";
+  for (const agent of run.agents) if (agent.state !== "done" && agent.state !== "failed") agent.state = "done";
   run.phase = "stopped";
   sysNote("run interrupted — board frozen in its last state");
   pushState();
@@ -1206,8 +1223,9 @@ function clearRun(): void {
 function restartRun(): { ok: boolean; error?: string } {
   if (!run) return { ok: false, error: "no run to restart" };
   const goal = run.goal;
+  const options: TeamStartOptions = { mentions: run.pinnedRoles, via: run.originVia, immediate: run.immediateStart };
   run = null;
-  return startRun(goal);
+  return startRun(goal, options);
 }
 
 // -------------------------------------------------- module surface
@@ -1215,6 +1233,25 @@ function restartRun(): { ok: boolean; error?: string } {
 export function approveTeamFromRemote(runId: string, by: string): { ok: boolean; error?: string } {
   if (!run || run.runId !== runId) return { ok: false, error: "that plan is no longer active" };
   return approve(by);
+}
+
+export function startTeamFromRemote(input: {
+  goal: string;
+  mentions?: string[];
+  via: RemoteVia;
+  echo?: boolean;
+}): { ok: boolean; error?: string } {
+  return startRun(input.goal, { mentions: input.mentions, via: input.via, immediate: true, echo: input.echo });
+}
+
+export function steerTeamFromRemote(text: string): boolean {
+  return steer(text);
+}
+
+export function stopTeamFromRemote(): boolean {
+  if (!run || !LIVE_PHASE[run.phase]) return false;
+  stopRun();
+  return true;
 }
 
 export function registerTeamHandlers(ipc: IpcMain): void {
@@ -1233,7 +1270,7 @@ export function registerTeamHandlers(ipc: IpcMain): void {
   ipc.handle("team:getState", async (): Promise<TeamRunState | null> => run);
   ipc.handle("team:roster", async (): Promise<TeamRole[]> => teamRoster());
   ipc.handle("team:start", async (_e, goal: string, mentions?: string[]) =>
-    startRun(String(goal ?? ""), Array.isArray(mentions) ? mentions.map(String) : undefined));
+    startRun(String(goal ?? ""), { mentions: Array.isArray(mentions) ? mentions.map(String) : undefined }));
   ipc.handle("team:hold", async () => holdDispatch());
   ipc.handle("team:steer", async (_e, text: string, target?: string) => steer(String(text ?? ""), typeof target === "string" ? target : undefined));
   ipc.handle("team:approve", async () => approve("IDE"));

@@ -9,6 +9,7 @@ import { app } from "electron";
 import * as fs from "node:fs";
 import { join } from "node:path";
 import type { ChatCoverage, RemoteProposal } from "../../shared/types";
+import { migrateGroupStore } from "../../shared/telegram-group";
 
 export interface WatchedChat {
   chatId: number;
@@ -105,4 +106,11 @@ export function upsertChat(botId: string, chat: WatchedChat): void {
   if (idx >= 0) list[idx] = chat;
   else list.push(chat);
   saveWatchStore();
+}
+
+export function migrateStoredGroup(botId: string, fromChatId: number, toChatId: number): boolean {
+  const store = loadWatchStore();
+  if (!migrateGroupStore(store, botId, fromChatId, toChatId)) return false;
+  saveWatchStore();
+  return true;
 }

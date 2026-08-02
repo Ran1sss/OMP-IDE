@@ -855,7 +855,13 @@ function renderDialog(): void {
         renderDialog();
       },
     });
-  const testerBtn = el("button", { class: "btn ck-tab", text: t("mdl.testerBtn"), title: t("mdl.testerTip"), onClick: () => openApiTester() });
+  const testerBtn = el(
+    "button",
+    { class: "btn ck-action", title: t("mdl.testerTip"), onClick: () => openApiTester() },
+    svgIcon(I.zap),
+    t("mdl.testerBtn"),
+  );
+  testerBtn.setAttribute("aria-haspopup", "dialog");
   dialogHead.append(
     el(
       "div",
@@ -863,8 +869,8 @@ function renderDialog(): void {
       el("h2", { text: t("mdl.title"), style: { margin: "0", flex: "1" } }),
       tabBtn("cockpit", t("mdl.tabCockpit")),
       tabBtn("profiles", t("mdl.tabProfiles")),
-      testerBtn,
       tabBtn("events", t("mdl.tabEvents")),
+      testerBtn,
       checkBtn,
     ),
   );

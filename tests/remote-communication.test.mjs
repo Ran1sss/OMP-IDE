@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { tg } from "../src/main/remote/tg-i18n.ts";
-import { shouldSendTyping } from "../src/shared/remote-communication.ts";
+import { shouldRelayUnsolicitedNotice, shouldSendTyping } from "../src/shared/remote-communication.ts";
 
 test("typing pauses while the agent awaits input, including Team runs", () => {
   assert.equal(shouldSendTyping("thinking", false), true);
@@ -9,6 +9,11 @@ test("typing pauses while the agent awaits input, including Team runs", () => {
   assert.equal(shouldSendTyping("awaiting-input", true), false);
   assert.equal(shouldSendTyping("idle", true), true);
   assert.equal(shouldSendTyping("idle", false), false);
+});
+
+test("unsolicited notices stay silent during a Team run", () => {
+  assert.equal(shouldRelayUnsolicitedNotice(false), true);
+  assert.equal(shouldRelayUnsolicitedNotice(true), false);
 });
 
 test("compact completion metadata is localized per recipient", () => {

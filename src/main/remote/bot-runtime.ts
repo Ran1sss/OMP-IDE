@@ -8,6 +8,7 @@ import { Bot, GrammyError, InlineKeyboard, InputFile, type Context } from "gramm
 import type { Message } from "grammy/types";
 import type { RemoteBotState } from "../../shared/types";
 import { currentProxyAgent } from "./proxy";
+import { telegramCommands } from "./tg-i18n";
 
 export interface InboundMessage {
   userId: number;
@@ -16,6 +17,10 @@ export interface InboundMessage {
   chatId: number;
   text: string;
   /** Telegram from.language_code — per-recipient fixed-string locale */
+  /** source message for threaded group replies */
+  messageId?: number;
+  /** originating chat kind; absent for legacy private callers */
+  chatKind?: "private" | "group" | "supergroup";
   languageCode?: string;
 }
 
@@ -26,6 +31,8 @@ export interface InboundCallback {
   chatId: number;
   data: string;
   /** Telegram from.language_code — per-recipient fixed-string locale */
+  /** source message for inline pickers; edits replace this exact message */
+  messageId?: number;
   languageCode?: string;
   /** answers the spinner on the client */
   ack(text?: string): void;
@@ -44,9 +51,17 @@ export interface GroupMessage {
   text: string;
   time: number;
   replyTo?: number;
+  /** bot username used to strip a privacy-safe @mention before task routing */
+  botUsername?: string;
+  /** service-message destination when a basic group upgrades to a supergroup */
+  migrateToChatId?: number;
+  /** paired owner traffic is handled by the direct task bridge, not listener proposals */
+  ownerHandled?: boolean;
   replyToBot: boolean;
   mentionsBot: boolean;
   edit: boolean;
+  /** author's Telegram language_code — localizes group-facing fixed strings */
+  languageCode?: string;
 }
 /** Manager-provided behavior; runtime stays transport-only. */
 export interface BotDelegate {
@@ -67,17 +82,6 @@ export interface BotDelegate {
   onStateChange(botId: string): void;
 }
 
-const COMMANDS = [
-  { command: "status", description: "Agent state, todo progress, workspace" },
-  { command: "todo", description: "Live todo list" },
-  { command: "stop", description: "Interrupt the running agent" },
-  { command: "new", description: "Start a fresh agent session" },
-  { command: "diff", description: "Diffstat of files touched this session" },
-  { command: "files", description: "Files touched by the agent" },
-  { command: "who", description: "Connected remote users" },
-  { command: "think", description: "Show or set the thinking level" },
-  { command: "help", description: "Command reference" },
-];
 
 const sleep = (ms: number) => {
   const { promise, resolve } = Promise.withResolvers<void>();
@@ -193,7 +197,7 @@ export class BotRuntime {
     const m = edit ? ctx.editedMessage : ctx.message;
     const from = m?.from;
     const chat = m?.chat;
-    if (!m || !from || !chat || from.is_bot) return;
+    if (!m || !chat) return;
     this.lastActivity = Date.now();
 
     // groups: everything (any sender, any content type) flows to the watch
@@ -211,17 +215,22 @@ export class BotRuntime {
         chatTitle: chat.title,
         chatKind: chat.type,
         messageId: m.message_id,
-        authorId: from.id,
-        author: from.username ?? from.first_name,
+        authorId: from?.id ?? 0,
+        author: from?.username ?? from?.first_name ?? "system",
+        botUsername: me,
+        ...(typeof m.migrate_to_chat_id === "number" ? { migrateToChatId: m.migrate_to_chat_id } : {}),
         text,
         time: (edit ? m.edit_date ?? m.date : m.date) * 1000,
         replyTo: m.reply_to_message?.message_id,
         replyToBot: m.reply_to_message?.from?.id === this.bot.botInfo?.id,
         mentionsBot,
         edit,
+        ...(from?.language_code ? { languageCode: from.language_code } : {}),
       });
       return;
     }
+
+    if (!from || from.is_bot) return;
 
     // private chats: EXACT pre-existing behavior (edits never re-route tasks)
     if (chat.type !== "private" || edit) return;
@@ -232,6 +241,8 @@ export class BotRuntime {
       username: from.username ?? String(from.id),
       firstName: from.first_name,
       chatId: chat.id,
+      messageId: m.message_id,
+      chatKind: "private",
       text,
       languageCode: from.language_code,
     };
@@ -264,6 +275,7 @@ export class BotRuntime {
       chatId,
       data,
       languageCode: from.language_code,
+      messageId: ctx.callbackQuery?.message?.message_id,
       ack: (text) => void ctx.answerCallbackQuery(text ? { text } : undefined).catch(() => {}),
     });
   }
@@ -303,7 +315,8 @@ export class BotRuntime {
     this.abort = new AbortController();
     try {
       await this.withTimeout(this.bot.init());
-      await this.withTimeout(this.bot.api.setMyCommands(COMMANDS, undefined));
+      await this.withTimeout(this.bot.api.setMyCommands(telegramCommands("ru"), undefined));
+      await this.withTimeout(this.bot.api.setMyCommands(telegramCommands("en"), { language_code: "en" }));
       if (!this.running) return; // stopped while initializing — stay stopped
     } catch (err) {
       if (!this.running) return; // stopped while initializing — stay stopped
@@ -405,7 +418,7 @@ export class BotRuntime {
   }
 
   /** Queued markdown send; resolves with message id or null on failure. */
-  sendMd(chatId: number, text: string, keyboard?: InlineKeyboard): Promise<number | null> {
+  sendMd(chatId: number, text: string, keyboard?: InlineKeyboard, replyToMessageId?: number): Promise<number | null> {
     const { promise, resolve } = Promise.withResolvers<number | null>();
     this.queue(chatId).push({
       run: async () => {
@@ -414,16 +427,17 @@ export class BotRuntime {
             this.bot.api.sendMessage(chatId, text, {
               parse_mode: "MarkdownV2",
               ...(keyboard ? { reply_markup: keyboard } : {}),
+              ...(replyToMessageId !== undefined ? { reply_parameters: { message_id: replyToMessageId } } : {}),
             }),
           );
           this.sessionMessages++;
           resolve(msg.message_id);
         } catch {
-          // fallback: plain text (escaping failure must not lose content)
           try {
             const msg = await this.withRetry(() =>
               this.bot.api.sendMessage(chatId, text.replace(/\\([_*[\]()~`>#+\-=|{}.!\\])/g, "$1"), {
                 ...(keyboard ? { reply_markup: keyboard } : {}),
+                ...(replyToMessageId !== undefined ? { reply_parameters: { message_id: replyToMessageId } } : {}),
               }),
             );
             this.sessionMessages++;
@@ -437,19 +451,25 @@ export class BotRuntime {
     return promise;
   }
 
-  /** Queued in-place edit; failures are silent (message may be unchanged). */
-  editMd(chatId: number, messageId: number, text: string): void {
+  /** Queued in-place edit. Omitting a keyboard removes existing buttons. */
+  editMd(chatId: number, messageId: number, text: string, keyboard?: InlineKeyboard): Promise<boolean> {
+    const { promise, resolve } = Promise.withResolvers<boolean>();
     this.queue(chatId).push({
       run: async () => {
         try {
           await this.withRetry(() =>
-            this.bot.api.editMessageText(chatId, messageId, text, { parse_mode: "MarkdownV2" }),
+            this.bot.api.editMessageText(chatId, messageId, text, {
+              parse_mode: "MarkdownV2",
+              reply_markup: keyboard ?? new InlineKeyboard(),
+            }),
           );
+          resolve(true);
         } catch {
-          // "message is not modified" and friends — ignore
+          resolve(false);
         }
       },
     });
+    return promise;
   }
 
   sendDocument(chatId: number, filename: string, content: string): void {

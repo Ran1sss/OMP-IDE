@@ -233,6 +233,14 @@ html, body {
 }
 .icon-btn:hover { background: var(--bg-2); color: var(--text-hi); }
 .icon-btn:active { background: var(--bg-2); }
+.icon-btn:disabled,
+.icon-btn:disabled:hover,
+.icon-btn:disabled:active {
+  color: var(--text-low);
+  background: transparent;
+  opacity: 0.42;
+  cursor: not-allowed;
+}
 .icon-btn svg { width: 15px; height: 15px; }
 
 /* ---------- inputs ---------- */
@@ -437,6 +445,14 @@ textarea.input { resize: none; line-height: 1.5; }
   flex-shrink: 0;
 }
 .toast .toast-close { margin-left: auto; }
+/* inline resolve-the-cause affordance; sits before the close glyph */
+.toast .toast-action {
+  margin-left: auto;
+  flex-shrink: 0;
+  padding: 2px 8px;
+  font-size: 10.5px;
+}
+.toast .toast-action + .toast-close { margin-left: 4px; }
 /* popover entrance (model-pop, ctx-menu, beacon-pop, notif-pop) */
 @keyframes toast-in {
   from { opacity: 0; transform: translateY(8px); }

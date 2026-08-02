@@ -587,6 +587,34 @@
 }
 .cc-proxy .input { flex: 1; font-size: 11px; }
 .cc-proxy .btn { padding: 3px 10px; }
+/* OFF is a resting state: the row reads as inactive but stays operable, so a
+   first-time address can be typed, saved and tested before enabling */
+.cc-proxy .input.dimmed { opacity: 0.5; }
+.cc-proxy .input.dimmed:focus { opacity: 1; }
+.cc-proxy .input.invalid { border-color: var(--crit); opacity: 1; }
+.cc-proxy-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10.5px;
+  color: var(--text-low);
+  white-space: nowrap;
+}
+.cc-proxy-status.bad { color: var(--crit); }
+.cc-proxy-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-low);
+  flex-shrink: 0;
+}
+.cc-proxy-dot.ok { background: var(--energy); }
+.cc-proxy-dot.bad { background: var(--crit); }
+.cc-proxy-error {
+  padding: 0 2px 6px;
+  font-size: 10.5px;
+  color: var(--crit);
+}
 
 .wc-remove { flex-shrink: 0; opacity: 0.55; }
 .wc-remove:hover { opacity: 1; color: var(--crit); }

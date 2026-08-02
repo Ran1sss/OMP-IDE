@@ -18,7 +18,7 @@ import { registerCommand, installKeybindings } from "./core/commands";
 import { t, applyLang, resolveLang } from "./core/i18n";
 import { toast, choiceDialog, installDialogEscape } from "./core/ui";
 import { initEditorArea, saveActive, saveAll, closeActiveTab, closeAllTabs, splitEditor, toggleWordWrap, zoomFont, goToLine, findInFile, hasDirtyTabs, relayoutEditors, activeFilePath, cycleTab, openMarkdownPreview, focusGroup } from "./features/editor";
-import { initExplorer, loadWorkspaceTree, collapseAll } from "./features/explorer";
+import { initExplorer, loadWorkspaceTree, collapseAll, createExplorerEntry } from "./features/explorer";
 import { initTerminal, toggleTerminal, createTerminal, disposeAllTerminals } from "./features/terminal";
 import { initSearchPanel, focusSearch, resetSearchPanel } from "./features/search";
 import { initGitPanel, refreshGit, switchBranch, onBranchChange } from "./features/git";
@@ -261,11 +261,15 @@ function switchView(id: ViewId | "agent") {
     id === "git" ? t("view.git") : t("view.remote");
   clear(sideActions);
   if (id === "explorer") {
+    const newFileBtn = el("button", { class: "icon-btn", title: t("explorer.newFile"), onClick: () => { if (state.root) void createExplorerEntry(state.root, "file"); } });
+    newFileBtn.append(svgIcon(I.newFile));
+    const newFolderBtn = el("button", { class: "icon-btn", title: t("explorer.newFolder"), onClick: () => { if (state.root) void createExplorerEntry(state.root, "folder"); } });
+    newFolderBtn.append(svgIcon(I.newFolder));
     const collapseBtn = el("button", { class: "icon-btn", title: t("chrome.collapseFolders"), onClick: () => collapseAll() });
     collapseBtn.append(svgIcon(I.collapse));
     const refreshBtn = el("button", { class: "icon-btn", title: t("chrome.refresh"), onClick: () => void loadWorkspaceTree() });
     refreshBtn.append(svgIcon(I.refresh));
-    sideActions.append(collapseBtn, refreshBtn);
+    sideActions.append(newFileBtn, newFolderBtn, collapseBtn, refreshBtn);
   }
   activeView = id;
   if (id === "search") focusSearch();

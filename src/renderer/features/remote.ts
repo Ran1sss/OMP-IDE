@@ -31,7 +31,7 @@ const BOT_GLYPH = `<rect x="3" y="5" width="10" height="8" rx="2"/><circle cx="6
 
 let ccRoot: HTMLElement | null = null;
 let feedEl: HTMLElement | null = null;
-let state: RemoteState = { globalEnabled: true, proxyUrl: "", bots: [], pairing: null };
+let state: RemoteState = { globalEnabled: true, proxyUrl: "", proxyEnabled: false, bots: [], pairing: null };
 let activity: RemoteActivityEvent[] = [];
 
 // pairing dialog live handles (so state pushes can flip it to "paired")
@@ -89,6 +89,48 @@ function switchEl(on: boolean, onToggle: (next: boolean) => void, title: string)
     }
   });
   return sw;
+}
+
+/**
+ * Live proxy status: off = direct, on + a degraded live bot = the proxy is the
+ * prime suspect, on otherwise = healthy. Derived from state, never stored.
+ */
+function proxyStatusEl(): HTMLElement {
+  if (!state.proxyEnabled) {
+    return el("span", { class: "cc-proxy-status" },
+      el("span", { class: "cc-proxy-dot direct" }),
+      el("span", { text: t("rc.proxyStatusDirect") }),
+    );
+  }
+  const failing = state.bots.some((b) => b.enabled && (b.state === "degraded" || b.state === "off"));
+  return el("span", { class: `cc-proxy-status${failing ? " bad" : ""}` },
+    el("span", { class: `cc-proxy-dot ${failing ? "bad" : "ok"}` }),
+    el("span", { text: failing ? t("rc.proxyStatusFailing") : t("rc.proxyStatusVia") }),
+  );
+}
+
+/**
+ * A bot dying while the proxy is on is almost always the proxy. Offer the
+ * single click that restores service; never auto-disable — the user decides.
+ * Fires on the transition only, so a persistently dead proxy nags once.
+ */
+function warnProxyFailure(prev: RemoteState, next: RemoteState): void {
+  if (!next.proxyEnabled) return;
+  const broke = (s: RemoteState): boolean => s.bots.some((b) => b.enabled && b.state === "degraded");
+  if (!broke(next) || (broke(prev) && prev.proxyEnabled)) return;
+  const detail = next.bots.find((b) => b.enabled && b.state === "degraded")?.detail ?? "";
+  toast(t("rc.proxyFailedToast", detail.slice(0, 80)), {
+    crit: true,
+    action: {
+      label: t("rc.proxyDisableAction"),
+      onClick: () => {
+        void window.ide.remote.setProxyEnabled(false).then((res) => {
+          if (res.ok) toast(t("rc.proxyDisabled"));
+          else toast(res.error ?? t("rc.invalidProxy"), { crit: true });
+        });
+      },
+    },
+  });
 }
 
 function timeShort(t: number): string {
@@ -522,7 +564,8 @@ function renderControlCenter(): void {
     ),
   );
 
-  // telegram proxy (api.telegram.org is blocked for many RF users)
+  // telegram proxy (api.telegram.org is blocked for many RF users): the toggle
+  // decides direct vs proxied, the field keeps the address either way
   const proxyInput = el("input", {
     class: "input mono",
     placeholder: t("rc.proxyPlaceholder"),
@@ -531,14 +574,32 @@ function renderControlCenter(): void {
   }) as HTMLInputElement;
   const proxyApply = el("button", { class: "btn", text: t("rc.apply") }) as HTMLButtonElement;
   const proxyTest = el("button", { class: "btn", text: t("rc.proxyTest"), title: t("rc.proxyTestTitle") }) as HTMLButtonElement;
+  const proxyError = el("div", { class: "cc-proxy-error", style: { display: "none" } });
+  const showProxyError = (message: string): void => {
+    proxyError.textContent = message;
+    proxyError.style.display = "";
+    proxyInput.classList.add("invalid");
+  };
+  const clearProxyError = (): void => {
+    proxyError.style.display = "none";
+    proxyInput.classList.remove("invalid");
+  };
   const applyProxy = () => {
     const url = proxyInput.value.trim();
     if (url === state.proxyUrl) return;
     proxyApply.disabled = true;
     void window.ide.remote.setProxyUrl(url).then((res) => {
       proxyApply.disabled = false;
-      if (res.ok) toast(url ? t("rc.proxyApplied", res.probe ?? t("rc.proxySetFallback")) : t("rc.proxyCleared"));
-      else toast(res.error ?? t("rc.invalidProxy"), { crit: true });
+      if (res.ok) {
+        clearProxyError();
+        // with the proxy off nothing reconnects — saying otherwise would lie
+        if (!url) toast(t("rc.proxyCleared"));
+        else if (state.proxyEnabled) toast(t("rc.proxyApplied", res.probe ?? t("rc.proxySetFallback")));
+        else toast(t("rc.proxySavedOff"));
+      } else {
+        showProxyError(res.error ?? t("rc.invalidProxy"));
+        toast(res.error ?? t("rc.invalidProxy"), { crit: true });
+      }
     });
   };
   const testProxy = () => {
@@ -553,15 +614,52 @@ function renderControlCenter(): void {
   proxyInput.addEventListener("keydown", (e) => {
     if (e.key === "Enter") applyProxy();
   });
+  proxyInput.addEventListener("input", clearProxyError);
+  // OFF is a resting state, not a locked one: the row dims, but the address
+  // stays editable and savable — otherwise a first-time proxy could never be
+  // entered, and "Применить saves while off" would be dead UI.
+  const proxyOn = state.proxyEnabled;
+  proxyInput.classList.toggle("dimmed", !proxyOn);
+  const proxyToggle = switchEl(proxyOn, (next) => {
+    // the URL must be usable before the switch means anything
+    if (next && !proxyInput.value.trim()) {
+      proxyToggle.classList.remove("on");
+      showProxyError(t("rc.proxyEmptyUrl"));
+      proxyInput.focus();
+      return;
+    }
+    const pending = next && proxyInput.value.trim() !== state.proxyUrl
+      ? window.ide.remote.setProxyUrl(proxyInput.value.trim())
+      : Promise.resolve({ ok: true } as { ok: boolean; error?: string });
+    void pending.then((saved) => {
+      if (!saved.ok) {
+        proxyToggle.classList.remove("on");
+        showProxyError(saved.error ?? t("rc.invalidProxy"));
+        return;
+      }
+      return window.ide.remote.setProxyEnabled(next).then((res) => {
+        if (res.ok) {
+          clearProxyError();
+          toast(next ? t("rc.proxyEnabled") : t("rc.proxyDisabled"));
+          return;
+        }
+        proxyToggle.classList.toggle("on", !next);
+        showProxyError(res.error ?? t("rc.invalidProxy"));
+      });
+    });
+  }, t("rc.proxyToggleTitle"));
   ccRoot.append(
     el(
       "div",
       { class: "cc-proxy" },
       el("span", { class: "cc-note", text: t("rc.proxy") }),
+      proxyToggle,
       proxyInput,
       proxyApply,
       proxyTest,
+      proxyStatusEl(),
     ),
+    proxyError,
   );
 
   const proposals = proposalsSection();
@@ -687,6 +785,7 @@ export function initRemote(container: HTMLElement): void {
     const prev = state;
     state = s;
     maybeCompletePairing(prev, s);
+    warnProxyFailure(prev, s);
     renderControlCenter();
     aggregateBeacon();
   });

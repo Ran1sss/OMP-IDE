@@ -14,6 +14,7 @@ import { emit, on } from "../core/bus";
 import { toast, confirmDialog, formDialog, inputDialog } from "../core/ui";
 import { t } from "../core/i18n";
 import type { TeamRunState, TeamSlice, TeamTimelineEntry } from "../../shared/types";
+import { extractRosterMentions } from "../../shared/team-remote";
 
 let panelEl: HTMLElement;
 let surfaceEl: HTMLElement;
@@ -121,7 +122,7 @@ export function teamConsumesPrompt(message: string): boolean {
   // @-mentions of roster roles pin those roles (manual override §5); no
   // mentions = the router auto-assigns. Mentions are matched against the
   // known roster ids so a stray @path (file) is ignored here.
-  const mentioned = extractAgentMentions(message);
+  const mentioned = extractRosterMentions(message, rosterIds);
   void window.ide.team.start(message, mentioned).then((r) => {
     if (!r.ok) toast(r.error ?? t("team.startFailed"), { crit: true });
   });
@@ -130,14 +131,6 @@ export function teamConsumesPrompt(message: string): boolean {
 
 /** roster role ids explicitly @-mentioned in the goal text (manual override) */
 let rosterIds: Set<string> = new Set();
-function extractAgentMentions(message: string): string[] {
-  const out = new Set<string>();
-  for (const m of message.matchAll(/@([a-z][\w-]*)/gi)) {
-    const id = m[1].toLowerCase();
-    if (rosterIds.has(id)) out.add(id);
-  }
-  return [...out];
-}
 
 // ---------------------------------------------------------------- state plumbing
 
@@ -228,6 +221,7 @@ function sliceStateLabel(st: string): string {
     case "done": return t("team.stDone");
     case "failed": return t("team.stFailed");
     case "replanned": return t("team.stReplanned");
+    case "stopped": return t("team.phaseStopped");
     default: return st;
   }
 }
@@ -369,7 +363,7 @@ function dispatchHeading(r: TeamRunState): string {
 function dispatchRow(s: TeamSlice, r: TeamRunState, editable: boolean): HTMLElement {
   const idx = r.slices.indexOf(s);
   const depNote = s.deps.length === 0 ? "" : s.deps.length === 1 ? t("team.afterOne", s.deps[0]) : t("team.afterMany");
-  const statusText = s.state === "active" ? t("team.dspWorking") : s.state === "done" ? t("team.dspStDone") : s.state === "failed" ? t("team.dspStFailed") : s.state === "replanned" ? t("team.dspStReplanned") : (idx === r.slices.length - 1 && r.slices.length > 1 ? t("team.dspLast") : (depNote || t("team.dspQueued")));
+  const statusText = r.phase === "stopped" && s.state === "stopped" ? t("team.phaseStopped") : s.state === "active" ? t("team.dspWorking") : s.state === "done" ? t("team.dspStDone") : s.state === "failed" ? t("team.dspStFailed") : s.state === "replanned" ? t("team.dspStReplanned") : (idx === r.slices.length - 1 && r.slices.length > 1 ? t("team.dspLast") : (depNote || t("team.dspQueued")));
   const statusCls = s.state === "active" ? "run" : s.state === "done" ? "ok" : s.state === "failed" ? "fail" : "wait";
   const row = el("div", { class: `dsp-row st-${s.state}` },
     el("span", { class: `dsp-chip agc-${(idx % 4) + 1}`, text: s.worker }),

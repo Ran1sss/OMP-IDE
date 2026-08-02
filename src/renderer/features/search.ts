@@ -10,12 +10,15 @@ import { state, baseName, relPath, dirName } from "../core/state";
 import { toast, confirmDialog } from "../core/ui";
 import { t } from "../core/i18n";
 import type { SearchMatch, ReplaceEdit } from "../../shared/types";
+import { formatSearchSummary } from "./search-summary";
+import { SearchResultState } from "./search-result-state";
 
 let panelEl: HTMLElement;
 let resultsEl: HTMLElement;
 let summaryEl: HTMLElement;
 let queryInput: HTMLTextAreaElement | HTMLInputElement;
 let replaceInput: HTMLInputElement;
+let replaceBtn: HTMLButtonElement;
 let includeInput: HTMLInputElement;
 let excludeInput: HTMLInputElement;
 
@@ -24,7 +27,9 @@ let caseOn = false;
 let currentSearch = 0;
 /** completed search with a real query — distinguishes "no query" from "0 hits" */
 let searchDone = false;
-let staleBar: HTMLElement | null = null;
+let searchHitLimit = false;
+let searchError: string | undefined;
+const resultState = new SearchResultState();
 let matchesByFile = new Map<string, SearchMatch[]>();
 let totalMatches = 0;
 /** match key -> excluded from replace */
@@ -80,28 +85,27 @@ function renderNoMatches() {
   );
 }
 
-function renderSummary(done: boolean, hitLimit: boolean, error?: string) {
-  clear(summaryEl);
-  if (error) {
-    summaryEl.append(el("span", { class: "warn", text: error }));
-    return;
-  }
-  const files = matchesByFile.size;
-  if (totalMatches === 0 && done) {
-    summaryEl.append(el("span", { text: t("search.noResults") }));
-    return;
-  }
-  if (totalMatches === 0) {
-    summaryEl.append(el("span", { text: t("search.searching") }));
-    return;
-  }
-  summaryEl.append(
-    el("span", {
-      class: "mono",
-      text: done ? t("search.summary", totalMatches, files) : `${t("search.summary", totalMatches, files)}…`,
-    }),
+function renderSummary() {
+  const formatted = formatSearchSummary(
+    {
+      matches: totalMatches,
+      files: matchesByFile.size,
+      done: searchDone,
+      hitLimit: searchHitLimit,
+      error: searchError,
+    },
+    {
+      noResults: t("search.noResults"),
+      searching: t("search.searching"),
+      summary: (matches, files) => t("search.summary", matches, files),
+      truncated: (matches, files) => t("search.truncated", matches, files),
+    },
   );
-  if (hitLimit) summaryEl.append(el("span", { class: "warn", text: ` ${t("search.limitReached")}` }));
+  clear(summaryEl);
+  summaryEl.append(el("span", {
+    class: formatted.warning ? "mono warn" : totalMatches > 0 ? "mono" : "",
+    text: formatted.text,
+  }));
 }
 
 function highlightSegments(m: SearchMatch, replacement: string | null): HTMLElement {
@@ -120,8 +124,20 @@ function highlightSegments(m: SearchMatch, replacement: string | null): HTMLElem
   return span;
 }
 
+function syncReplaceButton(): void {
+  replaceBtn.disabled = !resultState.canReplace;
+}
+
+function renderStaleGuard(): void {
+  if (!resultState.stale) return;
+  resultsEl.prepend(el(
+    "div",
+    { class: "search-stale" },
+    el("span", { text: t("search.stale") }),
+    el("button", { class: "btn", text: t("search.rerun"), onClick: () => void startSearch() }),
+  ));
+}
 function renderResults() {
-  staleBar = null; // clear() drops the node; a new fs event may re-add it
   clear(resultsEl);
   const replacing = replaceInput.value.length > 0;
   for (const [file, matches] of matchesByFile) {
@@ -168,6 +184,8 @@ function renderResults() {
     if (searchDone && queryInput.value.trim()) renderNoMatches();
     else renderEmptyHint();
   }
+  renderStaleGuard();
+  syncReplaceButton();
 }
 
 // ---------------------------------------------------------------- search driver
@@ -176,19 +194,22 @@ const runSearch = debounce(() => void startSearch(), 250);
 
 async function startSearch() {
   const pattern = queryInput.value;
+  resultState.startSearch();
   currentSearch++;
   const id = `s${currentSearch}`;
   matchesByFile = new Map();
   totalMatches = 0;
   excluded.clear();
   searchDone = false;
-  staleBar = null;
+  searchHitLimit = false;
+  searchError = undefined;
+  syncReplaceButton();
   if (!pattern.trim() || !state.root) {
     renderEmptyHint();
     return;
   }
   clear(resultsEl);
-  renderSummary(false, false);
+  renderSummary();
   await window.ide.search.start({
     id,
     pattern,
@@ -203,6 +224,7 @@ async function startSearch() {
 // ---------------------------------------------------------------- replace
 
 async function applyReplace() {
+  if (!resultState.canReplace) return;
   const replacement = replaceInput.value;
   const edits: ReplaceEdit[] = [];
   for (const matches of matchesByFile.values()) {
@@ -267,7 +289,7 @@ export function initSearchPanel(container: HTMLElement) {
     },
   }) as HTMLInputElement;
 
-  const replaceBtn = el("button", { class: "btn", text: t("search.replaceAll"), onClick: () => void applyReplace() });
+  replaceBtn = el("button", { class: "btn", text: t("search.replaceAll"), onClick: () => void applyReplace() }) as HTMLButtonElement;
   replaceInput = el("input", {
     class: "input mono",
     placeholder: t("search.replace"),
@@ -296,6 +318,7 @@ export function initSearchPanel(container: HTMLElement) {
     resultsEl,
   );
   renderEmptyHint();
+  syncReplaceButton();
   // live language switch: fixed strings of the stable inputs/buttons (fix 4)
   on("lang-changed", () => {
     queryInput.placeholder = t("search.placeholder");
@@ -305,7 +328,12 @@ export function initSearchPanel(container: HTMLElement) {
     caseBtn.title = t("search.matchCase");
     includeInput.placeholder = t("search.includePlaceholder");
     excludeInput.placeholder = t("search.excludePlaceholder");
-    if (!matchesByFile.size) renderEmptyHint();
+    if (!queryInput.value.trim()) {
+      renderEmptyHint();
+    } else {
+      renderResults();
+      renderSummary();
+    }
   });
 
   window.ide.search.onBatch((b) => {
@@ -317,26 +345,25 @@ export function initSearchPanel(container: HTMLElement) {
       totalMatches++;
     }
     renderResults();
-    renderSummary(false, false);
+    renderSummary();
   });
   window.ide.search.onDone((d) => {
     if (d.id !== `s${currentSearch}`) return;
     searchDone = true;
+    resultState.complete(Boolean(d.error));
+    searchHitLimit = d.hitLimit;
+    searchError = d.error;
     renderResults();
-    renderSummary(true, d.hitLimit, d.error);
+    renderSummary();
+    syncReplaceButton();
   });
 
   // Results silently rot when the workspace changes underneath them (agent
   // edits, terminal git ops). Mark them stale instead of pretending.
   on("fs-changed", () => {
-    if (!searchDone || !queryInput.value.trim() || staleBar) return;
-    staleBar = el(
-      "div",
-      { class: "search-stale" },
-      el("span", { text: t("search.stale") }),
-      el("button", { class: "btn", text: t("search.rerun"), onClick: () => void startSearch() }),
-    );
-    resultsEl.prepend(staleBar);
+    if (!searchDone || !queryInput.value.trim() || resultState.stale) return;
+    resultState.markStale();
+    renderResults();
   });
 }
 
@@ -348,11 +375,14 @@ export function resetSearchPanel(): void {
   excludeInput.value = "";
   currentSearch++; // orphan any in-flight stream
   searchDone = false;
-  staleBar = null;
+  searchHitLimit = false;
+  searchError = undefined;
+  resultState.reset();
   matchesByFile = new Map();
   totalMatches = 0;
   excluded.clear();
   renderEmptyHint();
+  syncReplaceButton();
 }
 
 export function focusSearch(seed?: string) {

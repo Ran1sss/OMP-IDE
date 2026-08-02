@@ -1023,6 +1023,7 @@ export async function closeTab(key: string, opts: { force?: boolean; group?: Edi
         { label: t("ed.closeAnyway"), value: "discard", danger: true },
         { label: t("ed.saveAndClose"), value: "save" },
       ],
+      restoreFocus: () => group.editor?.focus(),
     });
     if (choice === null) return false;
     if (choice === "save" && !(await saveTab(tab))) return false; // save failed: keep the tab

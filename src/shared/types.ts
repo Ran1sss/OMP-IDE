@@ -62,7 +62,7 @@ export interface SearchQuery {
 export interface SearchMatch {
   file: string;
   line: number;
-  /** byte column of first submatch start within the line (0-based char approximation) */
+  /** UTF-16 column within lineText, ready for JavaScript slicing and Monaco (0-based). */
   column: number;
   length: number;
   lineText: string;
@@ -323,8 +323,10 @@ export interface RemoteActivityEvent {
 
 export interface RemoteState {
   globalEnabled: boolean;
-  /** telegram proxy url ("" = direct); http(s):// or socks(4/5):// */
+  /** telegram proxy url; preserved even while the proxy is switched off */
   proxyUrl: string;
+  /** true = Telegram traffic routes through proxyUrl; false = direct */
+  proxyEnabled: boolean;
   bots: RemoteBotInfo[];
   /** live pairing if one is showing */
   pairing: RemotePairing | null;
@@ -723,7 +725,7 @@ export interface TeamAgent {
   lastActivity?: string;
 }
 
-export type TeamSliceState = "pending" | "active" | "done" | "failed" | "replanned";
+export type TeamSliceState = "pending" | "active" | "done" | "failed" | "replanned" | "stopped";
 
 export interface TeamSlice {
   id: string;
@@ -796,6 +798,10 @@ export interface TeamRunState {
   roster?: TeamRole[];
   /** explicit @role manual overrides fixed for this run */
   pinnedRoles?: string[];
+  /** Telegram-originated runs skip the IDE-only dispatch grace window. */
+  immediateStart?: boolean;
+  /** user-facing source of an externally started run (renders on the goal bubble). */
+  originVia?: RemoteVia;
   /** malformed transport payload intercepted before rendering; raw stays collapsed */
   protocolError?: { raw: string; at: number };
   agents: TeamAgent[];
@@ -943,6 +949,8 @@ export interface IdeApi {
     setGlobalEnabled(enabled: boolean): Promise<void>;
     /** telegram proxy ("" = direct); validates AND live-probes the proxy before committing */
     setProxyUrl(url: string): Promise<{ ok: boolean; error?: string; probe?: string }>;
+    /** flip the proxy on/off without erasing the url; refuses ON with an unusable url */
+    setProxyEnabled(enabled: boolean): Promise<{ ok: boolean; error?: string }>;
     /** probe api.telegram.org through a proxy URL ("" = direct) without committing or bouncing bots */
     testProxy(url: string): Promise<{ ok: boolean; detail: string }>;
     startPairing(botId: string): Promise<RemotePairing>;

@@ -21,6 +21,7 @@
  * back to the task/proposal flows unchanged.
  */
 
+import { isTaskImperative } from "../../shared/task-intent";
 import { runOneshot, smolSelector } from "../oneshot-runner";
 import { getAgentBridge } from "../omp-service";
 import { listSessionMetas, readSessionEntries } from "../session-history";
@@ -61,8 +62,6 @@ const INTENT_SYSTEM_V1 =
 const INTERROGATIVE_RE =
   /^(что|чего|как|почему|поч|зачем|когда|кто|где|какой|какая|какие|каков|сколько|куда|откуда|можешь ли|есть ли|расскажи|покажи|what|how|why|when|who|where|which|what's|whats|show|status|статус)\b/i;
 
-const IMPERATIVE_RE =
-  /^(добавь|сделай|исправь|поправь|почини|создай|удали|убери|напиши|запусти|перезапусти|переименуй|обнови|замени|отрефактори|разверни|задеплой|подними|установи|настрой|add|fix|make|create|implement|write|run|update|refactor|rename|delete|remove|deploy|build|change|setup|set|install|configure)\b/i;
 
 const NOISE_RE =
   /^(привет|здравствуй(те)?|хай|ку|спасибо|спс|благодарю|ок|окей|ладно|пока|hi|hello|hey|yo|thanks|thank you|ty|ok|okay|bye)[!.)\s]*$/i;
@@ -86,7 +85,7 @@ export function preCheckIntent(text: string, botUsername?: string): IntentVerdic
   // per-sentence scan: a question mark or interrogative head vs an imperative head
   const sentences = s.split(/[.!?;\n]+/).map((x) => x.trim()).filter(Boolean);
   const hasQ = /\?/.test(s) || INTERROGATIVE_RE.test(s);
-  const hasImp = sentences.some((x) => IMPERATIVE_RE.test(x));
+  const hasImp = sentences.some((x) => isTaskImperative(x));
   if (hasQ && !hasImp) return { intent: "question" };
   if (hasImp && !hasQ) return { intent: "task" };
   return null; // mixed or unclear → smol

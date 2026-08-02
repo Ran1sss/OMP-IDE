@@ -18,3 +18,12 @@ export function classifyTeamAgentEnd(phase: string | null): TeamAgentEndDecision
   if (phase === "route" || phase === "gate" || phase === "execute" || phase === "verify") return "continue";
   return phase === "stalled" ? "error" : "none";
 }
+
+export function shouldStallTeamLeadEnd(
+  phase: string,
+  poolActive: boolean,
+  executionStarting: boolean,
+  needsCall: boolean,
+): boolean {
+  return (phase === "execute" || phase === "verify") && !poolActive && !executionStarting && !needsCall;
+}

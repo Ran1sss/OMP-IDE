@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { classifyAgentEnd, classifyTeamAgentEnd } from "../src/shared/agent-end.ts";
+import { classifyAgentEnd, classifyTeamAgentEnd, shouldStallTeamLeadEnd } from "../src/shared/agent-end.ts";
 
 test("only the final stop reason classifies an agent failure", () => {
   assert.deepEqual(classifyAgentEnd("error", false), { aborted: false, failed: true });
@@ -27,4 +27,11 @@ test("only a stalled Team run emits a terminal error", () => {
   assert.equal(classifyTeamAgentEnd("done"), "none");
   assert.equal(classifyTeamAgentEnd(null), "none");
   assert.equal(classifyTeamAgentEnd("unknown"), "none");
+});
+
+test("an immediate Team execution bootstrap does not stall on the lead agent end", () => {
+  assert.equal(shouldStallTeamLeadEnd("execute", false, true, false), false);
+  assert.equal(shouldStallTeamLeadEnd("execute", false, false, false), true);
+  assert.equal(shouldStallTeamLeadEnd("verify", true, false, false), false);
+  assert.equal(shouldStallTeamLeadEnd("execute", false, false, true), false);
 });

@@ -9,6 +9,7 @@ import { state, baseName, dirName, normPath, joinPath, SEP } from "../core/state
 import { toast, confirmDialog, contextMenu, inputDialog, errorText } from "../core/ui";
 import { t } from "../core/i18n";
 import { setMentionDragData } from "./mentions";
+import { workspaceRootCreateKinds } from "./explorer-root-actions";
 import type { DirEntry, GitFileStatus } from "../../shared/types";
 
 interface TreeNode {
@@ -381,8 +382,8 @@ function showNodeMenu(node: TreeNode, x: number, y: number) {
     ...(node.isDir
       ? []
       : [{ label: t("explorer.open"), action: () => emit("open-file", { path: node.path }) }]),
-    { label: t("explorer.newFile"), action: () => void createIn(dirForNew, "file") },
-    { label: t("explorer.newFolder"), action: () => void createIn(dirForNew, "folder") },
+    { label: t("explorer.newFile"), action: () => void createExplorerEntry(dirForNew, "file") },
+    { label: t("explorer.newFolder"), action: () => void createExplorerEntry(dirForNew, "folder") },
     { separator: true },
     { label: t("explorer.rename"), key: "F2", action: () => startRename(node) },
     { label: t("explorer.copyPath"), action: () => void navigator.clipboard.writeText(node.path) },
@@ -397,7 +398,7 @@ function showNodeMenu(node: TreeNode, x: number, y: number) {
   ]);
 }
 
-async function createIn(dir: string, kind: "file" | "folder") {
+export async function createExplorerEntry(dir: string, kind: "file" | "folder") {
   const name = await inputDialog({
     title: kind === "file" ? t("explorer.newFileTitle") : t("explorer.newFolderTitle"),
     placeholder: kind === "file" ? t("explorer.newFilePlaceholder") : t("explorer.newFolderPlaceholder"),
@@ -506,6 +507,17 @@ function attributionFor(path: string): "agent" | "user" | "external" {
 export function initExplorer(container: HTMLElement) {
   treeEl = container;
   treeEl.classList.add("tree");
+  treeEl.addEventListener("contextmenu", (e) => {
+    if (e.target !== treeEl) return;
+    const root = state.root;
+    const kinds = workspaceRootCreateKinds(root);
+    if (!root || !kinds.length) return;
+    e.preventDefault();
+    contextMenu(e.clientX, e.clientY, kinds.map((kind) => ({
+      label: kind === "file" ? t("explorer.newFile") : t("explorer.newFolder"),
+      action: () => void createExplorerEntry(root, kind),
+    })));
+  });
 
   treeEl.addEventListener("dragover", (e) => {
     if (e.dataTransfer?.types.includes("omp/path") && e.target === treeEl) {

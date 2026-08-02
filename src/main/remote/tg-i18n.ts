@@ -11,6 +11,30 @@ export function tgLangFor(languageCode: string | undefined): TgLang {
   return languageCode?.toLowerCase().startsWith("ru") ? "ru" : "en";
 }
 
+export interface TelegramCommand {
+  command: string;
+  description: string;
+}
+
+const COMMAND_NAMES = ["solo", "team", "status", "stop", "todo", "new", "diff", "files", "who", "think", "help"] as const;
+export function telegramCommands(lang: TgLang): TelegramCommand[] {
+  const descriptions: Record<(typeof COMMAND_NAMES)[number], [ru: string, en: string]> = {
+    solo: ["Запустить задачу одним агентом", "Run a task with one agent"],
+    team: ["Запустить задачу через команду", "Run a task through Team routing"],
+    status: ["Статус агента или команды", "Agent or Team status"],
+    stop: ["Остановить текущую задачу или команду", "Stop the current task or Team run"],
+    todo: ["Живой список задач", "Live todo list"],
+    new: ["Начать новую сессию агента", "Start a fresh agent session"],
+    diff: ["Изменения файлов за сессию", "Diffstat for touched files"],
+    files: ["Файлы, изменённые агентом", "Files touched by the agent"],
+    who: ["Подключённые пользователи", "Connected remote users"],
+    think: ["Показать или задать уровень размышлений", "Show or set the thinking level"],
+    help: ["Справка по командам", "Command reference"],
+  };
+  const index = lang === "ru" ? 0 : 1;
+  return COMMAND_NAMES.map((command) => ({ command, description: descriptions[command][index] }));
+}
+
 interface TgStrings {
   doIt: string;
   skip: string;
@@ -32,6 +56,23 @@ interface TgStrings {
   taskDoneFallback: string;
   agentError: string;
   freeTextReply: string;
+  soloUsage: string;
+  teamStopped: string;
+  teamAlreadyActive: string;
+  teamStartFailed: string;
+  taskStopped: string;
+  modePicker: string;
+  soloStarted: string;
+  pickerCancelled: string;
+  lostPendingTask: string;
+  pickerExpired: string;
+  pickerNotYours: string;
+  pickerSolo: string;
+  pickerTeam: string;
+  /** shown once per group when privacy mode hides plain messages */
+  privacyModeHint: string;
+  teamUsage: string;
+  nothingToStop: string;
   paired: (bot: string) => string;
   alreadyPaired: string;
   unknownCommand: string;
@@ -75,13 +116,32 @@ const RU: TgStrings = {
   taskDoneFallback: "Задача завершена.",
   agentError: "Задача остановилась: агент завершился с ошибкой.",
   freeTextReply: "Ответьте обычным сообщением.",
+  soloUsage: "Использование: /solo <задача>",
+  teamStopped: "Команда остановлена.",
+  teamAlreadyActive: "Команда уже выполняется — сначала используйте /stop.",
+  teamStartFailed: "Не удалось запустить команду.",
+  taskStopped: "Задача остановлена.",
+  nothingToStop: "Сейчас ничего не выполняется.",
+  modePicker: "Задачу принял. Как выполнить? (через минуту запущу соло)",
+  soloStarted: "⚡ Взял соло",
+  pickerCancelled: "Отменено",
+  lostPendingTask: "IDE закрылся, задача не запущена — пришли заново.",
+  pickerExpired: "Выбор больше не активен",
+  pickerNotYours: "Это не ваша задача",
+  teamUsage: "Использование: /team <задача>",
+  pickerSolo: "⚡ Соло",
+  pickerTeam: "⚑ Команда",
+  privacyModeHint:
+    "Здесь у меня приватный режим: обычные сообщения группы до меня не доходят. Пиши через @упоминание, ответом на моё сообщение или командой — либо выключи Group Privacy у @BotFather (или сделай меня админом).",
   paired: (bot) => `Готово. Теперь вы управляете агентом OMP через @${bot}. Отправьте задачу обычным сообщением или /help.`,
   alreadyPaired: "Уже подключены. Отправьте задачу обычным сообщением или /help.",
   unknownCommand: "Неизвестная команда. /help покажет всё.",
   help: [
     "Любое обычное сообщение — задача (или подсказка, пока агент работает; или ответ, когда он спрашивает).",
     "",
+    "/solo <задача> — выполнить одним агентом без маршрутизации",
     "/status — состояние агента, прогресс, рабочая область",
+    "/team <задача> — выполнить через маршрутизацию команды",
     "/todo — живой список задач",
     "/stop — прервать агента (с подтверждением)",
     "/new — новая сессия агента (с подтверждением)",
@@ -132,15 +192,34 @@ const EN: TgStrings = {
   taskDoneFallback: "Task completed.",
   agentError: "The task stopped because the agent failed.",
   freeTextReply: "Reply with a plain message.",
+  soloUsage: "Usage: /solo <task>",
+  teamStopped: "Team run stopped.",
+  teamAlreadyActive: "A Team run is already active. Use /stop first.",
+  teamStartFailed: "Failed to start the Team run.",
+  taskStopped: "Task stopped.",
+  nothingToStop: "Nothing is running.",
   paired: (bot) => `Paired. You now control the OMP agent through @${bot}. Send a task as a plain message, or /help.`,
+  modePicker: "Task accepted. How should I run it? (I’ll start solo in one minute)",
+  soloStarted: "⚡ Running solo",
+  pickerCancelled: "Cancelled",
+  lostPendingTask: "IDE closed, task was not started — send it again.",
+  pickerExpired: "That choice is no longer active",
+  pickerNotYours: "Not your task",
+  teamUsage: "Usage: /team <task>",
+  pickerSolo: "⚡ Solo",
+  pickerTeam: "⚑ Team",
   alreadyPaired: "Already paired. Send a task as a plain message, or /help.",
+  privacyModeHint:
+    "Privacy mode is on here, so plain group messages never reach me. Use an @mention, a reply to my message, or a command — or turn Group Privacy off in @BotFather (or make me an admin).",
   unknownCommand: "Unknown command. /help lists everything.",
   help: [
     "Send any plain message — it becomes a task (or steering while the agent runs, or an answer when it asks).",
     "",
+    "/solo <task> — run with one agent and bypass routing",
     "/status — agent state, todo progress, workspace",
     "/todo — live todo list",
-    "/stop — interrupt the agent (confirm)",
+    "/team <task> — run through Team routing",
+    "/stop — interrupt the current task or Team run",
     "/new — fresh agent session (confirm)",
     "/diff — diffstat; buttons return per-file patches",
     "/files — files touched this session",

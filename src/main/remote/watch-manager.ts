@@ -14,6 +14,7 @@
 import { BrowserWindow } from "electron";
 import { InlineKeyboard } from "grammy";
 import type {
+  ChatCoverage,
   RemoteChatInfo,
   RemoteChatLogEntry,
   RemoteProposal,
@@ -27,6 +28,7 @@ import {
   saveWatchStore,
   findChat,
   upsertChat,
+  migrateStoredGroup,
   type WatchedChat,
   type StoredProposal,
 } from "./watch-store";
@@ -131,6 +133,20 @@ export class WatchManager {
     this.pushWatchState();
   }
 
+  onChatMigration(botId: string, fromChatId: number, toChatId: number): void {
+    const oldKey = `${botId}:${fromChatId}`;
+    const nextKey = `${botId}:${toChatId}`;
+    const volatile = this.volatile.get(oldKey);
+    if (volatile) {
+      this.volatile.delete(oldKey);
+      this.volatile.set(nextKey, volatile);
+    }
+    if (migrateStoredGroup(botId, fromChatId, toChatId)) {
+      this.host.log(botId, "system", `group migrated ${fromChatId} → ${toChatId}`);
+      this.pushWatchState();
+    }
+  }
+
   onGroupMessage(botId: string, gm: GroupMessage): void {
     let chat = findChat(botId, gm.chatId);
     if (!chat) {
@@ -177,6 +193,10 @@ export class WatchManager {
     appendChatLog(botId, gm.chatId, entry);
     chat.messageCount++;
     saveWatchStore();
+    if (gm.ownerHandled) {
+      this.pushWatchState();
+      return;
+    }
 
     // 2. addressed / explicit-task path — `omp:` stays a deterministic task
     //    marker; mentions and replies-to-bot route through the Chat Dialogue
@@ -562,6 +582,11 @@ export class WatchManager {
       this.host.log(botId, "system", "frozen proposals revived — approver designated");
       this.pushWatchState();
     }
+  }
+
+  /** coverage as last probed; "limited" until proven otherwise */
+  coverageFor(botId: string, chatId: number): ChatCoverage {
+    return findChat(botId, chatId)?.coverage ?? "limited";
   }
 
   // ================================================== coverage

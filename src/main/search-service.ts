@@ -20,7 +20,47 @@ function resolveRipgrep(): string | null {
 }
 
 const running = new Map<string, ChildProcessWithoutNullStreams>();
-const MATCH_LIMIT = 5000;
+
+export const SEARCH_RESULT_LIMIT = 500;
+
+/** Retain a bounded result set while using the next match as proof of truncation. */
+export class SearchMatchCap {
+  readonly limit: number;
+  kept = 0;
+  hitLimit = false;
+
+  constructor(limit = SEARCH_RESULT_LIMIT) {
+    this.limit = limit;
+  }
+
+  accept(): boolean {
+    if (this.kept < this.limit) {
+      this.kept++;
+      return true;
+    }
+    this.hitLimit = true;
+    return false;
+  }
+}
+
+/** Convert ripgrep's UTF-8 byte offsets to JavaScript/Monaco UTF-16 offsets. */
+export function utf8SpanToUtf16(text: string, byteStart: number, byteEnd: number): { column: number; length: number } {
+  let bytes = 0;
+  let start = text.length;
+  let end = text.length;
+  for (let i = 0; i <= text.length;) {
+    if (bytes === byteStart) start = i;
+    if (bytes === byteEnd) {
+      end = i;
+      break;
+    }
+    if (i === text.length) break;
+    const cp = text.codePointAt(i)!;
+    bytes += cp <= 0x7f ? 1 : cp <= 0x7ff ? 2 : cp <= 0xffff ? 3 : 4;
+    i += cp > 0xffff ? 2 : 1;
+  }
+  return { column: start, length: Math.max(0, end - start) };
+}
 
 interface RgSubmatch { start: number; end: number }
 interface RgMatchData {
@@ -38,15 +78,14 @@ export function registerSearchHandlers(ipc: IpcMain) {
 
     const rg = resolveRipgrep();
     if (!rg) {
-      // JS fallback: naive scan. Slow but functional.
-      await jsFallbackSearch(q, (matches) => {
+      const hitLimit = await jsFallbackSearch(q, (matches) => {
         if (!wc.isDestroyed()) wc.send("search:batch", { id: q.id, matches });
       });
-      if (!wc.isDestroyed()) wc.send("search:done", { id: q.id, hitLimit: false });
+      if (!wc.isDestroyed()) wc.send("search:done", { id: q.id, hitLimit });
       return;
     }
 
-    const args = ["--json", "--max-count", "500", "--max-columns", "500"];
+    const args = ["--json", "--max-count", String(SEARCH_RESULT_LIMIT + 1), "--max-columns", "500"];
     if (!q.caseSensitive) args.push("--ignore-case");
     if (!q.regex) args.push("--fixed-strings");
     if (q.include.trim()) {
@@ -64,7 +103,7 @@ export function registerSearchHandlers(ipc: IpcMain) {
     const proc = spawn(rg, args, { windowsHide: true });
     running.set(q.id, proc);
 
-    let total = 0;
+    const cap = new SearchMatchCap();
     let buf = "";
     let batch: SearchMatch[] = [];
     let flushTimer: NodeJS.Timeout | null = null;
@@ -79,6 +118,7 @@ export function registerSearchHandlers(ipc: IpcMain) {
 
     proc.stdout.setEncoding("utf-8");
     proc.stdout.on("data", (chunk: string) => {
+      if (cap.hitLimit) return;
       buf += chunk;
       let nl: number;
       while ((nl = buf.indexOf("\n")) >= 0) {
@@ -93,21 +133,23 @@ export function registerSearchHandlers(ipc: IpcMain) {
         }
         if (obj.type !== "match" || !obj.data) continue;
         const d = obj.data;
-        const lineText: string = d.lines.text ?? "";
+        const rawLineText: string = d.lines.text ?? "";
+        const lineText = rawLineText.replace(/\r?\n$/, "");
         for (const sm of d.submatches ?? []) {
-          batch.push({
-            file: d.path.text,
-            line: d.line_number,
-            column: sm.start,
-            length: sm.end - sm.start,
-            lineText: lineText.replace(/\r?\n$/, ""),
-          });
-          total++;
-          if (total >= MATCH_LIMIT) {
+          if (!cap.accept()) {
             proc.kill();
             break;
           }
+          const span = utf8SpanToUtf16(rawLineText, sm.start, sm.end);
+          batch.push({
+            file: d.path.text,
+            line: d.line_number,
+            column: span.column,
+            length: span.length,
+            lineText,
+          });
         }
+        if (cap.hitLimit) break;
       }
       if (!flushTimer) flushTimer = setTimeout(flush, 40);
     });
@@ -122,8 +164,8 @@ export function registerSearchHandlers(ipc: IpcMain) {
       flush();
       if (!wc.isDestroyed()) {
         // rg exits 1 on "no matches", 2 on error
-        const error = code === 2 && total === 0 ? stderr.slice(0, 400) || "search failed" : undefined;
-        wc.send("search:done", { id: q.id, hitLimit: total >= MATCH_LIMIT, error });
+        const error = code === 2 && cap.kept === 0 ? stderr.slice(0, 400) || "search failed" : undefined;
+        wc.send("search:done", { id: q.id, hitLimit: cap.hitLimit, error });
       }
     });
   });
@@ -187,18 +229,18 @@ const FALLBACK_SKIP: Record<string, true> = {
 async function jsFallbackSearch(
   q: SearchQuery,
   emit: (matches: SearchMatch[]) => void,
-): Promise<void> {
+): Promise<boolean> {
   let re: RegExp;
   try {
     re = q.regex
       ? new RegExp(q.pattern, q.caseSensitive ? "g" : "gi")
       : new RegExp(q.pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), q.caseSensitive ? "g" : "gi");
   } catch {
-    return;
+    return false;
   }
-  let total = 0;
+  const cap = new SearchMatchCap();
   async function walk(dir: string) {
-    if (total >= MATCH_LIMIT) return;
+    if (cap.hitLimit) return;
     let entries;
     try {
       entries = await fs.readdir(dir, { withFileTypes: true });
@@ -206,7 +248,7 @@ async function jsFallbackSearch(
       return;
     }
     for (const d of entries) {
-      if (total >= MATCH_LIMIT) return;
+      if (cap.hitLimit) return;
       if (FALLBACK_SKIP[d.name] === true || d.name.startsWith(".")) continue;
       const p = join(dir, d.name);
       if (d.isDirectory()) {
@@ -228,6 +270,7 @@ async function jsFallbackSearch(
         re.lastIndex = 0;
         let m: RegExpExecArray | null;
         while ((m = re.exec(lines[i]))) {
+          if (!cap.accept()) break;
           matches.push({
             file: p,
             line: i + 1,
@@ -235,14 +278,13 @@ async function jsFallbackSearch(
             length: m[0].length || 1,
             lineText: lines[i],
           });
-          total++;
           if (m[0].length === 0) re.lastIndex++;
-          if (total >= MATCH_LIMIT) break;
         }
-        if (total >= MATCH_LIMIT) break;
+        if (cap.hitLimit) break;
       }
       if (matches.length) emit(matches);
     }
   }
   await walk(q.root);
+  return cap.hitLimit;
 }

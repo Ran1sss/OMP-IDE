@@ -3,6 +3,7 @@
 import { el, clear, svgIcon } from "./dom";
 import { I } from "./icons";
 import { t } from "./i18n";
+import { restoreDialogFocus } from "./dialog-focus";
 
 // ---------------------------------------------------------------- toasts
 
@@ -37,7 +38,13 @@ export function onNotificationLogChange(cb: () => void): void {
   notifSubscribers.add(cb);
 }
 
-export function toast(message: string, opts: { crit?: boolean } = {}): void {
+export interface ToastOptions {
+  crit?: boolean;
+  /** one inline affordance that resolves the toast's cause in a single click */
+  action?: { label: string; onClick: () => void };
+}
+
+export function toast(message: string, opts: ToastOptions = {}): void {
   notifLog.unshift({ message, crit: !!opts.crit, at: Date.now() });
   if (notifLog.length > NOTIF_CAP) notifLog.length = NOTIF_CAP;
   notifyLogChange();
@@ -67,23 +74,32 @@ export function toast(message: string, opts: { crit?: boolean } = {}): void {
     el("span", { class: "toast-dot" }),
     el("span", { text: message, style: { flex: "1" } }),
   );
+  const dismiss = () => {
+    node.remove();
+    liveToasts.delete(message);
+  };
+  if (opts.action) {
+    const { label, onClick } = opts.action;
+    node.append(el("button", {
+      class: "btn toast-action",
+      text: label,
+      onClick: () => {
+        dismiss();
+        onClick();
+      },
+    }));
+  }
   const closeBtn = el("button", {
     class: "icon-btn toast-close",
     title: t("ui.close"),
-    onClick: () => {
-      node.remove();
-      liveToasts.delete(message);
-    },
+    onClick: dismiss,
   });
   closeBtn.append(svgIcon(I.close));
   node.append(closeBtn);
   toastStack.append(node);
   const timer = opts.crit
     ? undefined
-    : window.setTimeout(() => {
-        node.remove();
-        liveToasts.delete(message);
-      }, 5000);
+    : window.setTimeout(dismiss, 5000);
   liveToasts.set(message, { node, timer });
 }
 /**
@@ -105,14 +121,18 @@ export interface ConfirmOptions {
   danger?: boolean;
   /** Non-destructive confirms may default focus to the action button (Enter confirms). */
   focusConfirm?: boolean;
+  /** Override the invoking control when the semantic return target is elsewhere. */
+  restoreFocus?: () => void;
 }
 
 export function confirmDialog(opts: ConfirmOptions): Promise<boolean> {
   const { promise, resolve } = Promise.withResolvers<boolean>();
+  const invoker = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   const overlay = el("div", { class: "overlay centered" });
   const done = (v: boolean) => {
     overlay.classList.remove("visible");
     setTimeout(() => overlay.remove(), 170);
+    restoreDialogFocus(invoker, opts.restoreFocus);
     resolve(v);
   };
   const confirmBtn = el("button", {
@@ -146,6 +166,8 @@ export interface ChoiceDialogOptions {
   message: string;
   /** rendered left-to-right after Cancel; the LAST one is the primary action */
   choices: { label: string; value: string; danger?: boolean }[];
+  /** Override the invoking control when the semantic return target is elsewhere. */
+  restoreFocus?: () => void;
 }
 
 /**
@@ -155,10 +177,12 @@ export interface ChoiceDialogOptions {
  */
 export function choiceDialog(opts: ChoiceDialogOptions): Promise<string | null> {
   const { promise, resolve } = Promise.withResolvers<string | null>();
+  const invoker = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   const overlay = el("div", { class: "overlay centered" });
   const done = (v: string | null) => {
     overlay.classList.remove("visible");
     setTimeout(() => overlay.remove(), 170);
+    restoreDialogFocus(invoker, opts.restoreFocus);
     resolve(v);
   };
   const cancelBtn = el("button", { class: "btn", text: t("ui.cancel"), onClick: () => done(null) });
@@ -200,10 +224,12 @@ export interface InputDialogOptions {
 
 export function inputDialog(opts: InputDialogOptions): Promise<string | null> {
   const { promise, resolve } = Promise.withResolvers<string | null>();
+  const invoker = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   const overlay = el("div", { class: "overlay centered" });
   const done = (v: string | null) => {
     overlay.classList.remove("visible");
     setTimeout(() => overlay.remove(), 170);
+    restoreDialogFocus(invoker);
     resolve(v);
   };
   const input = el("input", {
@@ -264,10 +290,12 @@ export interface FormDialogOptions {
  */
 export function formDialog(opts: FormDialogOptions): Promise<Record<string, string> | null> {
   const { promise, resolve } = Promise.withResolvers<Record<string, string> | null>();
+  const invoker = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   const overlay = el("div", { class: "overlay centered" });
   const done = (v: Record<string, string> | null) => {
     overlay.classList.remove("visible");
     setTimeout(() => overlay.remove(), 170);
+    restoreDialogFocus(invoker);
     resolve(v);
   };
   const inputs = new Map<string, HTMLInputElement>();
@@ -326,10 +354,12 @@ export function formDialog(opts: FormDialogOptions): Promise<Record<string, stri
 /** Select-from-list dialog (used for branch switching & agent UI selects). */
 export function selectDialog(title: string, options: string[]): Promise<string | null> {
   const { promise, resolve } = Promise.withResolvers<string | null>();
+  const invoker = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   const overlay = el("div", { class: "overlay centered" });
   const done = (v: string | null) => {
     overlay.classList.remove("visible");
     setTimeout(() => overlay.remove(), 170);
+    restoreDialogFocus(invoker);
     resolve(v);
   };
   const list = el("div", { class: "pal-list", style: { maxHeight: "300px", overflowY: "auto", scrollbarGutter: "stable" } });

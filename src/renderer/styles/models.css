@@ -150,6 +150,15 @@
 /* ---------- «Кокпит ролей» (redesign §8) ---------- */
 .ck-tab { padding: 4px 10px; font-size: 11.5px; }
 .ck-tab.on { color: var(--power); border-color: var(--power-40); background: var(--power-15); }
+.ck-action {
+  margin-left: 6px;
+  padding: 4px 9px;
+  font-size: 11.5px;
+  color: var(--text-mid);
+  border-color: var(--line);
+}
+.ck-action:hover { color: var(--power); border-color: var(--power-40); background: var(--power-15); }
+.ck-action svg { width: 13px; height: 13px; }
 .ck-rail {
   display: flex;
   flex-wrap: wrap;
