@@ -133,9 +133,9 @@ app.whenReady().then(() => {
   registerOmpHandlers(ipcMain);
   registerSessionHistoryHandlers(ipcMain);
   registerStoreHandlers(ipcMain);
-  registerRemoteHandlers(ipcMain);
   registerTeamHandlers(ipcMain);
   registerModelsHandlers(ipcMain);
+  registerRemoteHandlers(ipcMain);
 
   ipcMain.handle("dialog:openFolder", async (e) => {
     const win = BrowserWindow.fromWebContents(e.sender);

@@ -54,6 +54,8 @@ export interface ModelsStore {
   /** "<profile>/<model>" selectors that rejected thinking params */
   noThinking: string[];
   events: ModelEvent[];
+  /** most recently activated qualified selectors, newest first */
+  recentModels: string[];
   /** auto-swap master toggle (default ON) + per-role opt-outs */
   autoSwapEnabled: boolean;
   autoSwapRoleOptOut: Record<ModelRole, boolean>;
@@ -109,6 +111,7 @@ function migrateV1(parsed: Record<string, unknown>): ModelsStore {
     },
     noThinking: [],
     events: Array.isArray(parsed.events) ? (parsed.events as ModelEvent[]).slice(-50) : [],
+    recentModels: [],
     autoSwapEnabled: true,
     autoSwapRoleOptOut: { default: false, smol: false, slow: false },
     balancePollMinutes: 10,
@@ -185,6 +188,9 @@ export function loadModelsStore(): ModelsStore {
       },
       noThinking: Array.isArray(parsed.noThinking) ? (parsed.noThinking as string[]) : [],
       events: Array.isArray(parsed.events) ? (parsed.events as ModelEvent[]).slice(-50) : [],
+      recentModels: Array.isArray(parsed.recentModels)
+        ? (parsed.recentModels as unknown[]).filter((item): item is string => typeof item === "string").slice(0, 12)
+        : [],
       autoSwapEnabled: parsed.autoSwapEnabled !== false,
       autoSwapRoleOptOut: {
         default: (parsed.autoSwapRoleOptOut as Record<string, boolean> | undefined)?.default === true,
@@ -204,6 +210,7 @@ export function loadModelsStore(): ModelsStore {
       thinkingRoles: { default: "med", smol: "off", slow: "high" },
       noThinking: [],
       events: [],
+      recentModels: [],
       autoSwapEnabled: true,
       autoSwapRoleOptOut: { default: false, smol: false, slow: false },
       balancePollMinutes: 10,
@@ -285,5 +292,6 @@ export function rekeyProfile(oldName: string, newName: string): void {
     store.roles[role] = rewrite(store.roles[role]);
   }
   store.noThinking = store.noThinking.map((s) => rewrite(s)).filter((s): s is string => s !== null);
+  store.recentModels = store.recentModels.map((s) => rewrite(s)).filter((s): s is string => s !== null);
   saveModelsStore();
 }

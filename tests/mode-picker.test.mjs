@@ -105,3 +105,28 @@ test("/stop cancels the pending choice for that chat only", () => {
   assert.equal(reg.cancelByChat("bot:1"), null);
   assert.equal(reg.get(other.entry.id)?.payload, "B");
 });
+
+test("enhancement pauses the Solo timeout without claiming the task", () => {
+  const { timers, reg } = registry();
+  const { entry } = reg.open("bot:1", 7, "task");
+  reg.arm(entry.id, 60_000, () => assert.fail("timeout fired while enhancing"));
+
+  assert.equal(reg.pause(entry.id), true);
+  assert.equal(timers.size(), 0);
+  assert.equal(reg.get(entry.id)?.claimed, false);
+  timers.fireAll();
+});
+
+test("the enhanced view rearms one fresh sixty-second fallback", () => {
+  const { timers, reg } = registry();
+  const { entry } = reg.open("bot:1", 7, "task");
+  reg.arm(entry.id, 60_000, () => assert.fail("initial timeout survived enhancement"));
+  reg.pause(entry.id);
+
+  const started = [];
+  reg.arm(entry.id, 60_000, (expired) => started.push(expired.payload));
+  assert.equal(timers.size(), 1);
+  timers.fireAll();
+  assert.deepEqual(started, ["task"]);
+  assert.equal(reg.get(entry.id), null);
+});

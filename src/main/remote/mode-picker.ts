@@ -73,6 +73,14 @@ export class PendingModeRegistry<T> {
     );
   }
 
+  /** Pause an in-flight picker view (e.g. while enhancing) without claiming it. */
+  pause(id: string): boolean {
+    const entry = this.entries.get(id);
+    if (!entry || entry.claimed) return false;
+    this.disarm(id);
+    return true;
+  }
+
   /** Takes ownership exactly once; a foreign user never claims someone's task. */
   claim(id: string, byUserId?: number): ClaimResult<T> {
     const entry = this.entries.get(id);

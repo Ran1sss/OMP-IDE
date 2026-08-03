@@ -185,7 +185,8 @@ export type OmpEvent =
       fileEdit?: OmpFileEdit;
     }
   | { kind: "todos"; phases: OmpTodoPhase[] }
-  | { kind: "user-message"; text: string; via?: RemoteVia }
+  | { kind: "user-message"; text: string; via?: RemoteVia; enhanced?: false }
+  | { kind: "user-message"; text: string; via?: RemoteVia; enhanced: true; originalText: string }
   /** turn ended in a provider error (stopReason "error" in the final message) */
   | { kind: "turn-error"; provider: string; modelId: string; status: number | null; message: string };
 
@@ -500,6 +501,10 @@ export interface ModelsState {
   roles: Record<ModelRole, RoleAssignment>;
   /** active model of the live agent session, from get_state (ground truth) */
   active: { provider: string; id: string; name: string } | null;
+  /** unrecoverable activation/rollback failure; null while the live model is trustworthy */
+  activationError: string | null;
+  /** successfully activated qualified selectors, newest first */
+  recentModels: string[];
   /** switch requested while the agent runs; applied at the session boundary */
   pending: { selector: string; label: string } | null;
   thinking: {
@@ -800,6 +805,8 @@ export interface TeamRunState {
   pinnedRoles?: string[];
   /** Telegram-originated runs skip the IDE-only dispatch grace window. */
   immediateStart?: boolean;
+  /** prompt provenance retained across Team restarts */
+  promptProvenance?: { enhanced: true; originalText: string };
   /** user-facing source of an externally started run (renders on the goal bubble). */
   originVia?: RemoteVia;
   /** malformed transport payload intercepted before rendering; raw stays collapsed */
@@ -1000,7 +1007,7 @@ export interface IdeApi {
     setFavorite(providerId: string, modelId: string, fav: boolean): Promise<void>;
     assignRole(role: ModelRole, selector: string, origin: string): Promise<{ ok: boolean; error?: string }>;
     /** switch the default role — the routine "switch model" action */
-    switchModel(selector: string, origin: string): Promise<{ ok: boolean; pending: boolean; error?: string }>;
+    switchModel(selector: string, origin: string): Promise<{ ok: boolean; pending: boolean; requestId: string; error?: string }>;
     /** role default thinking level (persists) */
     setRoleThinking(role: ModelRole, level: ThinkingLevel, origin: string): Promise<void>;
     /** session-only override; null clears back to the role default */

@@ -11,16 +11,22 @@ export function tgLangFor(languageCode: string | undefined): TgLang {
   return languageCode?.toLowerCase().startsWith("ru") ? "ru" : "en";
 }
 
+/** Visible Remote activity copy for successful Telegram-origin model switches. */
+export function telegramModelSwitchActivityDetail(selector: string): string {
+  return `model switched via Telegram → ${selector}`;
+}
+
 export interface TelegramCommand {
   command: string;
   description: string;
 }
 
-const COMMAND_NAMES = ["solo", "team", "status", "stop", "todo", "new", "diff", "files", "who", "think", "help"] as const;
+const COMMAND_NAMES = ["solo", "team", "model", "status", "stop", "todo", "new", "diff", "files", "who", "think", "help"] as const;
 export function telegramCommands(lang: TgLang): TelegramCommand[] {
   const descriptions: Record<(typeof COMMAND_NAMES)[number], [ru: string, en: string]> = {
     solo: ["Запустить задачу одним агентом", "Run a task with one agent"],
     team: ["Запустить задачу через команду", "Run a task through Team routing"],
+    model: ["Выбрать модель и профиль", "Choose model and profile"],
     status: ["Статус агента или команды", "Agent or Team status"],
     stop: ["Остановить текущую задачу или команду", "Stop the current task or Team run"],
     todo: ["Живой список задач", "Live todo list"],
@@ -69,6 +75,41 @@ interface TgStrings {
   pickerNotYours: string;
   pickerSolo: string;
   pickerTeam: string;
+  pickerEnhance: string;
+  pickerCancel: string;
+  enhancedSolo: string;
+  enhancedTeam: string;
+  originalSolo: string;
+  originalTeam: string;
+  enhanceRegenerate: string;
+  enhanceOriginalHeading: string;
+  enhanceImprovedHeading: string;
+  enhanceFailed: string;
+  enhanceTimeout: string;
+  enhanceTimeoutDisclosure: string;
+  launchBusyNotStarted: string;
+  modelQuickTitle: (active: string) => string;
+  modelAll: (count: number) => string;
+  modelProfilesTitle: string;
+  modelProfileTitle: (profile: string) => string;
+  modelMatches: (query: string, count: number) => string;
+  modelProfileRow: (profile: string, count: number, active: boolean) => string;
+  modelBackProfiles: string;
+  modelBackQuick: string;
+  modelNotFound: (query: string) => string;
+  modelAlreadyActive: (model: string, profile: string) => string;
+  modelSwitching: (selector: string) => string;
+  modelSwitched: (model: string, profile: string) => string;
+  modelSwitchFailed: (error: string) => string;
+  modelBusy: (selector: string) => string;
+  modelQueue: string;
+  modelInterrupt: string;
+  modelQueued: (selector: string) => string;
+  modelNoModels: string;
+  modelSessionExpired: string;
+  modelSessionReplaced: string;
+  modelSessionBusy: string;
+  modelStatus: (model: string, profile: string) => string;
   /** shown once per group when privacy mode hides plain messages */
   privacyModeHint: string;
   teamUsage: string;
@@ -131,6 +172,42 @@ const RU: TgStrings = {
   teamUsage: "Использование: /team <задача>",
   pickerSolo: "⚡ Соло",
   pickerTeam: "⚑ Команда",
+  pickerEnhance: "✦ Улучшить",
+  pickerCancel: "Отмена",
+  enhancedSolo: "✦⚡ Улучшенный соло",
+  enhancedTeam: "✦⚑ Улучшенный командой",
+  originalSolo: "⚡ Исходный соло",
+  originalTeam: "⚑ Исходный командой",
+  enhanceRegenerate: "↻ Улучшить ещё раз",
+  enhanceOriginalHeading: "Исходный запрос",
+  enhanceImprovedHeading: "Улучшенная задача",
+  enhanceFailed: "Не удалось улучшить запрос. Выберите исходный вариант.",
+  enhanceTimeout: "Время выбора истекло — запускаю исходный запрос как есть соло.",
+  enhanceTimeoutDisclosure: "Через 60 секунд запущу исходный запрос соло.",
+  launchBusyNotStarted: "Другая задача уже запущена — эта задача не стартовала.",
+  modelQuickTitle: (active) => `Текущая модель: ${active}\nБыстрый выбор`,
+  modelAll: (count) => `Все модели (${count}) →`,
+  modelProfilesTitle: "Все профили моделей",
+  modelProfileTitle: (profile) => `Профиль: ${profile}`,
+  modelMatches: (query, count) => `Найдено по «${query}»: ${count}`,
+  modelProfileRow: (profile, count, active) =>
+    `${profile} · ${count} ${count % 10 === 1 && count % 100 !== 11 ? "модель" : count % 10 >= 2 && count % 10 <= 4 && (count % 100 < 12 || count % 100 > 14) ? "модели" : "моделей"}${active ? " · активен" : ""}`,
+  modelBackProfiles: "← К профилям",
+  modelBackQuick: "← Быстрый выбор",
+  modelNotFound: (query) => `Модели по запросу «${query}» не найдены. Попробуйте /model с другим запросом.`,
+  modelAlreadyActive: (model, profile) => `Уже активна: ${model} (${profile})`,
+  modelSwitching: (selector) => `Переключаю модель на ${selector}…`,
+  modelSwitched: (model, profile) => `✓ Модель: ${model} (${profile})`,
+  modelSwitchFailed: (error) => `Не удалось переключить модель: ${error}`,
+  modelBusy: (selector) => `Сейчас выполняется задача. Как переключить на ${selector}?`,
+  modelQueue: "В очередь",
+  modelInterrupt: "Прервать и переключить",
+  modelQueued: (selector) => `Переключение на ${selector} поставлено в очередь.`,
+  modelNoModels: "Нет доступных моделей.",
+  modelSessionExpired: "Выбор модели истёк. Откройте /model снова.",
+  modelSessionReplaced: "Выбор модели закрыт новым запросом /model.",
+  modelSessionBusy: "Предыдущее переключение модели ещё выполняется.",
+  modelStatus: (model, profile) => `модель: ${model} (${profile})`,
   privacyModeHint:
     "Здесь у меня приватный режим: обычные сообщения группы до меня не доходят. Пиши через @упоминание, ответом на моё сообщение или командой — либо выключи Group Privacy у @BotFather (или сделай меня админом).",
   paired: (bot) => `Готово. Теперь вы управляете агентом OMP через @${bot}. Отправьте задачу обычным сообщением или /help.`,
@@ -142,6 +219,7 @@ const RU: TgStrings = {
     "/solo <задача> — выполнить одним агентом без маршрутизации",
     "/status — состояние агента, прогресс, рабочая область",
     "/team <задача> — выполнить через маршрутизацию команды",
+    "/model [поиск] — выбрать модель и профиль",
     "/todo — живой список задач",
     "/stop — прервать агента (с подтверждением)",
     "/new — новая сессия агента (с подтверждением)",
@@ -208,6 +286,41 @@ const EN: TgStrings = {
   teamUsage: "Usage: /team <task>",
   pickerSolo: "⚡ Solo",
   pickerTeam: "⚑ Team",
+  pickerEnhance: "✦ Improve",
+  pickerCancel: "Cancel",
+  enhancedSolo: "✦⚡ Improved solo",
+  enhancedTeam: "✦⚑ Improved team",
+  originalSolo: "⚡ Original solo",
+  originalTeam: "⚑ Original team",
+  enhanceRegenerate: "↻ Regenerate",
+  enhanceOriginalHeading: "Original request",
+  enhanceImprovedHeading: "Improved task",
+  enhanceFailed: "Could not improve the request. Choose the original version.",
+  enhanceTimeout: "Choice timed out — running the original task solo.",
+  enhanceTimeoutDisclosure: "In 60 seconds I’ll run the original request solo.",
+  launchBusyNotStarted: "Another task already started — this task was not started.",
+  modelQuickTitle: (active) => `Active model: ${active}\nQuick models`,
+  modelAll: (count) => `All models (${count}) →`,
+  modelProfilesTitle: "All model profiles",
+  modelProfileTitle: (profile) => `Profile: ${profile}`,
+  modelMatches: (query, count) => `Matches for “${query}”: ${count}`,
+  modelProfileRow: (profile, count, active) => `${profile} · ${count} ${count === 1 ? "model" : "models"}${active ? " · active" : ""}`,
+  modelBackProfiles: "← Profiles",
+  modelBackQuick: "← Quick models",
+  modelNotFound: (query) => `No models found for “${query}”. Try /model with another search.`,
+  modelAlreadyActive: (model, profile) => `Already active: ${model} (${profile})`,
+  modelSwitching: (selector) => `Switching model to ${selector}…`,
+  modelSwitched: (model, profile) => `✓ Model: ${model} (${profile})`,
+  modelSwitchFailed: (error) => `Model switch failed: ${error}`,
+  modelBusy: (selector) => `A task is running. How should I switch to ${selector}?`,
+  modelQueue: "Queue",
+  modelInterrupt: "Interrupt and switch",
+  modelQueued: (selector) => `Switch to ${selector} is queued.`,
+  modelNoModels: "No models are available.",
+  modelSessionExpired: "Model selection expired. Open /model again.",
+  modelSessionReplaced: "Model selection was closed by a newer /model request.",
+  modelSessionBusy: "The previous model switch is still running.",
+  modelStatus: (model, profile) => `model: ${model} (${profile})`,
   alreadyPaired: "Already paired. Send a task as a plain message, or /help.",
   privacyModeHint:
     "Privacy mode is on here, so plain group messages never reach me. Use an @mention, a reply to my message, or a command — or turn Group Privacy off in @BotFather (or make me an admin).",
@@ -218,6 +331,7 @@ const EN: TgStrings = {
     "/solo <task> — run with one agent and bypass routing",
     "/status — agent state, todo progress, workspace",
     "/todo — live todo list",
+    "/model [search] — choose a model and profile",
     "/team <task> — run through Team routing",
     "/stop — interrupt the current task or Team run",
     "/new — fresh agent session (confirm)",

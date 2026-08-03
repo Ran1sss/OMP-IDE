@@ -35,6 +35,8 @@ let state: ModelsState = {
   providers: [],
   roles: { default: { selector: null }, smol: { selector: null }, slow: { selector: null } },
   active: null,
+  activationError: null,
+  recentModels: [],
   pending: null,
   thinking: {
     roles: { default: "med", smol: "off", slow: "high" },
@@ -173,8 +175,8 @@ function renderChip(): void {
   if (!chipEl || !chipName || !chipPendingEl) return;
   const active = state.active;
   const text = active ? shortName(active.id) : t("mdl.noModel");
-  const broken = anyRoleProviderBroken();
-  chipEl.classList.toggle("crit", !!broken);
+  const broken = !!state.activationError || !!anyRoleProviderBroken();
+  chipEl.classList.toggle("crit", broken);
   const activeProfile = active ? state.providers.find((p) => p.id === active.provider) : null;
   const activeModel = activeProfile?.models.find((m) => m.id === active?.id) ?? null;
   chipEl.style.setProperty("--mc-fill", ctxClass(activeModel?.contextWindow ?? null));
@@ -195,8 +197,8 @@ function renderChip(): void {
     ? t("mdl.chipBalSuffix", `${bal.value.toFixed(2)}${bal.currency ? " " + bal.currency : ""}`, t("mdl.ageShort", balAge))
     : "";
   chipEl.title = active
-    ? t("mdl.chipTipActive", `${active.provider}/${active.id}`, balText)
-    : t("mdl.chipTipIdle");
+    ? `${t("mdl.chipTipActive", `${active.provider}/${active.id}`, balText)}${state.activationError ? ` · ${state.activationError}` : ""}`
+    : state.activationError ?? t("mdl.chipTipIdle");
   // thinking glyph: hidden entirely for no-thinking models
   if (chipThinkEl) {
     chipThinkEl.style.display = state.thinking.capability === "no-thinking" ? "none" : "";
@@ -1402,7 +1404,29 @@ export function mountModelWarning(host: HTMLElement): void {
 function renderWarning(): void {
   if (!warnHost) return;
   warnHost.querySelector(".model-warn")?.remove();
+  const activationError = state.activationError;
   const broken = anyRoleProviderBroken();
+  if (!activationError && !broken) return;
+  if (activationError) {
+    warnHost.prepend(
+      el(
+        "div",
+        { class: "model-warn" },
+        el(
+          "div",
+          {},
+          el("div", { text: t("mdl.activationDegraded") }),
+          el("div", { class: "mw-detail", text: activationError.slice(0, 180) }),
+        ),
+        el(
+          "span",
+          { class: "mw-actions" },
+          el("button", { class: "btn", text: t("mdl.switchModel"), onClick: () => openModelsDialog() }),
+        ),
+      ),
+    );
+    return;
+  }
   if (!broken) return;
   // "flip to my other endpoint": same model id on OTHER healthy profiles first
   const brokenModel = state.roles.default.selector?.startsWith(`${broken.id}/`)

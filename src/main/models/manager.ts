@@ -44,6 +44,7 @@ import {
   MODELS_YML,
   CONFIG_YML,
   envVarFor,
+  enableModelSelector,
   writeRole,
   readRoles,
   readOmpProfiles,
@@ -59,6 +60,13 @@ import { probeBalance } from "./balance";
 import { SwapEngine, notifyRemote } from "./swap-engine";
 import { registerTesterHost, registerTesterHandlers } from "./api-tester";
 import type { TesterProtocol, TesterVerdict } from "../../shared/types";
+import {
+  recordModelRecent,
+  runModelActivationTransaction,
+  type ModelActivationAttempt,
+  type ModelActivationResult,
+} from "../../shared/model-selection";
+import { ModelSwitchCoordinator, type CoordinatedModelSwitch } from "./model-switch-coordinator";
 
 /**
  * Prompt Improve instruction template, v1 (versioned in code per spec §2).
@@ -70,11 +78,26 @@ const ENHANCE_SYSTEM_V1 =
   "Keep the user's language (Russian stays Russian). Keep the intent; add missing specifics " +
   "only when they are unambiguous from the draft or the workspace line. State the expected " +
   "deliverable. No preamble, no quotes, no commentary — output the rewritten prompt only.";
+export interface ModelSwitchResult {
+  requestId: string;
+  selector: string;
+  origin: string;
+  ok: boolean;
+  error?: string;
+}
+
+const modelSwitchObservers = new Set<(result: ModelSwitchResult) => void>();
+
+function publishModelSwitchResult(result: ModelSwitchResult): void {
+  for (const observer of modelSwitchObservers) observer(result);
+}
+
 
 class ModelsManager {
   private bridge: AgentBridge = getAgentBridge();
   private health = new Map<string, { state: ProviderHealth; detail?: string }>();
-  private pendingSwitch: { selector: string; label: string } | null = null;
+  private readonly modelSwitches = new ModelSwitchCoordinator();
+  private activationError: string | null = null;
   private usage: ModelsUsage = { requests: 0, inputTokens: 0, outputTokens: 0, reasoningTokens: 0, hasTokenData: false };
   /** Prompt Improve oneshots — real requests the session stats never see (cost honesty) */
   private extraRequests = 0;
@@ -154,17 +177,17 @@ class ModelsManager {
       this.pushState();
     });
     this.bridge.onModelChange((m) => {
-      this.log("switch", `active model now ${m.provider}/${m.id}`, "omp");
+      const selector = `${m.provider}/${m.id}`;
+      const current = loadModelsStore();
+      current.recentModels = recordModelRecent(current.recentModels, selector);
+      saveModelsStore();
+      this.log("switch", `active model now ${selector}`, "omp");
       void this.refreshCapability();
       void this.applyThinking("model-change");
       this.pushState();
     });
     this.bridge.onStatus((s) => {
-      if (s.state === "idle" && this.pendingSwitch) {
-        const sw = this.pendingSwitch;
-        this.pendingSwitch = null;
-        void this.requestSwitch(sw.selector, "queued");
-      }
+      if (s.state === "idle") this.drainQueuedModelSwitches();
       if (s.state === "idle" && this.pendingThinking !== null) {
         this.pendingThinking = null;
         void this.applyThinking("queued");
@@ -501,7 +524,11 @@ class ModelsManager {
         slow: { selector: store.roles.slow },
       },
       active: this.bridge.getActiveModel(),
-      pending: this.pendingSwitch,
+      activationError: this.activationError,
+      recentModels: [...store.recentModels],
+      pending: this.modelSwitches.firstPending()
+        ? { selector: this.modelSwitches.firstPending()!.selector, label: this.modelSwitches.firstPending()!.selector }
+        : null,
       thinking: {
         roles: { ...store.thinkingRoles },
         sessionOverride: this.sessionThinking,
@@ -958,48 +985,20 @@ class ModelsManager {
     return null;
   }
 
-  async assignRole(role: ModelRole, selector: string, origin: string): Promise<{ ok: boolean; error?: string }> {
-    const resolved = this.resolveSelector(selector);
-    if (!resolved) return { ok: false, error: "Unknown model selector" };
-    const store = loadModelsStore();
-    const meta = store.profileMeta[resolved.profile];
-    if (meta && !meta.enabled) return { ok: false, error: "Profile is disabled" };
-
-    store.roles[role] = selector;
-    saveModelsStore();
-    writeRole(role, selector); // qualified id verbatim — OMP's own addressing
-    this.log("role", `${role} → ${selector}`, origin);
-
-    if (role === "default") {
-      return this.requestSwitch(selector, origin);
-    }
-    this.pushState();
-    return { ok: true };
+  private restartWithModel(selector: string): Promise<boolean> {
+    return this.bridge.restartSession(selector);
   }
 
-  async switchModel(selector: string, origin: string): Promise<{ ok: boolean; pending: boolean; error?: string }> {
-    const resolved = this.resolveSelector(selector);
-    if (!resolved) return { ok: false, pending: false, error: "Unknown model selector" };
-    const store = loadModelsStore();
-    store.roles.default = selector;
-    saveModelsStore();
-    writeRole("default", selector);
-
-    const status = this.bridge.getStatus();
-    const busy = status && (status.state === "thinking" || status.state === "tool" || status.state === "awaiting-input");
-    if (busy) {
-      this.pendingSwitch = { selector, label: selector };
-      this.log("switch", `queued ${selector} (agent running)`, origin);
-      this.pushState();
-      return { ok: true, pending: true };
-    }
-    const r = await this.requestSwitch(selector, origin);
-    return { ok: r.ok, pending: false, error: r.error };
+  private activeSelector(): string | null {
+    const active = this.bridge.getActiveModel();
+    return active ? `${active.provider}/${active.id}` : null;
   }
 
-  private async requestSwitch(selector: string, origin: string): Promise<{ ok: boolean; error?: string }> {
+  /** One activation attempt. A false result states whether rollback is required. */
+  private async requestSwitch(selector: string, origin: string): Promise<ModelActivationAttempt> {
     const resolved = this.resolveSelector(selector);
-    if (!resolved) return { ok: false, error: "Unknown model selector" };
+    if (!resolved) return { ok: false, error: "Unknown model selector", liveMayHaveChanged: false };
+    enableModelSelector(selector);
     const res = await this.bridge.request({
       type: "set_model",
       provider: resolved.profile,
@@ -1008,21 +1007,147 @@ class ModelsManager {
     if (!res.success) {
       if (res.error?.includes("Model not found")) {
         this.log("switch", `live registry misses ${selector} — restarting session to apply`, origin);
-        const restarted = await this.bridge.restartSession();
-        if (restarted) {
+        if (await this.restartWithModel(selector)) {
           this.log("switch", `switched to ${selector} (via session restart)`, origin);
           this.pushState();
           return { ok: true };
         }
+        const error = `target restart failed for ${selector}`;
+        this.log("switch", error, origin);
+        return { ok: false, error, liveMayHaveChanged: true };
       }
-      this.log("switch", `set_model failed: ${res.error ?? "?"}`, origin);
+      const error = res.error ?? "model switch failed";
+      this.log("switch", `set_model failed: ${error}`, origin);
       this.pushState();
-      return { ok: false, error: res.error };
+      return { ok: false, error, liveMayHaveChanged: false };
+    }
+    const state = await this.bridge.request({ type: "get_state" });
+    const active = state.data?.model as { provider?: unknown; id?: unknown } | undefined;
+    if (!state.success || active?.provider !== resolved.profile || active.id !== resolved.modelId) {
+      const error = state.error ?? "model activation could not be confirmed";
+      this.log("switch", `activation check failed for ${selector}: ${error}`, origin);
+      this.pushState();
+      return { ok: false, error, liveMayHaveChanged: true };
     }
     this.log("switch", `switched to ${selector}`, origin);
-    await this.bridge.request({ type: "get_state" });
     this.pushState();
     return { ok: true };
+  }
+
+  /** Restores and verifies the selector that was active before a failed attempt. */
+  private async restoreModel(selector: string, origin: string): Promise<{ ok: true } | { ok: false; error: string }> {
+    const resolved = this.resolveSelector(selector);
+    if (!resolved) return { ok: false, error: `prior selector ${selector} is no longer available` };
+    enableModelSelector(selector);
+    const live = await this.bridge.request({
+      type: "set_model",
+      provider: resolved.profile,
+      modelId: resolved.modelId,
+    });
+    if (live.success) {
+      const state = await this.bridge.request({ type: "get_state" });
+      const active = state.data?.model as { provider?: unknown; id?: unknown } | undefined;
+      if (state.success && active?.provider === resolved.profile && active.id === resolved.modelId) {
+        this.log("switch", `restored ${selector} after failed activation`, origin);
+        this.activationError = null;
+        this.pushState();
+        return { ok: true };
+      }
+    }
+    if (await this.restartWithModel(selector)) {
+      this.log("switch", `restored ${selector} via session restart`, origin);
+      this.activationError = null;
+      this.pushState();
+      return { ok: true };
+    }
+    return { ok: false, error: `could not restore prior model ${selector}` };
+  }
+
+  /** Activates and verifies first; failed live changes are rolled back before persistence. */
+  private async activateDefaultRole(selector: string, origin: string): Promise<ModelActivationResult> {
+    const priorSelector = this.activeSelector();
+    const result = await runModelActivationTransaction({
+      activate: () => this.requestSwitch(selector, origin),
+      rollback: () => priorSelector
+        ? this.restoreModel(priorSelector, origin)
+        : Promise.resolve({ ok: false as const, error: "prior active model is unknown" }),
+      commit: () => {
+        const store = loadModelsStore();
+        store.roles.default = selector;
+        saveModelsStore();
+        writeRole("default", selector);
+        this.activationError = null;
+        this.degradedRoles.delete("default");
+        this.pushState();
+      },
+      degrade: (detail) => {
+        this.activationError = detail;
+        this.degradedRoles.set("default", detail);
+        this.log("switch", `activation degraded: ${detail}`, origin);
+        this.pushState();
+      },
+    });
+    return result.ok ? { ok: true } : { ok: false, error: result.error };
+  }
+
+  private runModelSwitch(request: CoordinatedModelSwitch): Promise<ModelActivationResult> {
+    return this.modelSwitches
+      .run(request, () => this.activateDefaultRole(request.selector, request.origin))
+      .finally(() => this.pushState());
+  }
+
+  private drainQueuedModelSwitches(): void {
+    const queued = this.modelSwitches.takeIdle();
+    if (!queued.length) return;
+    for (const request of queued) {
+      void this.runModelSwitch(request).then((result) => {
+        publishModelSwitchResult({ requestId: request.id, selector: request.selector, origin: request.origin, ...result });
+      });
+    }
+    this.pushState();
+  }
+
+  async assignRole(role: ModelRole, selector: string, origin: string): Promise<{ ok: boolean; error?: string }> {
+    const resolved = this.resolveSelector(selector);
+    if (!resolved) return { ok: false, error: "Unknown model selector" };
+    const store = loadModelsStore();
+    const meta = store.profileMeta[resolved.profile];
+    if (meta && !meta.enabled) return { ok: false, error: "Profile is disabled" };
+
+    if (role === "default") {
+      const request = this.modelSwitches.create(selector, origin);
+      const result = await this.runModelSwitch(request);
+      if (result.ok) this.log("role", `${role} → ${selector}`, origin);
+      return result;
+    }
+
+    store.roles[role] = selector;
+    saveModelsStore();
+    writeRole(role, selector);
+    this.log("role", `${role} → ${selector}`, origin);
+    this.pushState();
+    return { ok: true };
+  }
+
+  async switchModel(
+    selector: string,
+    origin: string,
+  ): Promise<{ ok: boolean; pending: boolean; requestId: string; error?: string }> {
+    const resolved = this.resolveSelector(selector);
+    const request = this.modelSwitches.create(selector, origin);
+    if (!resolved) return { ok: false, pending: false, requestId: request.id, error: "Unknown model selector" };
+
+    const status = this.bridge.getStatus();
+    const busy = status && (status.state === "thinking" || status.state === "tool" || status.state === "awaiting-input");
+    if (busy) {
+      this.modelSwitches.waitForIdle(request);
+      this.log("switch", `queued ${selector} (agent running)`, origin);
+      this.pushState();
+      return { ok: true, pending: true, requestId: request.id };
+    }
+    const result = await this.runModelSwitch(request);
+    if (!result.ok) return { ok: false, pending: false, requestId: request.id, error: result.error };
+    return { ok: true, pending: false, requestId: request.id };
   }
 
   // ================================================== usage
@@ -1164,6 +1289,34 @@ export async function reportOneshotError(status: number | null, message: string)
   const slash = smol.indexOf("/");
   if (slash < 0) return;
   await manager.swap.onProviderError(smol.slice(0, slash), smol.slice(slash + 1), status, message, "oneshot");
+}
+
+export async function enhancePromptFromRemote(
+  draft: string,
+  origin: string,
+): Promise<{ ok: true; text: string; model: string } | { ok: false; error: string }> {
+  if (!manager) return { ok: false, error: "models service unavailable" };
+  return manager.enhance(draft, origin);
+}
+
+/** Narrow canonical model surface for non-IPC main-process consumers. */
+export function getModelsStateForRemote(): ModelsState | null {
+  return manager?.getState() ?? null;
+}
+
+export async function switchModelFromRemote(
+  selector: string,
+  origin: string,
+): Promise<{ ok: boolean; pending: boolean; requestId?: string; error?: string }> {
+  if (!manager) return { ok: false, pending: false, error: "models service unavailable" };
+  return manager.switchModel(selector, origin);
+}
+
+export function observeModelSwitchResults(observer: (result: ModelSwitchResult) => void): () => void {
+  modelSwitchObservers.add(observer);
+  return () => {
+    modelSwitchObservers.delete(observer);
+  };
 }
 
 export function registerModelsHandlers(ipc: IpcMain): void {

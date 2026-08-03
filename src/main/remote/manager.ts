@@ -33,6 +33,13 @@ import { WatchManager } from "./watch-manager";
 import { agentForUrl, currentProxyAgent, validateProxyUrl } from "./proxy";
 import { registerSwapRemoteNotifier } from "../models/swap-engine";
 import {
+  enhancePromptFromRemote,
+  getModelsStateForRemote,
+  observeModelSwitchResults,
+  switchModelFromRemote,
+  type ModelSwitchResult,
+} from "../models/manager";
+import {
   registerTeamGateNotifier,
   registerTeamEndNotifier,
   isTeamRunActive,
@@ -43,7 +50,7 @@ import {
   teamRoster,
 } from "../omp-team/team-service";
 import { SessionTracker } from "./session-tracker";
-import { tg, tgLangFor } from "./tg-i18n";
+import { telegramModelSwitchActivityDetail, tg, tgLangFor } from "./tg-i18n";
 import { classifyTeamAgentEnd } from "../../shared/agent-end";
 import { shouldRelayUnsolicitedNotice, shouldSendTyping } from "../../shared/remote-communication";
 import { classifyTaskIntake, extractRosterMentions, parseModeCommand, parseSoloTask, renderTelegramStartNotice, renderTelegramTeamStatus, stripLeadingMentionsForIntent } from "../../shared/team-remote";
@@ -62,6 +69,36 @@ import {
 } from "./format";
 import { routeIntent, answerQuestion, registerDialogueTracker } from "./dialogue";
 import { PendingModeRegistry, type PendingEntry } from "./mode-picker";
+import {
+  PromptImproveController,
+  TypingPulse,
+  matchesPickerCallback,
+  runPromptEnhancement,
+} from "./prompt-improve-controller";
+import { TelegramLaunchArbiter } from "./task-launch-controller";
+import {
+  ModelPickerLifecycle,
+  ModelSwitchWorkQueue,
+  PickerMessageController,
+  type ModelPickerCloseReason,
+} from "./model-picker-controller";
+import {
+  buildModelCatalog,
+  buildQuickModels,
+  filterModelPairs,
+  isModelSwitchBusy,
+  paginateModelMatches,
+  paginateProfileModels,
+  type TelegramModelPair,
+} from "../../shared/model-selection";
+import {
+  canRegenerateEnhancement,
+  limitEnhancedPrompt,
+  quoteOriginalPrompt,
+  resolveEnhanceLaunch,
+  timeoutEnhanceLaunch,
+  type EnhanceLaunch,
+} from "../../shared/telegram-enhance";
 
 const appStartedAt = Date.now();
 /** the picker auto-starts Solo after this quiet period */
@@ -83,11 +120,40 @@ interface PendingModePayload {
   message: InboundMessage;
   text: string;
   mentions: string[];
+  improve: PromptImproveController;
+  picker: PickerMessageController<InlineKeyboard>;
+  enhanceTyping: TypingPulse;
 }
 
 interface TeamStartNotice {
   target: ChatTarget;
   editMessageId?: number;
+}
+
+interface ModelPickerSession {
+  id: string;
+  chatKey: string;
+  ownerUserId: number;
+  bot: StoredBot;
+  message: InboundMessage;
+  picker: PickerMessageController<InlineKeyboard>;
+  catalog: TelegramModelPair[];
+  matches: TelegramModelPair[];
+  query: string;
+  selected: TelegramModelPair | null;
+  closedReason?: ModelPickerCloseReason;
+}
+
+interface PendingRemoteModelSwitch {
+  session: ModelPickerSession;
+  pair: TelegramModelPair;
+  origin: string;
+  switching: boolean;
+  canonicalPending: boolean;
+  requestId?: string;
+  canonicalCompletion?: Promise<void>;
+  resolveCanonical?: () => void;
+  signal?: AbortSignal;
 }
 
 class RemoteManager implements BotDelegate {
@@ -112,6 +178,8 @@ class RemoteManager implements BotDelegate {
   private privacyHinted = new Set<string>();
   /** task origin controls typing, questions and the one final reply */
   private activeTaskTarget: ChatTarget | null = null;
+  private launchSeq = 0;
+  private readonly launchArbiter = new TelegramLaunchArbiter();
   /** one pending Solo/Team choice per bot/chat; nothing survives an IDE restart */
   private pending = new PendingModeRegistry<PendingModePayload>(
     (fn, ms) => setTimeout(fn, ms),
@@ -119,6 +187,16 @@ class RemoteManager implements BotDelegate {
   );
   /** Team notice waits for the router's real slice assignment. */
   private teamStartNotice: TeamStartNotice | null = null;
+  private modelSeq = 0;
+  private modelPickers = new Map<string, ModelPickerSession>();
+  private pendingModelSwitches = new Map<string, PendingRemoteModelSwitch>();
+  private stopModelObserver: (() => void) | null = null;
+  private readonly modelSwitchWork = new ModelSwitchWorkQueue();
+  private readonly modelPickerLifecycle = new ModelPickerLifecycle({
+    schedule: (fn, ms) => setTimeout(fn, ms),
+    cancel: (timer) => clearTimeout(timer as NodeJS.Timeout),
+    onClose: (id, reason) => this.onModelPickerClosed(id, reason),
+  });
   /** chat-watch layer (group listening, proposals) — deletable with the module */
   readonly watch = new WatchManager({
     runtime: (botId) => this.runtimes.get(botId),
@@ -147,64 +225,548 @@ class RemoteManager implements BotDelegate {
     return `${botId}:${chatId}`;
   }
 
-  private async createModePicker(runtime: BotRuntime, bot: StoredBot, message: InboundMessage, text: string): Promise<void> {
-    const payload: PendingModePayload = { runtime, bot, message, text, mentions: extractRosterMentions(text, teamRoster()) };
-    const { entry, evicted } = this.pending.open(this.pendingChatKey(bot.id, message.chatId), message.userId, payload);
-    if (evicted?.pickerMessageId !== null && evicted) {
-      void evicted.payload.runtime.editMd(evicted.payload.message.chatId, evicted.pickerMessageId, escapeMd(tg(tgLangFor(evicted.payload.message.languageCode)).pickerCancelled));
+  private modePickerKeyboard(id: string): InlineKeyboard {
+    const entry = this.pending.get(id);
+    const L = tg(tgLangFor(entry?.payload.message.languageCode));
+    const state = entry?.payload.improve.snapshot();
+    const keyboard = new InlineKeyboard()
+      .text(L.pickerSolo, `mode:${id}:solo`)
+      .text(L.pickerTeam, `mode:${id}:team`);
+    if (state?.kind === "picker" && state.canImprove) {
+      keyboard.row().text(L.pickerEnhance, `mode:${id}:enhance`);
     }
-    this.pushRemoteAnswerToIde(message.username, bot.name, text);
+    return keyboard.row().text(L.pickerCancel, `mode:${id}:cancel`);
+  }
+
+  private async createModePicker(runtime: BotRuntime, bot: StoredBot, message: InboundMessage, text: string): Promise<void> {
+    const picker = new PickerMessageController<InlineKeyboard>(message.chatId, message.messageId, {
+      send: (body, keyboard, replyToMessageId) => runtime.sendMd(message.chatId, body, keyboard, replyToMessageId),
+      edit: (messageId, body, keyboard) => runtime.editMd(message.chatId, messageId, body, keyboard),
+    });
+    const payload: PendingModePayload = {
+      runtime,
+      bot,
+      message,
+      picker,
+      text,
+      mentions: extractRosterMentions(text, teamRoster()),
+      improve: new PromptImproveController(),
+      enhanceTyping: new TypingPulse(
+        () => runtime.sendTyping(message.chatId),
+        (fn, ms) => setInterval(fn, ms),
+        (timer) => clearInterval(timer as NodeJS.Timeout),
+      ),
+    };
+    const { entry, evicted } = this.pending.open(this.pendingChatKey(bot.id, message.chatId), message.userId, payload);
+    evicted?.payload.enhanceTyping.stop();
+    if (evicted) {
+      void evicted.payload.picker.edit(escapeMd(tg(tgLangFor(evicted.payload.message.languageCode)).pickerCancelled));
+    }
     const L = tg(tgLangFor(message.languageCode));
-    const keyboard = new InlineKeyboard().text(L.pickerSolo, `mode:${entry.id}:solo`).text(L.pickerTeam, `mode:${entry.id}:team`);
-    const pickerId = await this.reply(runtime, message, escapeMd(L.modePicker), keyboard);
+    const pickerId = await picker.send(escapeMd(L.modePicker), this.modePickerKeyboard(entry.id));
     if (pickerId === null) {
       this.pending.claim(entry.id);
       return;
     }
-    if (!this.pending.setPickerMessageId(entry.id, pickerId)) return;
-    this.pending.arm(entry.id, PICKER_TIMEOUT_MS, (expired) => void this.startPendingMode(expired, "solo", "timeout"));
+    if (!this.pending.setPickerMessageId(entry.id, pickerId)) {
+      await picker.edit(escapeMd(L.pickerCancelled));
+      return;
+    }
+    this.pending.arm(entry.id, PICKER_TIMEOUT_MS, (expired) => {
+      void this.startPendingLaunch(expired, timeoutEnhanceLaunch(expired.payload.text), "timeout");
+    });
   }
 
-  /** Starts a claimed pending task; the picker message becomes its receipt. */
-  private async startPendingMode(entry: PendingEntry<PendingModePayload>, mode: "solo" | "team", by: string): Promise<boolean> {
-    const { runtime, bot, message, text, mentions } = entry.payload;
-    const lang = tgLangFor(message.languageCode);
-    const editPicker = (body: string): Promise<boolean> =>
-      entry.pickerMessageId === null ? Promise.resolve(false) : runtime.editMd(message.chatId, entry.pickerMessageId, escapeMd(body));
-    this.activeTaskTarget = this.taskTarget(runtime, bot, message);
-    this.taskFinalSent = false;
-    if (mode === "solo") {
-      await editPicker(tg(lang).soloStarted);
-      if (!this.bridge.prompt(text, { username: message.username, botName: bot.name }, { echo: false })) {
-        this.activeTaskTarget = null;
-        await editPicker(tg(lang).agentNotRunning);
-        return false;
-      }
-      this.log(bot.id, bot.username, `@${message.username}`, "task", `${by}: solo ${text}`.slice(0, 120));
-      return true;
-    }
-    this.teamStartNotice = {
-      target: this.activeTaskTarget,
-      ...(entry.pickerMessageId !== null ? { editMessageId: entry.pickerMessageId } : {}),
-    };
-    if (!startTeamFromRemote({ goal: text, mentions, via: { username: message.username, botName: bot.name }, echo: false }).ok) {
-      this.teamStartNotice = null;
-      this.activeTaskTarget = null;
-      await editPicker(tg(lang).teamStartFailed);
+  /** Starts exactly the prompt version and execution mode chosen in Telegram. */
+  private async startPendingLaunch(
+    entry: PendingEntry<PendingModePayload>,
+    launch: EnhanceLaunch,
+    by: string,
+  ): Promise<boolean> {
+    const { runtime, bot, message, mentions } = entry.payload;
+    const L = tg(tgLangFor(message.languageCode));
+    const editPicker = (body: string): Promise<boolean> => entry.payload.picker.edit(escapeMd(body));
+    const target = this.taskTarget(runtime, bot, message);
+    const launchId = `launch_${++this.launchSeq}`;
+    const receipt = by === "timeout" ? L.enhanceTimeout : launch.enhanced
+      ? launch.mode === "solo" ? L.enhancedSolo : L.enhancedTeam
+      : launch.mode === "solo" ? L.soloStarted : L.originalTeam;
+
+    const result = await this.launchArbiter.tryLaunch({
+      id: launchId,
+      isBusy: () => isModelSwitchBusy(this.bridge.getStatus()?.state, isTeamRunActive()),
+      start: async () => {
+        await editPicker(receipt);
+        if (launch.mode === "solo") {
+          const display = launch.enhanced
+            ? { enhanced: true as const, originalText: launch.originalText }
+            : undefined;
+          return this.bridge.prompt(launch.text, { username: message.username, botName: bot.name }, display);
+        }
+        const team = { goal: launch.text, mentions, via: { username: message.username, botName: bot.name } };
+        return launch.enhanced
+          ? startTeamFromRemote({ ...team, enhanced: true, originalText: launch.originalText }).ok
+          : startTeamFromRemote(team).ok;
+      },
+      onAccepted: () => {
+        this.activeTaskTarget = target;
+        this.taskFinalSent = false;
+        if (launch.mode === "team") {
+          this.teamStartNotice = {
+            target,
+            ...(entry.pickerMessageId !== null ? { editMessageId: entry.pickerMessageId } : {}),
+          };
+        }
+      },
+    });
+
+    if (result.status === "busy") {
+      await editPicker(L.launchBusyNotStarted);
       return false;
     }
-    this.log(bot.id, bot.username, `@${message.username}`, "task", `${by}: team ${text}`.slice(0, 120));
+    if (result.status === "rejected") {
+      await editPicker(launch.mode === "team" ? L.teamStartFailed : L.agentNotRunning);
+      return false;
+    }
+    if (launch.enhanced) {
+      this.log(bot.id, bot.username, `@${message.username}`, "task", "enhance used via Telegram");
+    }
+    this.log(
+      bot.id,
+      bot.username,
+      `@${message.username}`,
+      "task",
+      `${by}: ${launch.enhanced ? "enhanced " : ""}${launch.mode} ${launch.text}`.slice(0, 120),
+    );
     return true;
   }
 
-  private async startDirectTeam(runtime: BotRuntime, bot: StoredBot, message: InboundMessage, text: string, mentions: string[]): Promise<boolean> {
+  private async enhancePending(entry: PendingEntry<PendingModePayload>): Promise<void> {
+    const payload = entry.payload;
+    if (this.pending.get(entry.id) !== entry || !payload.improve.beginEnhance()) return;
+    this.pending.pause(entry.id);
+    const L = tg(tgLangFor(payload.message.languageCode));
+    const run = await runPromptEnhancement({
+      showEnhancing: () =>
+        entry.pickerMessageId === null
+          ? Promise.resolve(false)
+          : payload.picker.edit(
+              escapeMd(`${L.pickerEnhance}…`),
+              new InlineKeyboard().text(L.pickerCancel, `mode:${entry.id}:cancel`),
+            ),
+      isActive: () => this.pending.get(entry.id) === entry,
+      typing: payload.enhanceTyping,
+      enhance: () =>
+        enhancePromptFromRemote(payload.text, `tg:@${payload.message.username}`).catch((error: unknown) => ({
+          ok: false as const,
+          error: error instanceof Error ? error.message : String(error),
+        })),
+    });
+    if (run.status === "cancelled" || this.pending.get(entry.id) !== entry) return;
+    const result = run.result;
+
+    if (!result.ok) {
+      payload.improve.fail();
+      const detail = result.error.replace(/[\r\n]+/g, " ").slice(0, 160);
+      this.log(payload.bot.id, payload.bot.username, "system", "task", `enhance failed: ${detail}`);
+      if (entry.pickerMessageId !== null) {
+        await payload.picker.edit(
+          escapeMd(`${L.enhanceFailed}\n\n${L.modePicker}`),
+          this.modePickerKeyboard(entry.id),
+        );
+      }
+      this.pending.arm(entry.id, PICKER_TIMEOUT_MS, (expired) => {
+        void this.startPendingLaunch(expired, timeoutEnhanceLaunch(expired.payload.text), "timeout");
+      });
+      return;
+    }
+
+    const improvedText = limitEnhancedPrompt(result.text);
+    if (!payload.improve.complete(improvedText)) return;
+    const state = payload.improve.snapshot();
+    if (state.kind !== "enhanced") return;
+    const keyboard = new InlineKeyboard()
+      .text(L.enhancedSolo, `mode:${entry.id}:improved-solo`)
+      .text(L.enhancedTeam, `mode:${entry.id}:improved-team`)
+      .row()
+      .text(L.originalSolo, `mode:${entry.id}:original-solo`)
+      .text(L.originalTeam, `mode:${entry.id}:original-team`)
+      .row();
+    if (canRegenerateEnhancement(state.rounds)) {
+      keyboard.text(L.enhanceRegenerate, `mode:${entry.id}:regenerate`);
+    }
+    keyboard.text(L.pickerCancel, `mode:${entry.id}:cancel`);
+    if (entry.pickerMessageId !== null) {
+      await payload.picker.edit(
+        escapeMd(
+          `${L.enhanceOriginalHeading}:\n«${quoteOriginalPrompt(payload.text)}»\n\n` +
+          `${L.enhanceImprovedHeading}:\n${state.improvedText}\n\n${L.enhanceTimeoutDisclosure}`,
+        ),
+        keyboard,
+      );
+    }
+    this.pending.arm(entry.id, PICKER_TIMEOUT_MS, (expired) => {
+      void this.startPendingLaunch(expired, timeoutEnhanceLaunch(expired.payload.text), "timeout");
+    });
+  }
+
+  private modelQuickScreen(session: ModelPickerSession): { text: string; keyboard: InlineKeyboard } {
+    const state = getModelsStateForRemote();
+    const L = tg(tgLangFor(session.message.languageCode));
+    const activeSelector = state?.active ? `${state.active.provider}/${state.active.id}` : null;
+    const activeLabel = state?.active ? `${state.active.id} (${state.active.provider})` : "—";
+    const quick = buildQuickModels(session.catalog, state?.recentModels ?? [], 6);
+    const keyboard = new InlineKeyboard();
+    for (const pair of quick) {
+      const index = session.catalog.indexOf(pair);
+      const marker = pair.selector === activeSelector ? "✓ " : "";
+      keyboard.text(`${marker}${pair.label}`, `model:${session.id}:pick:${index}`).row();
+    }
+    keyboard.text(L.modelAll(session.catalog.length), `model:${session.id}:profiles`);
+    return { text: L.modelQuickTitle(activeLabel), keyboard };
+  }
+
+  private modelProfilesScreen(session: ModelPickerSession): { text: string; keyboard: InlineKeyboard } {
+    const L = tg(tgLangFor(session.message.languageCode));
+    const activeProfile = getModelsStateForRemote()?.active?.provider;
+    const counts = new Map<string, { count: number; firstIndex: number }>();
+    for (let index = 0; index < session.catalog.length; index++) {
+      const pair = session.catalog[index];
+      const found = counts.get(pair.profile);
+      if (found) found.count++;
+      else counts.set(pair.profile, { count: 1, firstIndex: index });
+    }
+    const keyboard = new InlineKeyboard();
+    for (const [profile, entry] of counts) {
+      keyboard
+        .text(
+          L.modelProfileRow(profile, entry.count, profile === activeProfile),
+          `model:${session.id}:profile:${entry.firstIndex}`,
+        )
+        .row();
+    }
+    keyboard.text(L.modelBackQuick, `model:${session.id}:quick`);
+    return { text: L.modelProfilesTitle, keyboard };
+  }
+
+  private modelProfileScreen(
+    session: ModelPickerSession,
+    profile: string,
+    requestedPage: number,
+  ): { text: string; keyboard: InlineKeyboard } {
+    const L = tg(tgLangFor(session.message.languageCode));
+    const page = paginateProfileModels(session.catalog, profile, requestedPage, 8);
+    const keyboard = new InlineKeyboard();
+    for (const pair of page.items) {
+      keyboard.text(pair.label, `model:${session.id}:pick:${session.catalog.indexOf(pair)}`).row();
+    }
+    if (page.pages > 1) {
+      const profileIndex = session.catalog.findIndex((pair) => pair.profile === profile);
+      if (page.page > 0) keyboard.text("←", `model:${session.id}:page:${profileIndex}:${page.page - 1}`);
+      keyboard.text(`${page.page + 1}/${page.pages}`, `model:${session.id}:noop`);
+      if (page.page + 1 < page.pages) keyboard.text("→", `model:${session.id}:page:${profileIndex}:${page.page + 1}`);
+      keyboard.row();
+    }
+    keyboard.text(L.modelBackProfiles, `model:${session.id}:profiles`).row();
+    keyboard.text(L.modelBackQuick, `model:${session.id}:quick`);
+    return { text: L.modelProfileTitle(profile), keyboard };
+  }
+
+  private modelFilteredScreen(
+    session: ModelPickerSession,
+    requestedPage: number,
+  ): { text: string; keyboard: InlineKeyboard } {
+    const L = tg(tgLangFor(session.message.languageCode));
+    const page = paginateModelMatches(session.matches, requestedPage, 8);
+    const keyboard = new InlineKeyboard();
+    for (const pair of page.items) {
+      keyboard.text(pair.label, `model:${session.id}:pick:${session.catalog.indexOf(pair)}`).row();
+    }
+    if (page.pages > 1) {
+      if (page.page > 0) keyboard.text("←", `model:${session.id}:matches:${page.page - 1}`);
+      keyboard.text(`${page.page + 1}/${page.pages}`, `model:${session.id}:noop`);
+      if (page.page + 1 < page.pages) keyboard.text("→", `model:${session.id}:matches:${page.page + 1}`);
+      keyboard.row();
+    }
+    keyboard.text(L.modelBackQuick, `model:${session.id}:quick`);
+    return { text: L.modelMatches(session.query, session.matches.length), keyboard };
+  }
+
+  private async editModelScreen(
+    session: ModelPickerSession,
+    screen: { text: string; keyboard?: InlineKeyboard },
+  ): Promise<boolean> {
+    return session.picker.edit(escapeMd(screen.text), screen.keyboard);
+  }
+
+  private closeModelSession(session: ModelPickerSession, reason: ModelPickerCloseReason): void {
+    if (this.modelPickerLifecycle.close(session.id, reason)) return;
+    this.pendingModelSwitches.get(session.id)?.resolveCanonical?.();
+    this.pendingModelSwitches.delete(session.id);
+    this.modelPickers.delete(session.id);
+  }
+
+  private onModelPickerClosed(id: string, reason: ModelPickerCloseReason): void {
+    const session = this.modelPickers.get(id);
+    if (!session) return;
+    session.closedReason = reason;
+    this.pendingModelSwitches.get(id)?.resolveCanonical?.();
+    this.pendingModelSwitches.delete(id);
+    this.modelPickers.delete(id);
+    if (reason === "expired") {
+      void this.editModelScreen(session, { text: tg(tgLangFor(session.message.languageCode)).modelSessionExpired });
+    } else if (reason === "replaced") {
+      void this.editModelScreen(session, { text: tg(tgLangFor(session.message.languageCode)).modelSessionReplaced });
+    }
+  }
+
+  private isModelSwitchSessionActive(
+    pending: PendingRemoteModelSwitch,
+    signal: AbortSignal | undefined = pending.signal,
+  ): boolean {
+    const { session } = pending;
+    return (
+      signal !== undefined &&
+      !signal.aborted &&
+      this.modelPickers.get(session.id) === session &&
+      this.pendingModelSwitches.get(session.id) === pending &&
+      this.modelPickerLifecycle.getPhase(session.id) !== null
+    );
+  }
+
+  private async completeModelSwitch(
+    pending: PendingRemoteModelSwitch,
+    result: { ok: boolean; error?: string },
+    signal: AbortSignal | undefined = pending.signal,
+  ): Promise<void> {
+    if (!this.isModelSwitchSessionActive(pending, signal)) return;
+    const { session, pair } = pending;
+    const L = tg(tgLangFor(session.message.languageCode));
+    const detail = result.error ?? "unknown error";
+    await this.editModelScreen(session, {
+      text: result.ok ? L.modelSwitched(pair.modelId, pair.profile) : L.modelSwitchFailed(detail),
+    });
+    if (!this.isModelSwitchSessionActive(pending, signal)) return;
+    this.log(
+      session.bot.id,
+      session.bot.username,
+      `@${session.message.username}`,
+      "command",
+      result.ok ? telegramModelSwitchActivityDetail(pair.selector) : `model switch failed: ${detail}`,
+    );
+    this.closeModelSession(session, "completed");
+  }
+
+  private async performPendingModelSwitch(
+    pending: PendingRemoteModelSwitch,
+    signal: AbortSignal,
+  ): Promise<void> {
+    pending.signal = signal;
+    if (
+      !this.isModelSwitchSessionActive(pending, signal) ||
+      pending.switching ||
+      pending.canonicalPending ||
+      isModelSwitchBusy(this.bridge.getStatus()?.state, isTeamRunActive())
+    ) return;
+    const state = getModelsStateForRemote();
+    if (state?.active && `${state.active.provider}/${state.active.id}` === pending.pair.selector) {
+      await this.completeModelSwitch(pending, { ok: true }, signal);
+      return;
+    }
+    pending.switching = true;
+    this.modelPickerLifecycle.setPhase(pending.session.id, "switching");
+    const L = tg(tgLangFor(pending.session.message.languageCode));
+    await this.editModelScreen(pending.session, { text: L.modelSwitching(pending.pair.selector) });
+    if (!this.isModelSwitchSessionActive(pending, signal)) return;
+    let result: { ok: boolean; pending: boolean; requestId?: string; error?: string };
+    try {
+      result = await switchModelFromRemote(pending.pair.selector, pending.origin);
+    } catch (error) {
+      pending.switching = false;
+      if (!this.isModelSwitchSessionActive(pending, signal)) return;
+      await this.completeModelSwitch(
+        pending,
+        { error: error instanceof Error ? error.message : String(error), ok: false },
+        signal,
+      );
+      return;
+    }
+    pending.switching = false;
+    if (!this.isModelSwitchSessionActive(pending, signal)) return;
+    if (result.pending) {
+      if (!result.requestId) {
+        await this.completeModelSwitch(
+          pending,
+          { ok: false, error: "model switch queue lost its correlation id" },
+          signal,
+        );
+        return;
+      }
+      const completion = Promise.withResolvers<void>();
+      pending.canonicalPending = true;
+      pending.requestId = result.requestId;
+      pending.canonicalCompletion = completion.promise;
+      pending.resolveCanonical = () => completion.resolve();
+      this.modelPickerLifecycle.setPhase(pending.session.id, "queued");
+      await this.editModelScreen(pending.session, { text: L.modelQueued(pending.pair.selector) });
+      if (!this.isModelSwitchSessionActive(pending, signal)) return;
+      await pending.canonicalCompletion;
+      return;
+    }
+    await this.completeModelSwitch(pending, result, signal);
+  }
+
+  private processPendingModelSwitches(): void {
+    for (const pending of this.pendingModelSwitches.values()) {
+      void this.modelSwitchWork.run(
+        pending.session.id,
+        (signal) => this.performPendingModelSwitch(pending, signal),
+      );
+    }
+  }
+
+  private onModelSwitchResult(result: ModelSwitchResult): void {
+    for (const pending of this.pendingModelSwitches.values()) {
+      if (!pending.canonicalPending || pending.requestId !== result.requestId) continue;
+      void this.completeModelSwitch(pending, result, pending.signal).finally(() => pending.resolveCanonical?.());
+      return;
+    }
+  }
+
+  private async selectModel(session: ModelPickerSession, pair: TelegramModelPair): Promise<void> {
+    const state = getModelsStateForRemote();
+    const L = tg(tgLangFor(session.message.languageCode));
+    if (state?.active && `${state.active.provider}/${state.active.id}` === pair.selector) {
+      await this.editModelScreen(session, { text: L.modelAlreadyActive(pair.modelId, pair.profile) });
+      this.closeModelSession(session, "completed");
+      return;
+    }
+    session.selected = pair;
+    if (isModelSwitchBusy(this.bridge.getStatus()?.state, isTeamRunActive())) {
+      this.modelPickerLifecycle.setPhase(session.id, "selected");
+      const keyboard = new InlineKeyboard()
+        .text(L.modelQueue, `model:${session.id}:queue`)
+        .row()
+        .text(L.modelInterrupt, `model:${session.id}:interrupt`)
+        .row()
+        .text(L.pickerCancel, `model:${session.id}:cancel`);
+      await this.editModelScreen(session, { text: L.modelBusy(pair.selector), keyboard });
+      return;
+    }
+    this.modelPickerLifecycle.setPhase(session.id, "switching");
+    const pending: PendingRemoteModelSwitch = {
+      session,
+      pair,
+      origin: `tg:@${session.message.username}:${session.id}`,
+      switching: false,
+      canonicalPending: false,
+    };
+    this.pendingModelSwitches.set(session.id, pending);
+    await this.modelSwitchWork.run(
+      session.id,
+      (signal) => this.performPendingModelSwitch(pending, signal),
+    );
+  }
+
+  private async openModelPicker(
+    runtime: BotRuntime,
+    bot: StoredBot,
+    message: InboundMessage,
+    query: string,
+  ): Promise<void> {
+    const state = getModelsStateForRemote();
+    const L = tg(tgLangFor(message.languageCode));
+    if (!state) {
+      await this.reply(runtime, message, escapeMd(L.modelSwitchFailed("models service unavailable")));
+      return;
+    }
+    const catalog = buildModelCatalog(state);
+    if (!catalog.length) {
+      await this.reply(runtime, message, escapeMd(L.modelNoModels));
+      return;
+    }
+    const matches = query ? filterModelPairs(catalog, query) : [];
+    if (query && !matches.length) {
+      await this.reply(runtime, message, escapeMd(L.modelNotFound(query)));
+      return;
+    }
+    const session: ModelPickerSession = {
+      id: `model_${++this.modelSeq}`,
+      chatKey: this.pendingChatKey(bot.id, message.chatId),
+      ownerUserId: message.userId,
+      bot,
+      message,
+      picker: new PickerMessageController<InlineKeyboard>(message.chatId, message.messageId, {
+        send: (body, keyboard, replyToMessageId) => runtime.sendMd(message.chatId, body, keyboard, replyToMessageId),
+        edit: (messageId, body, keyboard) => runtime.editMd(message.chatId, messageId, body, keyboard),
+      }),
+      catalog,
+      matches,
+      query,
+      selected: null,
+    };
+    this.modelPickers.set(session.id, session);
+    const opened = this.modelPickerLifecycle.open(session.id, session.chatKey);
+    if (!opened.ok) {
+      this.modelPickers.delete(session.id);
+      await this.reply(runtime, message, escapeMd(L.modelSessionBusy));
+      return;
+    }
+
+    const initial = query && matches.length > 1
+      ? this.modelFilteredScreen(session, 0)
+      : query
+        ? { text: L.modelSwitching(matches[0].selector), keyboard: undefined }
+        : this.modelQuickScreen(session);
+    const messageId = await session.picker.send(escapeMd(initial.text), initial.keyboard);
+    if (messageId === null) {
+      this.closeModelSession(session, "disposed");
+      return;
+    }
+    if (session.closedReason) {
+      const closedText = session.closedReason === "replaced"
+        ? L.modelSessionReplaced
+        : session.closedReason === "expired"
+          ? L.modelSessionExpired
+          : L.lostPendingTask;
+      await session.picker.edit(escapeMd(closedText));
+      return;
+    }
+    if (query && matches.length === 1) {
+      await this.selectModel(session, matches[0]);
+    } else {
+      this.modelPickerLifecycle.browse(session.id, PICKER_TIMEOUT_MS);
+    }
+  }
+
+  private async startDirectTeam(
+    runtime: BotRuntime,
+    bot: StoredBot,
+    message: InboundMessage,
+    text: string,
+    mentions: string[],
+  ): Promise<boolean> {
     const target = this.taskTarget(runtime, bot, message);
-    this.activeTaskTarget = target;
-    this.taskFinalSent = false;
-    this.teamStartNotice = { target };
-    if (!startTeamFromRemote({ goal: text, mentions, via: { username: message.username, botName: bot.name } }).ok) {
-      this.activeTaskTarget = null;
-      this.teamStartNotice = null;
+    const result = await this.launchArbiter.tryLaunch({
+      id: `launch_${++this.launchSeq}`,
+      isBusy: () => isModelSwitchBusy(this.bridge.getStatus()?.state, isTeamRunActive()),
+      start: () =>
+        startTeamFromRemote({
+          goal: text,
+          mentions,
+          via: { username: message.username, botName: bot.name },
+        }).ok,
+      onAccepted: () => {
+        this.activeTaskTarget = target;
+        this.taskFinalSent = false;
+        this.teamStartNotice = { target };
+      },
+    });
+    if (result.status === "busy") {
+      await this.reply(runtime, message, escapeMd(tg(tgLangFor(message.languageCode)).launchBusyNotStarted));
+      return false;
+    }
+    if (result.status === "rejected") {
       await this.reply(runtime, message, escapeMd(tg(tgLangFor(message.languageCode)).teamStartFailed));
       return false;
     }
@@ -212,15 +774,67 @@ class RemoteManager implements BotDelegate {
     return true;
   }
 
+  private async startDirectSolo(
+    runtime: BotRuntime,
+    bot: StoredBot,
+    message: InboundMessage,
+    text: string,
+  ): Promise<boolean> {
+    const L = tg(tgLangFor(message.languageCode));
+    const target = this.taskTarget(runtime, bot, message);
+    const result = await this.launchArbiter.tryLaunch({
+      id: `launch_${++this.launchSeq}`,
+      isBusy: () => isModelSwitchBusy(this.bridge.getStatus()?.state, isTeamRunActive()),
+      start: () => this.bridge.prompt(text, { username: message.username, botName: bot.name }),
+      onAccepted: () => {
+        this.activeTaskTarget = target;
+        this.taskFinalSent = false;
+      },
+    });
+    if (result.status === "busy") {
+      await this.reply(runtime, message, escapeMd(L.launchBusyNotStarted));
+      return false;
+    }
+    if (result.status === "rejected") {
+      await this.reply(runtime, message, escapeMd(L.agentNotRunning));
+      return false;
+    }
+    this.log(bot.id, bot.username, `@${message.username}`, "task", `/solo ${text}`.slice(0, 120));
+    await this.reply(runtime, message, escapeMd(L.soloStarted));
+    return true;
+  }
+
   // ================================================== lifecycle
+
+  private handleTerminalAgentStatus(state: string): void {
+    this.stopTyping();
+    this.currentUi = null;
+    this.teamStartNotice = null;
+    this.launchArbiter.handleStatus(state, () => {
+      if (isTeamRunActive()) stopTeamFromRemote();
+      this.teamTaskActive = false;
+      if (this.activeTaskTarget && !this.taskFinalSent) {
+        this.sendErrorOnce();
+      } else {
+        this.activeTaskTarget = null;
+      }
+    });
+  }
 
   async init(): Promise<void> {
     this.tracker.attach();
     // Chat Dialogue: the composer borrows the tracker's diffstat/elapsed/result
     registerDialogueTracker(this.tracker);
-    this.bridge.onStatus(() => this.refreshTyping());
+    this.bridge.onStatus((status) => {
+      if (status.state === "dead" || status.state === "unavailable") {
+        this.handleTerminalAgentStatus(status.state);
+      }
+      this.refreshTyping();
+      this.processPendingModelSwitches();
+    });
     this.bridge.onEvent((e) => this.onAgentEvent(e));
     this.bridge.onUiRequest((req) => this.onAgentQuestion(req));
+    this.stopModelObserver = observeModelSwitchResults((result) => this.onModelSwitchResult(result));
 
     const store = loadStore();
     // owner migration (owner-fix spec): a bot with paired users but no owner
@@ -255,6 +869,7 @@ class RemoteManager implements BotDelegate {
       this.teamTaskActive = false;
       this.stopTyping();
       this.sendFinalOnce(sanitizeOutbound(p.report).trim(), p.elapsedMs);
+      this.processPendingModelSwitches();
     });
   }
 
@@ -263,11 +878,20 @@ class RemoteManager implements BotDelegate {
     registerTeamGateNotifier(null);
     registerTeamEndNotifier(null);
     registerDialogueTracker(null);
+    this.stopModelObserver?.();
+    this.modelSwitchWork.dispose();
+    this.stopModelObserver = null;
     for (const entry of this.pending.drain()) {
+      entry.payload.enhanceTyping.stop();
       if (entry.pickerMessageId === null) continue;
-      const { runtime, message } = entry.payload;
-      await runtime.editMd(message.chatId, entry.pickerMessageId, escapeMd(tg(tgLangFor(message.languageCode)).lostPendingTask));
+      await entry.payload.picker.edit(escapeMd(tg(tgLangFor(entry.payload.message.languageCode)).lostPendingTask));
     }
+    for (const session of [...this.modelPickers.values()]) {
+      await this.editModelScreen(session, { text: tg(tgLangFor(session.message.languageCode)).lostPendingTask });
+    }
+    this.modelPickerLifecycle.dispose();
+    this.modelPickers.clear();
+    this.pendingModelSwitches.clear();
     this.watch.dispose();
     // Flush a final broadcast if a task is mid-flight.
     const st = this.bridge.getStatus();
@@ -285,6 +909,7 @@ class RemoteManager implements BotDelegate {
       ]);
     }
     this.stopTyping();
+    this.launchArbiter.release();
     this.cancelPairing();
     for (const rt of this.runtimes.values()) await rt.stop();
     this.runtimes.clear();
@@ -771,7 +1396,6 @@ class RemoteManager implements BotDelegate {
       return;
     }
     if (intake.kind === "team") {
-      this.pushRemoteAnswerToIde(msg.username, bot.name, text);
       void this.startDirectTeam(rt, bot, msg, text, intake.mentions);
       return;
     }
@@ -788,18 +1412,184 @@ class RemoteManager implements BotDelegate {
     if (this.watch.handleCallback(botId, cb.data, cb.username, cb.ack)) return;
     // team plan approval: team:<runId> | team:open (informational)
     // agent question buttons: ui:<reqId>:<optIndex|yes|no>
-    // Solo/Team picker: mode:<taskId>:solo|team
+    // Prompt Improve picker: mode:<taskId>:<action>
     if (cb.data.startsWith("mode:")) {
       const [, id, choice] = cb.data.split(":");
-      const L = tg(tgLangFor(cb.languageCode));
+      const entry = this.pending.get(id);
+      const L = tg(tgLangFor(entry?.payload.message.languageCode ?? cb.languageCode));
+      if (!entry) {
+        cb.ack(L.pickerExpired);
+        if (cb.messageId !== undefined) void rt.editMd(cb.chatId, cb.messageId, escapeMd(L.lostPendingTask));
+        return;
+      }
+      if (
+        !matchesPickerCallback(
+          { ownerUserId: entry.ownerUserId, chatId: entry.payload.message.chatId, messageId: entry.pickerMessageId },
+          { userId: cb.userId, chatId: cb.chatId, messageId: cb.messageId },
+        )
+      ) {
+        cb.ack(entry.ownerUserId === cb.userId ? L.pickerExpired : L.pickerNotYours);
+        return;
+      }
+      const action = entry.payload.improve.resolve(choice);
+      if (action.kind === "invalid") {
+        cb.ack(L.pickerExpired);
+        return;
+      }
+      if (action.kind === "enhance") {
+        cb.ack();
+        void this.enhancePending(entry);
+        return;
+      }
+      if (action.kind === "cancel") {
+        const claim = this.pending.claim(id, cb.userId);
+        if (!claim.ok) {
+          cb.ack(L.pickerExpired);
+          return;
+        }
+        claim.entry.payload.enhanceTyping.stop();
+        cb.ack();
+        if (claim.entry.pickerMessageId !== null) {
+          void claim.entry.payload.picker.edit(escapeMd(L.pickerCancelled));
+        }
+        return;
+      }
       const claim = this.pending.claim(id, cb.userId);
       if (!claim.ok) {
-        cb.ack(claim.reason === "foreign" ? L.pickerNotYours : L.pickerExpired);
-        if (claim.reason === "missing" && cb.messageId !== undefined) void rt.editMd(cb.chatId, cb.messageId, escapeMd(L.lostPendingTask));
+        cb.ack(L.pickerExpired);
         return;
       }
       cb.ack();
-      void this.startPendingMode(claim.entry, choice === "team" ? "team" : "solo", `@${cb.username}`);
+      void this.startPendingLaunch(
+        claim.entry,
+        resolveEnhanceLaunch(action.choice, claim.entry.payload.text, action.improvedText ?? ""),
+        `@${cb.username}`,
+      );
+      return;
+    }
+    // Model picker: model:<sessionId>:<action>[:arg]
+    if (cb.data.startsWith("model:")) {
+      const parts = cb.data.split(":");
+      const session = this.modelPickers.get(parts[1]);
+      const L = tg(tgLangFor(session?.message.languageCode ?? cb.languageCode));
+      if (!session) {
+        cb.ack(L.pickerExpired);
+        return;
+      }
+      if (
+        session.ownerUserId !== cb.userId ||
+        !session.picker.matches(cb.chatId, cb.messageId)
+      ) {
+        cb.ack(session.ownerUserId === cb.userId ? L.pickerExpired : L.pickerNotYours);
+        return;
+      }
+      const action = parts[2];
+      const phase = this.modelPickerLifecycle.getPhase(session.id);
+      if (!phase) {
+        cb.ack(L.pickerExpired);
+        return;
+      }
+      if (action === "noop" && phase === "browse") {
+        cb.ack();
+        return;
+      }
+      if (action === "quick" && phase === "browse") {
+        cb.ack();
+        this.modelPickerLifecycle.browse(session.id, PICKER_TIMEOUT_MS);
+        void this.editModelScreen(session, this.modelQuickScreen(session));
+        return;
+      }
+      if (action === "profiles" && phase === "browse") {
+        cb.ack();
+        this.modelPickerLifecycle.browse(session.id, PICKER_TIMEOUT_MS);
+        void this.editModelScreen(session, this.modelProfilesScreen(session));
+        return;
+      }
+      if (action === "profile" && phase === "browse") {
+        const pair = session.catalog[Number(parts[3])];
+        if (!pair) {
+          cb.ack(L.pickerExpired);
+          return;
+        }
+        cb.ack();
+        this.modelPickerLifecycle.browse(session.id, PICKER_TIMEOUT_MS);
+        void this.editModelScreen(session, this.modelProfileScreen(session, pair.profile, 0));
+        return;
+      }
+      if (action === "page" && phase === "browse") {
+        const pair = session.catalog[Number(parts[3])];
+        const page = Number(parts[4]);
+        if (!pair || !Number.isInteger(page)) {
+          cb.ack(L.pickerExpired);
+          return;
+        }
+        cb.ack();
+        this.modelPickerLifecycle.browse(session.id, PICKER_TIMEOUT_MS);
+        void this.editModelScreen(session, this.modelProfileScreen(session, pair.profile, page));
+        return;
+      }
+      if (action === "matches" && phase === "browse") {
+        const page = Number(parts[3]);
+        if (!Number.isInteger(page)) {
+          cb.ack(L.pickerExpired);
+          return;
+        }
+        cb.ack();
+        this.modelPickerLifecycle.browse(session.id, PICKER_TIMEOUT_MS);
+        void this.editModelScreen(session, this.modelFilteredScreen(session, page));
+        return;
+      }
+      if (action === "pick" && phase === "browse") {
+        const pair = session.catalog[Number(parts[3])];
+        if (!pair) {
+          cb.ack(L.pickerExpired);
+          return;
+        }
+        const active = getModelsStateForRemote()?.active;
+        if (active && `${active.provider}/${active.id}` === pair.selector) {
+          cb.ack(L.modelAlreadyActive(pair.modelId, pair.profile));
+          return;
+        }
+        cb.ack();
+        void this.selectModel(session, pair);
+        return;
+      }
+      if ((action === "queue" || action === "interrupt") && phase === "selected") {
+        const selected = session.selected;
+        if (!selected) {
+          cb.ack(L.pickerExpired);
+          return;
+        }
+        const pending: PendingRemoteModelSwitch = {
+          session,
+          pair: selected,
+          origin: `tg:@${session.message.username}:${session.id}`,
+          switching: false,
+          canonicalPending: false,
+        };
+        this.pendingModelSwitches.set(session.id, pending);
+        this.modelPickerLifecycle.setPhase(session.id, action === "queue" ? "queued" : "switching");
+        cb.ack();
+        if (action === "interrupt") {
+          void this.editModelScreen(session, { text: L.modelSwitching(selected.selector) }).then(() => {
+            if (!stopTeamFromRemote() && isModelSwitchBusy(this.bridge.getStatus()?.state, false)) this.bridge.abort();
+            this.processPendingModelSwitches();
+          });
+        } else {
+          void this.editModelScreen(session, { text: L.modelQueued(selected.selector) }).then(() => {
+            this.processPendingModelSwitches();
+          });
+        }
+        return;
+      }
+      if (action === "cancel" && phase === "selected") {
+        cb.ack();
+        void this.editModelScreen(session, { text: L.pickerCancelled }).finally(() => {
+          this.closeModelSession(session, "cancelled");
+        });
+        return;
+      }
+      cb.ack(L.pickerExpired);
       return;
     }
     if (cb.data.startsWith("ui:")) {
@@ -916,16 +1706,7 @@ class RemoteManager implements BotDelegate {
           void this.reply(rt, msg, escapeMd(L.teamAlreadyActive));
           return;
         }
-        this.activeTaskTarget = this.taskTarget(rt, bot, msg);
-        this.taskFinalSent = false;
-        const ok = this.bridge.prompt(parsed.task, { username: msg.username, botName: bot.name });
-        if (!ok) {
-          this.activeTaskTarget = null;
-          void this.reply(rt, msg, escapeMd(L.agentNotRunning));
-          return;
-        }
-        this.log(bot.id, bot.username, `@${msg.username}`, "task", `/solo ${parsed.task}`.slice(0, 120));
-        void this.reply(rt, msg, escapeMd(L.soloStarted));
+        void this.startDirectSolo(rt, bot, msg, parsed.task);
         return;
       }
       case "/team": {
@@ -942,10 +1723,18 @@ class RemoteManager implements BotDelegate {
         void this.startDirectTeam(rt, bot, msg, parsed.task, extractRosterMentions(parsed.task, teamRoster()));
         return;
       }
+      case "/model": {
+        const query = msg.text.trim().split(/\s+/).slice(1).join(" ").trim();
+        await this.openModelPicker(rt, bot, msg, query);
+        return;
+      }
       case "/status": {
+        const L = tg(tgLangFor(msg.languageCode));
+        const active = getModelsStateForRemote()?.active;
+        const modelLine = active ? L.modelStatus(active.id, active.provider) : L.modelStatus("—", "—");
         const team = teamJournalData();
         if (team && isTeamRunActive()) {
-          const text = renderTelegramTeamStatus(team, tgLangFor(msg.languageCode));
+          const text = `${renderTelegramTeamStatus(team, tgLangFor(msg.languageCode))}\n${modelLine}`;
           rt.sendMd(msg.chatId, "```\n" + text.replace(/[`\\]/g, (c) => `\\${c}`) + "\n```");
           return;
         }
@@ -959,6 +1748,7 @@ class RemoteManager implements BotDelegate {
           st.state === "tool" && st.tool ? `running · ${st.tool}` : st.state;
         const lines = [
           `state: ${stateLine}`,
+          modelLine,
           total ? `todo: ${done}/${total}` : "todo: none",
           `workspace: ${root ? basename(root) : "none open"}`,
           branch ? `branch: ${branch}` : "",
@@ -1036,7 +1826,8 @@ class RemoteManager implements BotDelegate {
         const L = tg(tgLangFor(msg.languageCode));
         const pending = this.pending.cancelByChat(this.pendingChatKey(bot.id, msg.chatId));
         if (pending) {
-          if (pending.pickerMessageId !== null) await rt.editMd(msg.chatId, pending.pickerMessageId, escapeMd(L.pickerCancelled));
+          pending.payload.enhanceTyping.stop();
+          if (pending.pickerMessageId !== null) await pending.payload.picker.edit(escapeMd(L.pickerCancelled));
           this.log(bot.id, bot.username, `@${msg.username}`, "command", "/stop pending");
           void this.reply(rt, msg, escapeMd(L.taskStopped));
           return;
@@ -1046,8 +1837,10 @@ class RemoteManager implements BotDelegate {
           this.stopTyping();
           this.taskFinalSent = true;
           this.activeTaskTarget = null;
+          this.launchArbiter.release();
           this.log(bot.id, bot.username, `@${msg.username}`, "command", "/stop team");
           void this.reply(rt, msg, escapeMd(L.teamStopped));
+          this.processPendingModelSwitches();
           return;
         }
         const st = this.bridge.getStatus();
@@ -1059,6 +1852,7 @@ class RemoteManager implements BotDelegate {
         this.stopTyping();
         this.taskFinalSent = true;
         this.activeTaskTarget = null;
+        this.launchArbiter.release();
         this.log(bot.id, bot.username, `@${msg.username}`, "command", "/stop");
         void this.reply(rt, msg, escapeMd(L.taskStopped));
         return;
@@ -1127,6 +1921,10 @@ class RemoteManager implements BotDelegate {
           this.teamTaskActive = false;
           this.stopTyping();
           if (decision === "error") this.sendErrorOnce();
+          else {
+            this.launchArbiter.release();
+            this.activeTaskTarget = null;
+          }
         });
       } else if (!this.teamTaskActive) {
         this.stopTyping();
@@ -1169,6 +1967,7 @@ class RemoteManager implements BotDelegate {
       target.runtime.sendMd(target.chatId, text, undefined, target.replyToMessageId);
     }
     this.activeTaskTarget = null;
+    this.launchArbiter.release();
   }
 
   private sendCompletionSummary(): void {
@@ -1184,6 +1983,7 @@ class RemoteManager implements BotDelegate {
       target.runtime.sendMd(target.chatId, escapeMd(L.agentError), undefined, target.replyToMessageId);
     }
     this.activeTaskTarget = null;
+    this.launchArbiter.release();
   }
 
   private onAgentQuestion(req: BridgeUiRequest): void {

@@ -93,6 +93,20 @@
 }
 .remote-chip .rc-user { font-family: var(--font-mono); }
 .remote-chip .rc-bot { font-family: var(--font-ui); color: var(--text-mid); font-weight: 500; }
+.improved-provenance { align-self: flex-end; max-width: 92%; }
+.improved-provenance > summary { cursor: pointer; list-style: none; }
+.improved-provenance > summary::-webkit-details-marker { display: none; }
+.improved-provenance .improved-chip { color: var(--energy); border-color: var(--energy-40); background: var(--energy-15); }
+.improved-provenance .improved-original {
+  margin-top: 4px;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-s);
+  color: var(--text-mid);
+  background: var(--bg-2);
+  font-size: 11px;
+  white-space: pre-wrap;
+}
 
 /* ---------- control center ---------- */
 .control-center {

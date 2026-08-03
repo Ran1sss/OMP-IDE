@@ -414,10 +414,25 @@ function nearBottom(): boolean {
   return chatEl.scrollHeight - chatEl.scrollTop - chatEl.clientHeight < 120;
 }
 
-function addUserMessage(text: string, via?: RemoteVia, mentions?: MentionAttachment[]) {
+function addUserMessage(
+  text: string,
+  via?: RemoteVia,
+  mentions?: MentionAttachment[],
+  enhanced?: { originalText: string },
+) {
   panelEl.querySelector(".agent-blank:not(.disabled-state)")?.remove();
   chatEl.append(el("div", { class: "chat-user", text: stripTeamMarkers(text) }));
   if (mentions?.length) chatEl.append(renderMentionChips(mentions));
+  if (enhanced) {
+    chatEl.append(
+      el(
+        "details",
+        { class: "improved-provenance" },
+        el("summary", { class: "remote-chip improved-chip", text: t("agent.improved"), title: enhanced.originalText }),
+        el("div", { class: "improved-original", text: t("agent.improvedOriginal", enhanced.originalText) }),
+      ),
+    );
+  }
   if (via) {
     chatEl.append(
       el(
@@ -716,7 +731,7 @@ function handleEvent(e: OmpEvent) {
     case "user-message": {
       const mentions = !e.via && pendingLocalMentions ? pendingLocalMentions : undefined;
       if (mentions) pendingLocalMentions = null;
-      addUserMessage(e.text, e.via, mentions);
+      addUserMessage(e.text, e.via, mentions, e.enhanced ? { originalText: e.originalText } : undefined);
       placeTeamSurfaceAfterUserMessage();
       break;
     }

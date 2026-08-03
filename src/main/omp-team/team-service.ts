@@ -12,7 +12,7 @@ import type {
   TeamTimelineEntry,
   RemoteVia,
 } from "../../shared/types";
-import { getAgentBridge, onNewSession, whichOmp, type AgentBridge } from "../omp-service";
+import { getAgentBridge, onNewSession, whichOmp, type AgentBridge, type PromptDisplayOptions } from "../omp-service";
 import { currentOmpPath } from "../store-service";
 import { shouldStallTeamLeadEnd } from "../../shared/agent-end";
 import { startWorker, killWorker, killAllWorkers, steerWorker, liveWorkerCount, liveWorkerPids } from "./worker-pool";
@@ -959,12 +959,15 @@ async function beginParallelExecution(): Promise<void> {
 
 // -------------------------------------------------- public actions
 
-interface TeamStartOptions {
+interface TeamStartBase {
   mentions?: string[];
   via?: RemoteVia;
   immediate?: boolean;
   echo?: boolean;
 }
+
+type TeamStartOptions = TeamStartBase &
+  ({ enhanced?: false; originalText?: never } | { enhanced: true; originalText: string });
 
 function startRun(goal: string, options: TeamStartOptions = {}): { ok: boolean; error?: string } {
   const b = bridge!;
@@ -988,6 +991,7 @@ function startRun(goal: string, options: TeamStartOptions = {}): { ok: boolean; 
     pinnedRoles: pinned,
     immediateStart: options.immediate === true,
     ...(options.via ? { originVia: options.via } : {}),
+    ...(options.enhanced ? { promptProvenance: { enhanced: true as const, originalText: options.originalText } } : {}),
     graceUntil: null,
     agents: [],
     slices: [],
@@ -1001,7 +1005,10 @@ function startRun(goal: string, options: TeamStartOptions = {}): { ok: boolean; 
   turnSawContent = false;
   emptyRetries = 0;
   pushState(); // renderer knows this is a team run before the user echo lands
-  if (!b.prompt(routePrompt(trimmed, pinned), options.via, { echo: options.echo, displayText: trimmed })) {
+  const display: PromptDisplayOptions = options.enhanced
+    ? { echo: options.echo, displayText: trimmed, enhanced: true, originalText: options.originalText }
+    : { echo: options.echo, displayText: trimmed };
+  if (!b.prompt(routePrompt(trimmed, pinned), options.via, display)) {
     run = null;
     pushState();
     return { ok: false, error: "failed to reach the agent process" };
@@ -1223,7 +1230,10 @@ function clearRun(): void {
 function restartRun(): { ok: boolean; error?: string } {
   if (!run) return { ok: false, error: "no run to restart" };
   const goal = run.goal;
-  const options: TeamStartOptions = { mentions: run.pinnedRoles, via: run.originVia, immediate: run.immediateStart };
+  const common = { mentions: run.pinnedRoles, via: run.originVia, immediate: run.immediateStart };
+  const options: TeamStartOptions = run.promptProvenance
+    ? { ...common, enhanced: true, originalText: run.promptProvenance.originalText }
+    : common;
   run = null;
   return startRun(goal, options);
 }
@@ -1235,13 +1245,23 @@ export function approveTeamFromRemote(runId: string, by: string): { ok: boolean;
   return approve(by);
 }
 
-export function startTeamFromRemote(input: {
+export type RemoteTeamStart = {
   goal: string;
   mentions?: string[];
   via: RemoteVia;
   echo?: boolean;
-}): { ok: boolean; error?: string } {
-  return startRun(input.goal, { mentions: input.mentions, via: input.via, immediate: true, echo: input.echo });
+} & ({ enhanced?: false; originalText?: never } | { enhanced: true; originalText: string });
+
+export function startTeamFromRemote(input: RemoteTeamStart): { ok: boolean; error?: string } {
+  const common = {
+    mentions: input.mentions,
+    via: input.via,
+    immediate: true as const,
+    echo: input.echo,
+  };
+  return input.enhanced
+    ? startRun(input.goal, { ...common, enhanced: true, originalText: input.originalText })
+    : startRun(input.goal, common);
 }
 
 export function steerTeamFromRemote(text: string): boolean {

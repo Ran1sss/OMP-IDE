@@ -45,12 +45,15 @@ export type UiAnswerResult =
   | { applied: false; already: UiAnswerRecord }
   | { applied: false; already: null };
 
-export interface PromptDisplayOptions {
+interface PromptDisplayBase {
   /** false for orchestration prompts that must never enter the user feed */
   echo?: boolean;
   /** user-facing echo when the model receives a larger internal prompt */
   displayText?: string;
 }
+
+export type PromptDisplayOptions = PromptDisplayBase &
+  ({ enhanced?: false; originalText?: never } | { enhanced: true; originalText: string });
 
 export interface AgentBridge {
   onStatus(cb: (s: OmpStatus) => void): () => void;
@@ -65,7 +68,7 @@ export interface AgentBridge {
   prompt(message: string, via?: { username: string; botName: string; attribution?: string }, display?: PromptDisplayOptions): boolean;
   abort(): boolean;
   newSession(): boolean;
-  restartSession(): Promise<boolean>;
+  restartSession(modelSelector?: string): Promise<boolean>;
   /** first-wins answer to a pending agent question */
   answerUi(id: string, payload: Record<string, unknown>, by: string, answerLabel: string): UiAnswerResult;
   /** raw RPC round-trip to the live omp process (set_model, get_available_models, …) */
@@ -408,8 +411,13 @@ function feed(s: OmpSession, chunk: string) {
   }
 }
 
-async function startSession(wc: WebContents, root: string, customPath: string) {
+async function startSession(wc: WebContents, root: string, customPath: string, modelSelector?: string): Promise<boolean> {
+  lastOwners.set(wc.id, wc);
   const existing = sessions.get(wc.id);
+  if (primaryId === wc.id) {
+    lastActiveModel = null;
+    lastTodoPhases = [];
+  }
   if (existing) {
     existing.intentionalKill = true;
     try {
@@ -425,7 +433,7 @@ async function startSession(wc: WebContents, root: string, customPath: string) {
         state: "unavailable",
         detail: "omp binary not found on PATH",
       } satisfies OmpStatus);
-    return;
+    return false;
   }
 
   if (!wc.isDestroyed()) wc.send("omp:status", { state: "starting" } satisfies OmpStatus);
@@ -433,7 +441,7 @@ async function startSession(wc: WebContents, root: string, customPath: string) {
   // extra env from the models module (provider API keys); see setChildEnvProvider
   let proc: ChildProcessWithoutNullStreams;
   try {
-    proc = spawn(bin, ["--mode", "rpc", "--auto-approve"], {
+    proc = spawn(bin, ["--mode", "rpc", "--auto-approve", ...(modelSelector ? ["--model", modelSelector] : [])], {
       cwd: root,
       windowsHide: true,
       stdio: ["pipe", "pipe", "pipe"],
@@ -445,7 +453,7 @@ async function startSession(wc: WebContents, root: string, customPath: string) {
         state: "unavailable",
         detail: err instanceof Error ? err.message : String(err),
       } satisfies OmpStatus);
-    return;
+    return false;
   }
 
   const s: OmpSession = {
@@ -469,21 +477,27 @@ async function startSession(wc: WebContents, root: string, customPath: string) {
     stderrTail = (stderrTail + chunk).slice(-2000);
   });
   proc.on("error", (err) => {
-    sessions.delete(wc.id);
-    if (!wc.isDestroyed())
-      wc.send("omp:status", { state: "unavailable", detail: err.message } satisfies OmpStatus);
+    if (sessions.get(wc.id) === s) {
+      setStatus(s, { state: "unavailable", detail: err.message });
+      sessions.delete(wc.id);
+      if (primaryId === wc.id) lastActiveModel = null;
+    }
   });
   proc.on("exit", (code) => {
     const current = sessions.get(wc.id);
-    if (current === s) sessions.delete(wc.id);
-    if (!wc.isDestroyed() && !s.intentionalKill) {
-      wc.send("omp:status", {
-        state: "dead",
-        detail: `omp exited with code ${code ?? "?"}${stderrTail ? ` — ${stderrTail.slice(-300)}` : ""}`,
-      } satisfies OmpStatus);
+    if (current === s) {
+      if (!s.intentionalKill) {
+        setStatus(s, {
+          state: "dead",
+          detail: `omp exited with code ${code ?? "?"}${stderrTail ? ` — ${stderrTail.slice(-300)}` : ""}`,
+        });
+      }
+      sessions.delete(wc.id);
+      if (primaryId === wc.id) lastActiveModel = null;
     }
   });
   wc.once("destroyed", () => {
+    lastOwners.delete(wc.id);
     const cur = sessions.get(wc.id);
     if (cur === s) {
       sessions.delete(wc.id);
@@ -493,6 +507,7 @@ async function startSession(wc: WebContents, root: string, customPath: string) {
       } catch {}
     }
   });
+  return true;
 }
 
 // -------------------------------------------------- shared actions (IPC + bridge)
@@ -503,7 +518,15 @@ function doPrompt(
   via?: { username: string; botName: string; attribution?: string },
   display?: PromptDisplayOptions,
 ) {
-  if (display?.echo !== false) emit(s, { kind: "user-message", text: display?.displayText ?? message, via });
+  if (display?.echo !== false) {
+    const common = { kind: "user-message" as const, text: display?.displayText ?? message, via };
+    emit(
+      s,
+      display?.enhanced
+        ? { ...common, enhanced: true, originalText: display.originalText }
+        : common,
+    );
+  }
   const streaming = s.status.state === "thinking" || s.status.state === "tool";
   sendCmd(s, {
     type: "prompt",
@@ -581,13 +604,55 @@ export function getAgentBridge(): AgentBridge {
       doNewSession(s);
       return true;
     },
-    async restartSession() {
+    async restartSession(modelSelector) {
       const s = primarySession();
-      const wc = s?.owner;
-      const root = s?.root ?? (primaryId !== null ? lastRoot.get(primaryId) : undefined);
+      const ownerId = s?.owner.id ?? primaryId;
+      const wc = s?.owner ?? (ownerId !== null ? lastOwners.get(ownerId) : undefined);
+      const root = s?.root ?? (ownerId !== null ? lastRoot.get(ownerId) : undefined);
       if (!wc || wc.isDestroyed() || !root) return false;
-      await startSession(wc, root, currentOmpPath());
-      return true;
+
+      const { promise, resolve } = Promise.withResolvers<boolean>();
+      let settled = false;
+      let statusReady = false;
+      let modelReady = modelSelector === undefined;
+      let timer: NodeJS.Timeout | null = null;
+      const finish = (ok: boolean) => {
+        if (settled) return;
+        settled = true;
+        if (timer) clearTimeout(timer);
+        stopStatus();
+        stopModel();
+        resolve(ok);
+      };
+      const checkReady = () => {
+        if (statusReady && modelReady) finish(true);
+      };
+      const stopStatus = (() => {
+        const listener = (status: OmpStatus) => {
+          if (status.state === "idle") {
+            statusReady = true;
+            checkReady();
+          } else if (status.state === "dead" || status.state === "unavailable") {
+            finish(false);
+          }
+        };
+        bridgeStatusListeners.add(listener);
+        return () => bridgeStatusListeners.delete(listener);
+      })();
+      const stopModel = (() => {
+        const listener = (model: { provider: string; id: string }) => {
+          if (`${model.provider}/${model.id}` === modelSelector) {
+            modelReady = true;
+            checkReady();
+          }
+        };
+        bridgeModelListeners.add(listener);
+        return () => bridgeModelListeners.delete(listener);
+      })();
+      timer = setTimeout(() => finish(false), 20_000);
+      const started = await startSession(wc, root, currentOmpPath(), modelSelector);
+      if (!started) finish(false);
+      return promise;
     },
     answerUi: applyUiAnswer,
     request(cmd, timeoutMs = 20_000) {
@@ -619,6 +684,7 @@ export function getAgentBridge(): AgentBridge {
 
 /** last workspace root per window — survives session death so restart can recover */
 const lastRoot = new Map<number, string>();
+const lastOwners = new Map<number, WebContents>();
 
 export function registerOmpHandlers(ipc: IpcMain) {
   ipc.handle("omp:start", async (e, root: string) => {

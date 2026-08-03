@@ -69,6 +69,13 @@ export function writeRole(role: ModelRole, selector: string): void {
   saveDoc(CONFIG_YML, doc);
 }
 
+/** Adds a selector to OMP's allowlist without changing any persisted role. */
+export function enableModelSelector(selector: string): void {
+  const doc = loadDoc(CONFIG_YML);
+  ensureEnabledModel(doc, selector);
+  saveDoc(CONFIG_YML, doc);
+}
+
 /**
  * config.yml `enabledModels` is an allowlist when non-empty: models absent
  * from it are invisible to the live session. Any selector we assign must be
